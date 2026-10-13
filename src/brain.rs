@@ -60,6 +60,14 @@ pub struct Cfg {
     pub long_trials: usize,
     /// Sources with more states than this get trial extensions.
     pub long_trial_states: usize,
+    /// Let real bind and chunk pools double when most evictions remove recently used cells.
+    pub grow_pools: bool,
+    /// Largest size a grown pool may reach.
+    pub max_pool: usize,
+    /// Total cells all grown pools may hold together.
+    pub pool_budget: usize,
+    /// An eviction of a cell used within this many ticks counts as pressure.
+    pub young_age: u64,
 }
 
 impl Default for Cfg {
@@ -96,6 +104,10 @@ impl Default for Cfg {
             conjoin_words: false,
             long_trials: 1,
             long_trial_states: 4096,
+            grow_pools: false,
+            max_pool: 1 << 17,
+            pool_budget: 1 << 20,
+            young_age: 50_000,
         }
     }
 }
@@ -138,7 +150,7 @@ impl BindReal {
         if let Some(&c) = self.cache.get(&key) {
             if self.pool.alive[c] && self.code_key[c] == Some(key) {
                 // the cell still holds this exact pair: a full match, as match_input would find
-                self.pool.last[c] = t as u64;
+                self.pool.touch(c, t as u64);
                 return c as i32;
             }
         }
@@ -221,7 +233,7 @@ impl ChunkReal {
         };
         if let Some(&c) = self.cache.get(&key) {
             if self.pool.alive[c] && self.code_key[c] == Some(key) {
-                self.pool.last[c] = t as u64;
+                self.pool.touch(c, t as u64);
                 return c as i32;
             }
         }
@@ -818,7 +830,12 @@ impl Brain {
         let t = self.t;
         let name = format!("({}*{})", self.nodes[x].name, self.nodes[y].name);
         if self.cfg.real {
-            let mut b = BindReal::new(self.cfg.bind_cap, self.cfg.hebb);
+            let distinct: HashSet<(i32, i32)> = ((t + 1).saturating_sub(replay.max(1))..=t)
+                .map(|tt| (self.nodes[x].h[tt], self.nodes[y].h[tt]))
+                .filter(|&(a, b)| a >= 0 && b >= 0)
+                .collect();
+            let cap = self.sized_cap(self.cfg.bind_cap, distinct.len());
+            let mut b = BindReal::new(cap, self.cfg.hebb);
             let mut h = Hist::new();
             let lo = (t + 1).saturating_sub(replay);
             if replay > 0 {
@@ -1411,6 +1428,72 @@ impl Brain {
         self.slab[e].src
     }
 
+    /// Starting size for a new real pool: the default, or, when pools may grow, the next power of two
+    /// above 1.5 times the distinct inputs seen in its replay window (within the maximum and the budget).
+    fn sized_cap(&self, default: usize, distinct: usize) -> usize {
+        if !self.cfg.grow_pools {
+            return default;
+        }
+        let total: usize = self
+            .derived
+            .iter()
+            .map(|&n| match &self.nodes[n].kind {
+                Kind::BindReal(b) => b.pool.cap,
+                Kind::ChunkReal(k, _) => k.pool.cap,
+                _ => 0,
+            })
+            .sum();
+        let room = self.cfg.pool_budget.saturating_sub(total);
+        (distinct * 3 / 2)
+            .next_power_of_two()
+            .clamp(default, self.cfg.max_pool)
+            .min(room.max(default))
+    }
+
+    /// Double every real pool whose evictions mostly remove recently used cells.
+    fn grow_pools(&mut self) {
+        let t = self.t;
+        let total: usize = self
+            .derived
+            .iter()
+            .map(|&n| match &self.nodes[n].kind {
+                Kind::BindReal(b) => b.pool.cap,
+                Kind::ChunkReal(k, _) => k.pool.cap,
+                _ => 0,
+            })
+            .sum();
+        let mut room = self.cfg.pool_budget.saturating_sub(total);
+        for n in self.derived.clone() {
+            let (max_pool, ya) = (self.cfg.max_pool, self.cfg.young_age);
+            let pool = match &mut self.nodes[n].kind {
+                Kind::BindReal(b) => &mut b.pool,
+                Kind::ChunkReal(k, _) => &mut k.pool,
+                _ => continue,
+            };
+            pool.young_age = ya;
+            let (ev, young) = pool.take_pressure();
+            let cap = pool.cap;
+            if ev >= 100 && young * 2 > ev && cap < max_pool && cap <= room {
+                let new = (cap * 2).min(max_pool);
+                pool.grow(new);
+                match &mut self.nodes[n].kind {
+                    Kind::BindReal(b) => b.code_key.resize(new, None),
+                    Kind::ChunkReal(k, _) => k.code_key.resize(new, None),
+                    _ => {}
+                }
+                room -= new - cap;
+                let name = self.nodes[n].name.clone();
+                self.events.push(Event {
+                    t,
+                    kind: "grow".into(),
+                    a: name,
+                    b: Some(format!("{cap}->{new}, {young}/{ev} young evictions")),
+                    v: None,
+                });
+            }
+        }
+    }
+
     /// Free a discarded edge's writer-mask rows, unless a live distill still reads them.
     fn release_edge(&mut self, e: usize) {
         self.trial_t0.remove(&e);
@@ -1527,6 +1610,9 @@ impl Brain {
                 self.slab[e].reset_stats();
                 self.kept_since.insert(k, t);
             }
+        }
+        if t % 10000 == 9999 && c.grow_pools {
+            self.grow_pools();
         }
         if t % 10000 == 9999 {
             for i in self.derived.clone() {
@@ -1779,7 +1865,15 @@ impl Brain {
                 let m = sb.iter().copied().max().unwrap_or(0) + 1;
                 let pair: Vec<i64> = sa.iter().zip(sb).map(|(x, z)| x * m + z).collect();
                 let (m0, nd) = mi_yn(&pair);
-                if nd > w / 4 || (self.cfg.real && nd > 2 * self.cfg.bind_cap) {
+                if nd > w / 4
+                    || (self.cfg.real
+                        && nd
+                            > 2 * (if self.cfg.grow_pools {
+                                self.cfg.max_pool
+                            } else {
+                                self.cfg.bind_cap
+                            }))
+                {
                     continue; // not enough data per context, or far beyond capacity
                 }
                 let j = m0 - mi_yn(&roll(&pair, sh)).0;
@@ -1852,8 +1946,32 @@ impl Brain {
 
     // ---------------------------------------------------------------- run and report
     pub fn run(&mut self) {
+        let every: usize = std::env::var("EVOLVEHD_PROGRESS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let t0 = std::time::Instant::now();
         while self.t < self.tt {
             self.tick();
+            if every > 0 && self.t % every == 0 {
+                let cells: usize = self
+                    .derived
+                    .iter()
+                    .map(|&n| match &self.nodes[n].kind {
+                        Kind::BindReal(b) => b.pool.cap,
+                        Kind::ChunkReal(k, _) => k.pool.cap,
+                        _ => 0,
+                    })
+                    .sum();
+                eprintln!(
+                    "t={} bpb(last {every})={:.3} kept={} cells={} secs={:.0}",
+                    self.t,
+                    self.bpb(self.t - every, self.t),
+                    self.kept.len(),
+                    cells,
+                    t0.elapsed().as_secs_f64()
+                );
+            }
         }
     }
 
@@ -2215,14 +2333,21 @@ impl Brain {
         let name = format!("chunk(z={z})");
         let mut h = Hist::new();
         let kind = if self.cfg.real {
-            let mut pool = Pool::new(self.cfg.chunk_cap, 48, 40);
+            let w = (t + 1).min(20000);
+            let distinct: HashSet<i64> = self
+                .virtual_chunk(z, w)
+                .into_iter()
+                .filter(|&v| v >= 0)
+                .collect();
+            let cap = self.sized_cap(self.cfg.chunk_cap, distinct.len());
+            let mut pool = Pool::new(cap, 48, 40);
             pool.hebb = self.cfg.hebb;
             let start = bits::rand_code(&mut self.rng);
             let mut k = ChunkReal {
                 pool,
                 start,
                 cache: HashMap::new(),
-                code_key: vec![None; self.cfg.chunk_cap],
+                code_key: vec![None; cap],
             };
             let mut prev = -1;
             for tt in (t + 1).saturating_sub(20000)..=t {

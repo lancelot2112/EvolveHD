@@ -4,8 +4,16 @@
 //! input's bits. If the best overlap is below `th_new`, a cell is recruited (a free one, else the least
 //! recently used) with a mask of K bits sampled from the input. Otherwise, on a partial match, the winner
 //! swaps one mask bit toward the input (Hebbian), with probability `hebb`.
+//!
+//! Matching uses an inverted index (bit -> cells whose mask holds it), and eviction an ordered set of
+//! (last use, cell), so both stay cheap at tens of thousands of cells. Winners are exactly those of a
+//! linear scan: the highest overlap, lowest index on ties; the least recently used cell, lowest index on ties.
+//!
+//! A pool can grow: it records how long ago each evicted cell was last used. When most evictions remove
+//! recently used cells, its working set does not fit, and the owner may call [`Pool::grow`].
 use crate::bits::{self, Bits, Code, D, ZERO};
 use crate::rng::Rng;
+use std::collections::BTreeSet;
 
 pub struct Pool {
     pub cap: usize,
@@ -20,6 +28,16 @@ pub struct Pool {
     pub born: Vec<u64>,
     pub recruits: u64,
     pub evictions: u64,
+    /// An eviction of a cell used within this many ticks counts as pressure to grow.
+    pub young_age: u64,
+    /// Evictions and young evictions since the last [`Pool::take_pressure`].
+    ev_n: u64,
+    ev_young: u64,
+    post: Vec<Vec<u32>>,
+    lru: BTreeSet<(u64, u32)>,
+    free: BTreeSet<u32>,
+    count: Vec<u16>,
+    touched: Vec<u32>,
 }
 
 /// Result of one match.
@@ -44,56 +62,152 @@ impl Pool {
             born: vec![0; cap],
             recruits: 0,
             evictions: 0,
+            young_age: 50_000,
+            ev_n: 0,
+            ev_young: 0,
+            post: vec![Vec::new(); D],
+            lru: BTreeSet::new(),
+            free: (0..cap as u32).collect(),
+            count: vec![0; cap],
+            touched: Vec::new(),
         }
     }
 
     pub fn n_alive(&self) -> usize {
-        self.alive.iter().filter(|&&a| a).count()
+        self.cap - self.free.len()
+    }
+
+    /// Add cells, up to `new_cap` in all. They start free.
+    pub fn grow(&mut self, new_cap: usize) {
+        if new_cap <= self.cap {
+            return;
+        }
+        let n = new_cap;
+        self.masks.resize(n, ZERO);
+        self.alive.resize(n, false);
+        self.codes.resize(n, [0; bits::CK]);
+        self.gen.resize(n, 0);
+        self.last.resize(n, 0);
+        self.born.resize(n, 0);
+        self.count.resize(n, 0);
+        self.free.extend(self.cap as u32..n as u32);
+        self.cap = n;
+    }
+
+    /// (evictions, evictions of cells used within `young_age` ticks) since the last call.
+    pub fn take_pressure(&mut self) -> (u64, u64) {
+        let r = (self.ev_n, self.ev_young);
+        self.ev_n = 0;
+        self.ev_young = 0;
+        r
+    }
+
+    /// Mark cell c used at tick t.
+    pub fn touch(&mut self, c: usize, t: u64) {
+        if self.alive[c] {
+            self.lru.remove(&(self.last[c], c as u32));
+            self.lru.insert((t, c as u32));
+        }
+        self.last[c] = t;
+    }
+
+    fn set_bit(&mut self, c: usize, b: usize) {
+        if !bits::get(&self.masks[c], b) {
+            bits::set(&mut self.masks[c], b);
+            self.post[b].push(c as u32);
+        }
+    }
+
+    fn clear_bit(&mut self, c: usize, b: usize) {
+        if bits::get(&self.masks[c], b) {
+            bits::clear(&mut self.masks[c], b);
+            let p = &mut self.post[b];
+            if let Some(i) = p.iter().position(|&x| x == c as u32) {
+                p.swap_remove(i);
+            }
+        }
+    }
+
+    fn clear_mask(&mut self, c: usize) {
+        for b in bits::positions(&self.masks[c]) {
+            self.clear_bit(c, b as usize);
+        }
+    }
+
+    fn retire(&mut self, c: usize) {
+        self.clear_mask(c);
+        if self.alive[c] {
+            self.lru.remove(&(self.last[c], c as u32));
+        }
+        self.alive[c] = false;
+        self.free.insert(c as u32);
     }
 
     /// Give cell c a fresh output code and bump its generation (edges reset their masks for it).
     pub fn new_code(&mut self, c: usize, rng: &mut Rng) {
         self.codes[c] = bits::rand_code(rng);
         self.gen[c] += 1;
+        if !self.alive[c] {
+            self.free.remove(&(c as u32));
+            self.lru.insert((self.last[c], c as u32));
+        }
         self.alive[c] = true;
     }
 
     /// Match an input given as its set-bit positions (`idx`) and as a bit set (`inp`).
     pub fn match_input(&mut self, idx: &[u16], inp: &Bits, t: u64, rng: &mut Rng) -> Match {
+        // overlap counts for every cell sharing a bit with the input
+        for &b in idx {
+            for &c in &self.post[b as usize] {
+                if self.count[c as usize] == 0 {
+                    self.touched.push(c);
+                }
+                self.count[c as usize] += 1;
+            }
+        }
         let mut best: i64 = -1;
         let mut b = 0usize;
-        for c in 0..self.cap {
-            if !self.alive[c] {
-                continue;
-            }
-            let ov = bits::and_count(&self.masks[c], inp) as i64;
-            if ov > best {
+        for &c in &self.touched {
+            let ov = self.count[c as usize] as i64;
+            if ov > best || (ov == best && (c as usize) < b) {
                 best = ov;
-                b = c;
+                b = c as usize;
             }
+        }
+        for &c in &self.touched {
+            self.count[c as usize] = 0;
+        }
+        self.touched.clear();
+        if best < 0 && self.n_alive() > 0 {
+            best = 0; // a live cell with no overlap; below any recruit bar
         }
         let mut recruited = false;
         let mut overlap = best.max(0) as u32;
         if best < self.th_new as i64 {
-            match self.alive.iter().position(|&a| !a) {
-                Some(f) => b = f,
+            match self.free.iter().next() {
+                Some(&f) => b = f as usize,
                 None => {
-                    b = (0..self.cap).min_by_key(|&c| self.last[c]).unwrap();
+                    let &(lt, c) = self.lru.iter().next().unwrap();
+                    b = c as usize;
                     self.evictions += 1;
+                    self.ev_n += 1;
+                    if t.saturating_sub(lt) < self.young_age {
+                        self.ev_young += 1;
+                    }
+                    self.retire(b);
                 }
             }
-            let m = &mut self.masks[b];
-            *m = ZERO;
+            self.clear_mask(b);
             for &i in rng.sample(idx, (self.k as usize).min(idx.len())).iter() {
-                bits::set(m, i as usize);
+                self.set_bit(b, i as usize);
             }
-            overlap = bits::count(m);
+            overlap = bits::count(&self.masks[b]);
             self.new_code(b, rng);
             self.born[b] = t;
             self.recruits += 1;
             recruited = true;
         } else if best < self.k as i64 && (self.hebb >= 1.0 || rng.f64() < self.hebb) {
-            let m = &mut self.masks[b];
+            let m = &self.masks[b];
             let add: Vec<u16> = idx
                 .iter()
                 .copied()
@@ -108,11 +222,13 @@ impl Pool {
                 }
             }
             if !add.is_empty() && !rem.is_empty() {
-                bits::clear(m, rem[rng.below(rem.len())] as usize);
-                bits::set(m, add[rng.below(add.len())] as usize);
+                let r = rem[rng.below(rem.len())] as usize;
+                let a = add[rng.below(add.len())] as usize;
+                self.clear_bit(b, r);
+                self.set_bit(b, a);
             }
         }
-        self.last[b] = t;
+        self.touch(b, t);
         Match {
             cell: b,
             recruited,
@@ -136,8 +252,7 @@ impl Pool {
                 }
                 if bits::and_count(&self.masks[i], &self.masks[j]) >= thr {
                     let young = if self.born[j] >= self.born[i] { j } else { i };
-                    self.alive[young] = false;
-                    self.masks[young] = ZERO;
+                    self.retire(young);
                     gone += 1;
                 }
             }
@@ -175,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn lru_eviction() {
+    fn lru_eviction_and_pressure() {
         let mut rng = Rng::new(4);
         let mut p = Pool::new(2, 24, 10);
         let codes: Vec<Code> = (0..3).map(|_| bits::rand_code(&mut rng)).collect();
@@ -184,5 +299,42 @@ mod tests {
         }
         assert_eq!(p.evictions, 1);
         assert_eq!(p.recruits, 3);
+        assert_eq!(p.take_pressure(), (1, 1));
+        // the first code was evicted (least recently used): it must be recruited again
+        let m = p.match_input(&codes[0], &bits::from_positions(&codes[0]), 3, &mut rng);
+        assert!(m.recruited);
+        p.grow(4);
+        let m = p.match_input(&codes[1], &bits::from_positions(&codes[1]), 4, &mut rng);
+        assert!(
+            m.recruited && m.cell >= 2,
+            "grown cells are used before evicting"
+        );
+    }
+
+    /// The index must pick the same winner as a linear scan.
+    #[test]
+    fn index_matches_linear_scan() {
+        let mut rng = Rng::new(9);
+        let mut p = Pool::new(64, 24, 10);
+        let codes: Vec<Code> = (0..120).map(|_| bits::rand_code(&mut rng)).collect();
+        for t in 0..3000u64 {
+            let c = &codes[rng.below(codes.len())];
+            // a noisy copy: drop some bits
+            let keep: Vec<u16> = c.iter().copied().filter(|_| rng.f64() > 0.2).collect();
+            let inp = bits::from_positions(&keep);
+            let mut lin: (i64, usize) = (-1, 0);
+            for cell in 0..p.cap {
+                if p.alive[cell] {
+                    let ov = bits::and_count(&p.masks[cell], &inp) as i64;
+                    if ov > lin.0 {
+                        lin = (ov, cell);
+                    }
+                }
+            }
+            let m = p.match_input(&keep, &inp, t, &mut rng);
+            if lin.0 >= p.th_new as i64 {
+                assert_eq!(m.cell, lin.1);
+            }
+        }
     }
 }

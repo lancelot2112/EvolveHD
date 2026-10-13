@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! evolvehd text  --data corpus/bookA.bin,corpus/bookB.bin [--seed 0] [--symbolic] [--oracle 4] [--no-grow]
-//!                [--noise 0.25,4] [--merge 8] [--hebb 0.02] [--drop-random] [--words] [--run-window 200000] [--classes] [--conjoin-words] [--long-trials 5] [--long-trial-states 4096] [--chunk-cap 4096]
+//!                [--noise 0.25,4] [--merge 8] [--hebb 0.02] [--drop-random] [--words] [--run-window 200000] [--classes] [--conjoin-words] [--long-trials 5] [--long-trial-states 4096]
+//!                [--grow-pools] [--max-pool 131072] [--pool-budget 1048576] [--young-age 50000] [--chunk-cap 4096]
 //!                [--out run.json]
 //! evolvehd ngram --data corpus/bookA.bin,corpus/bookB.bin [--order 4]
 //! evolvehd table [--corpus corpus] [--out-dir runs]   # the standard text table, jobs run in parallel
@@ -55,6 +56,16 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.words = flag(args, "--words");
     c.classes = flag(args, "--classes");
     c.conjoin_words = flag(args, "--conjoin-words");
+    c.grow_pools = flag(args, "--grow-pools");
+    if let Some(x) = arg(args, "--max-pool") {
+        c.max_pool = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--pool-budget") {
+        c.pool_budget = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--young-age") {
+        c.young_age = x.parse().unwrap();
+    }
     if let Some(x) = arg(args, "--long-trial-states") {
         c.long_trial_states = x.parse().unwrap();
     }
