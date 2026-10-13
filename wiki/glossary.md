@@ -21,6 +21,7 @@ Each term links to the page that explains it. For the ideas behind the terms, st
 | [**Event-gated hold**](concepts/time-delays-and-holds.md) | Gate node: latch a value when a rare event fires and keep it until the next one |
 | [**Generation**](concepts/sparse-codes.md) | Per-cell counter bumped when a cell is re-recruited, so edges reset their masks for it |
 | [**Granule layer**](concepts/growth-operators.md#granule-layer) | Correct primitive's expansion: one cell per joint value of every k-subset of sources |
+| [**Horizon**](concepts/matcher-pools.md#growing-pools) | How recently an evicted cell must have been used for its eviction to count as pressure to grow the pool; in effect, the pool's memory span |
 | [**Hysteresis**](concepts/shadow-trials.md) | Different bars for keeping and pruning an edge, so it doesn't flip back and forth |
 | [**k-WTA**](concepts/matcher-pools.md) | k-winners-take-all; here usually k = 1 |
 | [**Matcher**](engine-model.md) | Fires when the popcount of its masked window of history reaches a threshold |

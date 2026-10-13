@@ -68,6 +68,7 @@ Seven experiments built and tested a grammar that grows networks inline:
 - [Words](experiments/12-words.md): cutting the stream at surprising bytes gives a chunk context that pays (2.55 bits per byte with real pools). The chunks are morph-like runs, not words, and a previous-word context is invisible at this data size.
 - [Word pairs](experiments/13-word-pairs.md): with running count screens, the previous word becomes visible. A conjoin of the two word-pieces is kept with exact nodes, after trials of many-state sources were allowed to run longer.
 - [The whole corpus](experiments/14-full-corpus.md): 11.7M bytes in 44 minutes. Real pools stay 0.4–0.6 bits per byte behind order-4 counts, so capacity is now the limit.
+- [Growing pools](experiments/15-growing-pools.md): pools double when they evict recently used cells. Real pools reach exact-node quality, and over the whole corpus 2.125 bits per byte against 2.107 for order-4 counts.
 - The [growth grammar spec](https://claude.ai/code/artifact/d37e3fa6-5a32-45a9-a6cc-88fcb7fc4d09) was written, and the text experiment was ported to Rust in this repo; it reproduces the Python table about 10 times faster.
 
 The design rules these phases forced are collected in [lessons](lessons.md); what remains is in [open questions](open-questions.md).

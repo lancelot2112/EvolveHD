@@ -4,11 +4,13 @@ Ordered roughly by how much they block the next step.
 
 ## Grammar and representation
 
-- [ ] **Words with real pools.** With exact nodes, a conjoin of the previous and current chunk is kept and cuts 0.05–0.09 bits per byte. With real pools it gains nothing; the 4,096-cell chunk pool is evicted about every 4 bytes, but the real conjoin never had an extended trial, so this is not yet proven ([13](experiments/13-word-pairs.md)). Pools that grow on demand, or a smaller code for word identity?
+- [x] **Words with real pools.** With fixed pools the word-pair conjoin gained nothing ([13](experiments/13-word-pairs.md)); with growing pools it is kept and held for 11.7M bytes ([15](experiments/15-growing-pools.md)). Pools that grow on demand, or a smaller code for word identity?
 - [ ] **Word classes.** Classes of chunks by what follows them added nothing beyond the current chunk ([13](experiments/13-word-pairs.md)). What grouping keeps what the previous word tells about the next? Intermediate targets, where nodes predict their own next state, may supply it.
 - [ ] **Compress for text.** Distilling a bind into 32 clusters of predicted successors never paid. The chunk is the first text variable kept on its own merits ([12](experiments/12-words.md)); is it the right thing to compress?
-- [ ] **Readout gap.** Hand-wired exact contexts trail Witten-Bell counts of the same order by about 0.22 bits per byte. Better writer rule, or backoff between context orders?
-- [ ] **Capacity (now the main limit).** 1,024-cell bind pools cost 0.28 bits per byte against exact tables on 400k bytes. Over 11.7M bytes the gap to order-4 counts stays at 0.4–0.6, and pools are evicted up to once every 3 bytes ([14](experiments/14-full-corpus.md)). Grow a parallel pool when recently used cells are being evicted?
+- [ ] **Readout gap.** Hand-wired exact contexts trail Witten-Bell counts of the same order by about 0.22 bits per byte. On long prose this is now the main remaining gap: even exact nodes trail order-4 counts by 0.19 on Austen ([15](experiments/15-growing-pools.md)). Better writer rule, or backoff between context orders?
+- [x] **Capacity.** Fixed pools stayed 0.45 bits per byte behind order-4 counts over the whole corpus ([14](experiments/14-full-corpus.md)). Pools that grow under eviction pressure closed it to 0.02 ([15](experiments/15-growing-pools.md)).
+- [ ] **Memory horizon.** A growing pool keeps only contexts that recur within its horizon. On Austen, 400k ticks matched exact nodes where 50k did not, at twice the time. Should the horizon adapt, for example to how far back screens still find information?
+- [ ] **Learning speed at size.** Each new source cell needs its own writer-mask rows; the grown full-corpus run took 2 h 14 min against 44 min. Cheaper rows, or rows shared by similar cells?
 - [ ] **Noise.** Where does duplicate merging live (a sleep phase)? And what overlap rule generalises beyond bytes? The Rust port does 0.2–0.6 bits worse than Python on book B under noise ([reference code](reference-code.md#validation-bits-per-byte-seed-0-unless-noted)), which suggests noisy runs are sensitive to the writer-mask drop rule.
 
 ## Scale and build

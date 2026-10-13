@@ -1,6 +1,6 @@
 # 14 · The whole corpus (2026-10-13)
 
-*[All experiments](README.md)* · [← 13](13-word-pairs.md)
+*[All experiments](README.md)* · [← 13](13-word-pairs.md) · [15 →](15-growing-pools.md)
 
 **Concepts:** [Capacity and budget](../concepts/capacity-and-budget.md) · [Growth operators](../concepts/growth-operators.md#distill) · [Screens](../concepts/screens.md#running-count-screen) · [Matcher pools](../concepts/matcher-pools.md)
 
@@ -53,6 +53,9 @@ What was grown, over the whole run:
 5. **The engine holds up over a long run.** 11.7M bytes, 44 minutes, bounded memory, no manual intervention.
 
 ## What this says to do next
+
+*Done in [15](15-growing-pools.md): with growing pools the whole-stream gap to order-4 counts fell from 0.45 to 0.02 bits per byte.*
+
 
 Capacity, not the grammar, is now the limit. With exact nodes, the same moves reach word pairs ([13](13-word-pairs.md)). With real pools, every word-level structure is evicted before it can be learned. The next experiment should let pools grow on demand: a parallel pool when evictions of recently used cells pass a threshold. That is the [capacity question](../open-questions.md) at the top of the list.
 

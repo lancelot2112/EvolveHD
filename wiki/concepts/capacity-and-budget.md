@@ -19,6 +19,15 @@ On text, a 1024-cell real bind pool can't hold 3-byte contexts. The data rule re
 
 A 4,096-cell chunk pool cannot hold English word prefixes: it was evicted 101,000 times in 400k bytes. A conjoin over it (1,024 cells) was evicted 37,000 times and gained nothing with real pools, while the same move with exact nodes cut 0.05–0.09 bits per byte. The real conjoin never had an extended trial, so capacity is the likely cause rather than a proven one ([13](../experiments/13-word-pairs.md)). Word-level structure needs pools that grow with demand, or a cheaper code for word identity.
 
+## Growing on demand
+
+Pools that [double when evictions remove recently used cells](matcher-pools.md#growing-pools) close the gap ([15](../experiments/15-growing-pools.md)):
+- On two books, plain growth reached 2.331 bits per byte against 2.321 for exact nodes (fixed pools: 2.621).
+- The word-pair conjoin worked with real pools: 2.206 and 2.243 against exact 2.200.
+- On 2M bytes of Austen, a 400k-tick horizon matched exact nodes (1.977 against 1.970 on the last 500k).
+
+The horizon decides what is worth memory: a context that does not recur within it is allowed to be forgotten. Size costs learning time, because each new cell needs its own writer-mask rows.
+
 ## Capacity triggers growth elsewhere
 
 When sleep ends near the cap (38 of 40 cells), that is the trigger for growing a parallel vector rather than splitting one. Splitting was rejected because it fragments the readers' windows ([03](../experiments/03-grow-sleep.md), [history](../history.md)).
@@ -35,6 +44,6 @@ When sleep ends near the cap (38 of 40 cells), that is the trigger for growing a
 
 ## Evidence in
 
-[03 · grow sleep](../experiments/03-grow-sleep.md) · [11 · real text](../experiments/11-real-text.md) · [13 · word pairs](../experiments/13-word-pairs.md)
+[03 · grow sleep](../experiments/03-grow-sleep.md) · [11 · real text](../experiments/11-real-text.md) · [13 · word pairs](../experiments/13-word-pairs.md) · [15 · growing pools](../experiments/15-growing-pools.md)
 
 *[All concepts](README.md) · [Wiki home](../README.md)*

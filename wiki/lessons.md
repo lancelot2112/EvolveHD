@@ -36,6 +36,7 @@ These are the design rules the experiments forced, grouped by layer. Each links 
 - **Screen big contexts on held-out data.** A shift-null MI screen scored chunks at −0.5 bits when they add 0.37; held-out log-loss gain is honest ([12](experiments/12-words.md)).
 - **Measure big contexts against the right baseline, with enough data.** The previous word looked worthless in a 15k-tick window and weak beyond the current byte, but beyond the current chunk it carried 0.21 bits and kept growing ([13](experiments/13-word-pairs.md)).
 - **Give slow learners a long enough trial.** Writer masks need many writes per state; a 31,000-state bind showed at most 0.0045 bits in normal trials and was kept with an extension ([13](experiments/13-word-pairs.md)).
+- **Let capacity follow pressure, and start at the size the evidence says.** Pools that double when they evict recently used cells reached exact-node quality; a bind that had to grow from 1,024 cells while on trial lost its trial ([15](experiments/15-growing-pools.md)).
 - **Inline beats blind population search for wiring.** Use populations, if at all, for the grammar's own thresholds ([07](experiments/07-graph-growth.md)).
 
 ## Attention and time
