@@ -67,6 +67,8 @@ pub struct Edge {
     pub sq: f64,
     pub n: u64,
     prob: [f64; LEVELS],
+    /// Drop the lowest-numbered eligible bits (the Python reference's rule) instead of random ones.
+    pub drop_lowest: bool,
 }
 
 impl Edge {
@@ -86,6 +88,7 @@ impl Edge {
             sq: 0.0,
             n: 0,
             prob,
+            drop_lowest: false,
         }
     }
 
@@ -206,12 +209,21 @@ impl Edge {
             }
             // bits to drop: set in the mask, not in the target code; sampled without replacement
             let mut ra: Vec<u16> = Vec::with_capacity(w);
-            let mut tries = 0;
-            while ra.len() < add.len() && tries < 4 * w + 8 {
-                tries += 1;
-                let b = rng.below(D) as u16;
-                if bits::get(m, b as usize) && !bits::get(tgt, b as usize) && !ra.contains(&b) {
-                    ra.push(b);
+            if self.drop_lowest {
+                // Python reference rule: 4w+8 draws, keep eligible, sort, take the lowest
+                let mut c: Vec<u16> = (0..4 * w + 8).map(|_| rng.below(D) as u16).filter(|&b| bits::get(m, b as usize) && !bits::get(tgt, b as usize)).collect();
+                c.sort_unstable();
+                c.dedup();
+                c.truncate(add.len());
+                ra = c;
+            } else {
+                let mut tries = 0;
+                while ra.len() < add.len() && tries < 4 * w + 8 {
+                    tries += 1;
+                    let b = rng.below(D) as u16;
+                    if bits::get(m, b as usize) && !bits::get(tgt, b as usize) && !ra.contains(&b) {
+                        ra.push(b);
+                    }
                 }
             }
             add.truncate(ra.len());

@@ -43,6 +43,8 @@ pub struct Cfg {
     pub eps: f64,
     pub bind_cap: usize,
     pub hebb: f64,
+    /// Writer masks drop their lowest-numbered eligible bits, as the Python reference did.
+    pub drop_lowest: bool,
 }
 
 impl Default for Cfg {
@@ -71,6 +73,7 @@ impl Default for Cfg {
             eps: 0.002,
             bind_cap: 1024,
             hebb: 1.0,
+            drop_lowest: true,
         }
     }
 }
@@ -343,10 +346,17 @@ impl Brain {
             merged: 0,
             prof: [0.0; 5],
         };
+        b.slab[0].drop_lowest = cfg.drop_lowest;
         if cfg.oracle > 0 {
             b.oracle(cfg.oracle);
         }
         b
+    }
+
+    fn mk_edge(&self, src: usize, beta: f64) -> Edge {
+        let mut e = Edge::new(src, beta);
+        e.drop_lowest = self.cfg.drop_lowest;
+        e
     }
 
     // ---------------------------------------------------------------- node helpers
@@ -524,7 +534,7 @@ impl Brain {
             let nd = self.make_bind(prev, taps[&k], 0);
             let name = nd.name.clone();
             let i = self.push_node(nd);
-            self.slab.push(Edge::new(i, 0.0));
+            self.slab.push(self.mk_edge(i, 0.0));
             self.kept.push(self.slab.len() - 1);
             self.kept_since.insert(name, 0);
             prev = i;
@@ -1124,7 +1134,7 @@ impl Brain {
         cands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then_with(|| b.1.cmp(&a.1)));
         for (_, k) in cands.into_iter().take(free) {
             let n = self.live(&k).unwrap();
-            self.slab.push(Edge::new(n, 0.0));
+            self.slab.push(self.mk_edge(n, 0.0));
             let e = self.slab.len() - 1;
             self.trials.push(e);
             self.trial_t0.insert(e, t);

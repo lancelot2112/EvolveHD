@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! evolvehd text  --data corpus/bookA.bin,corpus/bookB.bin [--seed 0] [--symbolic] [--oracle 4] [--no-grow]
-//!                [--noise 0.25,4] [--merge 8] [--hebb 0.02] [--out run.json]
+//!                [--noise 0.25,4] [--merge 8] [--hebb 0.02] [--drop-random] [--out run.json]
 //! evolvehd ngram --data corpus/bookA.bin,corpus/bookB.bin [--order 4]
 //! evolvehd table [--corpus corpus] [--out-dir runs]   # the standard text table, jobs run in parallel
 //! ```
@@ -50,6 +50,7 @@ fn cfg_from(args: &[String]) -> Cfg {
     if let Some(m) = arg(args, "--merge") {
         c.merge = m.parse().unwrap();
     }
+    c.drop_lowest = !flag(args, "--drop-random");
     if let Some(h) = arg(args, "--hebb") {
         c.hebb = h.parse().unwrap();
     }
