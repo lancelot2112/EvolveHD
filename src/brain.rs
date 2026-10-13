@@ -48,6 +48,18 @@ pub struct Cfg {
     /// Offer the word moves: surprise-reset chunks and a previous-chunk hold.
     pub words: bool,
     pub chunk_cap: usize,
+    /// If > 0, the word moves use running count screens averaged over this many recent ticks,
+    /// instead of a held-out split of the stored window.
+    pub run_window: usize,
+    /// Offer the chunk-class Compress move when a previous-chunk edge fails.
+    pub classes: bool,
+    /// Offer bind(previous chunk, chunk) when the previous chunk informs only beyond the chunk.
+    pub conjoin_words: bool,
+    /// Longest trial, as a multiple of the normal one, for a source with more than 4,096 states whose
+    /// gain is positive but below the bar (1 = off).
+    pub long_trials: usize,
+    /// Sources with more states than this get trial extensions.
+    pub long_trial_states: usize,
 }
 
 impl Default for Cfg {
@@ -79,6 +91,11 @@ impl Default for Cfg {
             drop_lowest: true,
             words: false,
             chunk_cap: 4096,
+            run_window: 0,
+            classes: false,
+            conjoin_words: false,
+            long_trials: 1,
+            long_trial_states: 4096,
         }
     }
 }
@@ -132,6 +149,9 @@ impl BindReal {
         let idx = bits::positions(&inp);
         let m = self.pool.match_input(&idx, &inp, t as u64, rng);
         if m.recruited || bits::and_count(&self.pool.masks[m.cell], &inp) >= self.pool.k {
+            if let Some(old) = self.code_key[m.cell] {
+                self.cache.remove(&old);
+            }
             self.cache.insert(key, m.cell);
             self.code_key[m.cell] = Some(key);
         }
@@ -212,6 +232,9 @@ impl ChunkReal {
         let idx = bits::positions(&inp);
         let m = self.pool.match_input(&idx, &inp, t as u64, rng);
         if m.recruited || bits::and_count(&self.pool.masks[m.cell], &inp) >= self.pool.k {
+            if let Some(old) = self.code_key[m.cell] {
+                self.cache.remove(&old);
+            }
             self.cache.insert(key, m.cell);
             self.code_key[m.cell] = Some(key);
         }
@@ -242,8 +265,163 @@ impl ChunkSym {
     }
 }
 
+/// Compress for chunks: completed chunks grouped by what follows them (the next chunk's first two bytes).
+/// State = the class of the chunk completed at the last cut; class k means rare or not yet fitted.
+pub struct ChunkClass {
+    pub k: usize,
+    pub codes: Vec<Code>,
+    /// Per completed chunk value: counts of next first byte (0..256) and second byte (256..512).
+    succ: HashMap<i32, HashMap<u16, u32>>,
+    seen: HashMap<i32, u32>,
+    assign: HashMap<i32, usize>,
+    cent: Option<Vec<Vec<f64>>>,
+    /// The completed chunk still waiting for its second following byte.
+    pending2: i32,
+    last: i32,
+    /// The text of each completed chunk value, as last seen (for reports).
+    texts: HashMap<i32, Vec<u8>>,
+    last_cut: usize,
+}
+
+impl ChunkClass {
+    fn profile(&self, c: i32) -> Option<Vec<f64>> {
+        let m = self.succ.get(&c)?;
+        let mut v = vec![0.0; 512];
+        for (&i, &n) in m {
+            v[i as usize] = n as f64;
+        }
+        let nrm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if nrm == 0.0 {
+            return None;
+        }
+        v.iter_mut().for_each(|x| *x /= nrm);
+        Some(v)
+    }
+
+    fn nearest(cent: &[Vec<f64>], v: &[f64]) -> usize {
+        let mut best = (f64::NEG_INFINITY, 0);
+        for (j, c) in cent.iter().enumerate() {
+            let x: f64 = c.iter().zip(v).map(|(a, b)| a * b).sum();
+            if x > best.0 {
+                best = (x, j);
+            }
+        }
+        best.1
+    }
+
+    /// k-means over the most frequent completed chunks (warm-started, so class ids stay stable).
+    fn refit(&mut self, rng: &mut Rng) {
+        let mut vals: Vec<(u32, i32)> = self
+            .seen
+            .iter()
+            .filter(|(_, &n)| n >= 5)
+            .map(|(&c, &n)| (n, c))
+            .collect();
+        vals.sort_unstable_by(|a, b| b.cmp(a));
+        vals.truncate(6000);
+        let mut cells = vec![];
+        let mut p = vec![];
+        for &(_, c) in &vals {
+            if let Some(v) = self.profile(c) {
+                cells.push(c);
+                p.push(v);
+            }
+        }
+        if p.len() < self.k {
+            return;
+        }
+        if let Some(mut cent) = self.cent.take() {
+            // stable ids: members keep their class; centroids follow their members; new chunks join the nearest
+            for (j, c) in cent.iter_mut().enumerate() {
+                let mut m = vec![0.0; 512];
+                let mut n = 0;
+                for (cell, v) in cells.iter().zip(&p) {
+                    if self.assign.get(cell) == Some(&j) {
+                        n += 1;
+                        m.iter_mut().zip(v).for_each(|(x, y)| *x += y);
+                    }
+                }
+                if n > 0 {
+                    let nrm = m.iter().map(|x| x * x).sum::<f64>().sqrt() + 1e-12;
+                    *c = m.into_iter().map(|x| x / nrm).collect();
+                }
+            }
+            for (cell, v) in cells.iter().zip(&p) {
+                if !self.assign.contains_key(cell) {
+                    self.assign.insert(*cell, Self::nearest(&cent, v));
+                }
+            }
+            self.cent = Some(cent);
+            return;
+        }
+        let mut cent: Vec<Vec<f64>> = rng
+            .choose_distinct(p.len(), self.k)
+            .into_iter()
+            .map(|i| p[i].clone())
+            .collect();
+        for _ in 0..8 {
+            let a: Vec<usize> = p.iter().map(|v| Self::nearest(&cent, v)).collect();
+            for (j, c) in cent.iter_mut().enumerate() {
+                let mut m = vec![0.0; 512];
+                let mut n = 0;
+                for (v, &aj) in p.iter().zip(&a) {
+                    if aj == j {
+                        n += 1;
+                        m.iter_mut().zip(v).for_each(|(x, y)| *x += y);
+                    }
+                }
+                if n > 0 {
+                    let nrm = m.iter().map(|x| x * x).sum::<f64>().sqrt() + 1e-12;
+                    *c = m.into_iter().map(|x| x / nrm).collect();
+                }
+            }
+        }
+        self.assign = cells
+            .iter()
+            .zip(&p)
+            .map(|(&c, v)| (c, Self::nearest(&cent, v)))
+            .collect();
+        self.cent = Some(cent);
+    }
+
+    fn class(&self, c: i32) -> i32 {
+        if c < 0 {
+            return -1;
+        }
+        *self.assign.get(&c).unwrap_or(&self.k) as i32
+    }
+
+    /// Tick t: byte y; `done` = the chunk completed at a cut at t, if any.
+    fn observe(&mut self, y: i32, done: Option<i32>) {
+        if self.pending2 >= 0 && y >= 0 {
+            *self
+                .succ
+                .entry(self.pending2)
+                .or_default()
+                .entry(256 + (y as u16).min(255))
+                .or_insert(0) += 1;
+        }
+        self.pending2 = -1;
+        if let Some(c) = done {
+            if c >= 0 && y >= 0 {
+                *self
+                    .succ
+                    .entry(c)
+                    .or_default()
+                    .entry((y as u16).min(255))
+                    .or_insert(0) += 1;
+                *self.seen.entry(c).or_insert(0) += 1;
+                self.pending2 = c;
+            }
+            self.last = c;
+        }
+    }
+}
+
 pub enum Kind {
     Byte,
+    /// parts[0] = the chunk.
+    PrevClass(Box<ChunkClass>, f64),
     ChunkReal(Box<ChunkReal>, f64),
     ChunkSym(Box<ChunkSym>, f64),
     /// The chunk completed at the last cut (parts[0] = the chunk).
@@ -270,8 +448,56 @@ impl Kind {
             Kind::Distill(_) => "distill",
             Kind::ChunkReal(..) | Kind::ChunkSym(..) => "chunk",
             Kind::PrevWord(_) => "hold",
+            Kind::PrevClass(..) => "distill",
             Kind::Taken => "?",
         }
+    }
+}
+
+/// Ticks of history each node keeps. Screens, replays and delays look back at most this far.
+pub const RING: usize = 1 << 20;
+
+/// A node's state history as a ring buffer: `h[t]` is the state at tick t for the last RING ticks.
+#[derive(Clone)]
+pub struct Hist {
+    buf: Vec<i32>,
+}
+
+impl Hist {
+    pub fn new() -> Self {
+        Hist {
+            buf: vec![-1; RING],
+        }
+    }
+
+    /// An empty history for a removed node (its frozen state is kept on the node).
+    pub fn freed() -> Self {
+        Hist { buf: Vec::new() }
+    }
+
+    /// States for ticks lo..=hi.
+    pub fn range(&self, lo: usize, hi: usize) -> Vec<i32> {
+        assert!(hi + 1 - lo <= RING, "history window longer than the ring");
+        (lo..=hi).map(|t| self.buf[t & (RING - 1)]).collect()
+    }
+}
+
+impl Default for Hist {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::ops::Index<usize> for Hist {
+    type Output = i32;
+    fn index(&self, t: usize) -> &i32 {
+        &self.buf[t & (RING - 1)]
+    }
+}
+
+impl std::ops::IndexMut<usize> for Hist {
+    fn index_mut(&mut self, t: usize) -> &mut i32 {
+        &mut self.buf[t & (RING - 1)]
     }
 }
 
@@ -281,7 +507,7 @@ pub struct Node {
     pub parts: Vec<usize>,
     pub born: usize,
     pub extra: String,
-    pub h: Vec<i32>,
+    pub h: Hist,
     pub state: i32,
     pub removed: bool,
 }
@@ -344,8 +570,11 @@ pub struct Brain {
     sv: f64,
     pub chunk: Option<usize>,
     pub prev: Option<usize>,
+    pub pclass: Option<usize>,
     /// Extra top-level entries for the summary JSON (key, raw JSON).
     pub extra_json: Vec<(String, String)>,
+    /// Running count screens for the word moves (when cfg.run_window > 0).
+    pub run_scr: Vec<RunScreen>,
 }
 
 fn log_softmax_at(logits: &[f64], yi: usize) -> (Vec<f64>, f64) {
@@ -406,7 +635,7 @@ impl Brain {
             parts: vec![],
             born: 0,
             extra: String::new(),
-            h: vec![-1; tt],
+            h: Hist::new(),
             state: -1,
             removed: false,
         };
@@ -449,7 +678,9 @@ impl Brain {
             sv: 1.0,
             chunk: None,
             prev: None,
+            pclass: None,
             extra_json: vec![],
+            run_scr: vec![],
         };
         b.slab[0].drop_lowest = cfg.drop_lowest;
         if cfg.oracle > 0 {
@@ -478,6 +709,7 @@ impl Brain {
             Kind::ChunkReal(k, _) => k.pool.codes[c],
             Kind::ChunkSym(k, _) => k.codes[c],
             Kind::PrevWord(_) => self.code_of(self.nodes[n].parts[0], c as i32),
+            Kind::PrevClass(k, _) => k.codes[c],
             Kind::Taken => unreachable!(),
         }
     }
@@ -491,7 +723,7 @@ impl Brain {
             Kind::Byte => self.byte.pool.gen[c],
             Kind::Delay { .. } | Kind::Hold { .. } => self.gen_of(self.nodes[n].parts[0], c as i32),
             Kind::BindReal(b) => b.pool.gen[c],
-            Kind::BindSym(_) | Kind::Distill(_) | Kind::ChunkSym(..) => 1,
+            Kind::BindSym(_) | Kind::Distill(_) | Kind::ChunkSym(..) | Kind::PrevClass(..) => 1,
             Kind::ChunkReal(k, _) => k.pool.gen[c],
             Kind::PrevWord(_) => self.gen_of(self.nodes[n].parts[0], c as i32),
             Kind::Taken => unreachable!(),
@@ -538,7 +770,7 @@ impl Brain {
             parts,
             born: self.t,
             extra,
-            h: vec![-1; self.tt],
+            h: Hist::new(),
             state: -1,
             removed: false,
         }
@@ -554,7 +786,10 @@ impl Brain {
         nd.born = t;
         if t + 2 > d {
             let n = t + 2 - d;
-            nd.h[d - 1..d - 1 + n].copy_from_slice(&self.nodes[0].h[..n]);
+            let lo = (d - 1).max((t + 1).saturating_sub(RING - 16));
+            for tt in lo..d - 1 + n {
+                nd.h[tt] = self.nodes[0].h[tt + 1 - d];
+            }
         }
         nd.state = nd.h[t];
         nd
@@ -569,7 +804,7 @@ impl Brain {
             lab,
         );
         let mut cur = -1;
-        for tt in 0..=t {
+        for tt in (t + 1).saturating_sub(RING)..=t {
             if self.nodes[0].h[tt] == v {
                 cur = self.nodes[x].h[tt];
             }
@@ -584,7 +819,7 @@ impl Brain {
         let name = format!("({}*{})", self.nodes[x].name, self.nodes[y].name);
         if self.cfg.real {
             let mut b = BindReal::new(self.cfg.bind_cap, self.cfg.hebb);
-            let mut h = vec![-1; self.tt];
+            let mut h = Hist::new();
             let lo = (t + 1).saturating_sub(replay);
             if replay > 0 {
                 for tt in lo..=t {
@@ -609,7 +844,7 @@ impl Brain {
                 codes: vec![],
                 rng: Rng::new(seed),
             };
-            let mut h = vec![-1; self.tt];
+            let mut h = Hist::new();
             let lo = (t + 1).saturating_sub(40000);
             if replay > 0 {
                 for tt in lo..=t {
@@ -805,7 +1040,7 @@ impl Brain {
         };
         self.refit(&mut d);
         let src = self.slab[eid].src;
-        let mut h = vec![-1; self.tt];
+        let mut h = Hist::new();
         let lo = (t + 1).saturating_sub(40000);
         let mut memo: HashMap<i32, i32> = HashMap::new();
         for tt in lo..=t {
@@ -1016,6 +1251,22 @@ impl Brain {
         for i in self.derived.clone() {
             self.update_node(i, t);
         }
+        if self.cfg.words && self.cfg.run_window > 0 {
+            if self.chunk.is_none() && self.run_scr.is_empty() {
+                for z in [0.5, 1.0, 1.5] {
+                    self.run_scr.push(RunScreen::new(
+                        Cand::Chunk {
+                            z,
+                            prev: -1,
+                            map: HashMap::new(),
+                        },
+                        t,
+                        self.cfg.run_window,
+                    ));
+                }
+            }
+            self.feed_screens(t);
+        }
         if self.cfg.grow && t % 1000 == 999 {
             let c0 = std::time::Instant::now();
             self.check();
@@ -1109,10 +1360,33 @@ impl Brain {
                 }
             }
             Kind::PrevWord(z) => {
-                if t >= 1 && self.boundary(t, *z) {
+                let c = self.nodes[i].parts[0];
+                if t >= 1 && self.boundary(t, *z) && !self.nodes[c].removed {
                     self.nodes[self.nodes[i].parts[0]].h[t - 1]
                 } else {
                     self.nodes[i].state
+                }
+            }
+            Kind::PrevClass(_, z) => {
+                let c = self.nodes[i].parts[0];
+                let done = if t >= 1 && self.boundary(t, *z) && !self.nodes[c].removed {
+                    Some(self.nodes[c].h[t - 1])
+                } else {
+                    None
+                };
+                let y = self.nodes[0].state;
+                match &mut self.nodes[i].kind {
+                    Kind::PrevClass(k, _) => {
+                        if let Some(dc) = done {
+                            if t > k.last_cut && t - k.last_cut <= 40 {
+                                k.texts.insert(dc, self.data[k.last_cut..t].to_vec());
+                            }
+                            k.last_cut = t;
+                        }
+                        k.observe(y, done);
+                        k.class(k.last)
+                    }
+                    _ => unreachable!(),
                 }
             }
             Kind::Byte | Kind::Taken => return,
@@ -1124,7 +1398,9 @@ impl Brain {
     // ---------------------------------------------------------------- growth controller
     fn series(&self, n: usize, w: usize) -> Vec<i64> {
         let t = self.t;
-        self.nodes[n].h[t + 1 - w..=t]
+        self.nodes[n]
+            .h
+            .range(t + 1 - w, t)
             .iter()
             .map(|&x| x as i64 + 1)
             .collect()
@@ -1133,6 +1409,44 @@ impl Brain {
     /// Source node of edge e.
     pub fn slab_src(&self, e: usize) -> usize {
         self.slab[e].src
+    }
+
+    /// Free a discarded edge's writer-mask rows, unless a live distill still reads them.
+    fn release_edge(&mut self, e: usize) {
+        self.trial_t0.remove(&e);
+        let read = self
+            .derived
+            .iter()
+            .any(|&n| matches!(&self.nodes[n].kind, Kind::Distill(d) if d.edge == e));
+        if !read {
+            self.slab[e].rows = HashMap::new();
+            self.slab[e].sc = None;
+        }
+    }
+
+    /// Number of distinct states a node has used so far.
+    fn cardinality(&self, n: usize) -> usize {
+        match &self.nodes[n].kind {
+            Kind::BindReal(b) => b.pool.cap,
+            Kind::BindSym(b) => b.map.len(),
+            Kind::ChunkReal(k, _) => k.pool.cap,
+            Kind::ChunkSym(k, _) => k.map.len(),
+            Kind::PrevWord(_) => self.cardinality(self.nodes[n].parts[0]),
+            Kind::PrevClass(k, _) => k.k + 1,
+            Kind::Distill(d) => d.k,
+            _ => self.byte.pool.cap,
+        }
+    }
+
+    /// Trial length multiplier: sources with very many states get longer trials, so their rows can learn.
+    fn trial_mult(&self, e: usize) -> usize {
+        if self.cfg.long_trials > 1
+            && self.cardinality(self.slab[e].src) > self.cfg.long_trial_states
+        {
+            self.cfg.long_trials
+        } else {
+            1
+        }
     }
 
     fn name_of_edge(&self, e: usize) -> String {
@@ -1144,8 +1458,14 @@ impl Brain {
         let c = self.cfg.clone();
         // trial decisions
         for e in self.trials.clone() {
-            if t - self.trial_t0[&e] >= c.burn + c.evalw && self.slab[e].n > 100 {
+            let age = t - self.trial_t0[&e];
+            if age >= c.burn + c.evalw && self.slab[e].n > 100 {
                 let (m, z) = self.slab[e].stats();
+                // a many-state source still learning (positive, below the bar): extend its trial
+                let passes = m >= c.acc_gain && z >= c.acc_z;
+                if !passes && m > 0.0 && age < (c.burn + c.evalw) * self.trial_mult(e) {
+                    continue;
+                }
                 self.trials.retain(|&x| x != e);
                 let k = self.name_of_edge(e);
                 if m >= c.acc_gain && z >= c.acc_z {
@@ -1181,6 +1501,7 @@ impl Brain {
                         b: Some(k),
                         v: Some(m),
                     });
+                    self.release_edge(e);
                 }
             }
         }
@@ -1201,6 +1522,7 @@ impl Brain {
                         b: Some(k.clone()),
                         v: Some(m),
                     });
+                    self.release_edge(e);
                 }
                 self.slab[e].reset_stats();
                 self.kept_since.insert(k, t);
@@ -1208,6 +1530,9 @@ impl Brain {
         }
         if t % 10000 == 9999 {
             for i in self.derived.clone() {
+                if let Kind::PrevClass(k, _) = &mut self.nodes[i].kind {
+                    k.refit(&mut self.rng);
+                }
                 if matches!(self.nodes[i].kind, Kind::Distill(_)) {
                     let k = std::mem::replace(&mut self.nodes[i].kind, Kind::Taken);
                     if let Kind::Distill(mut d) = k {
@@ -1323,7 +1648,8 @@ impl Brain {
                 continue;
             }
             let h = &self.nodes[0].h;
-            let s: Vec<i64> = h[t + 1 - w - (d - 1)..t + 1 - (d - 1)]
+            let s: Vec<i64> = h
+                .range(t + 1 - w - (d - 1), t - (d - 1))
                 .iter()
                 .map(|&x| x as i64 + 1)
                 .collect();
@@ -1365,7 +1691,7 @@ impl Brain {
                 {
                     continue;
                 }
-                let xh = &self.nodes[x].h[t + 1 - w..=t];
+                let xh = self.nodes[x].h.range(t + 1 - w, t);
                 let mut hs = Vec::with_capacity(w);
                 let mut cur: i64 = 0;
                 let mut seen = false;
@@ -1392,8 +1718,10 @@ impl Brain {
         }
     }
 
+    /// Structural containment through binds and distills, by name (as in Python): a node rebuilt after
+    /// cleanup gets a new index but is still the same structure.
     fn contains(&self, n: usize, other: usize) -> bool {
-        if n == other {
+        if n == other || self.nodes[n].name == self.nodes[other].name {
             return true;
         }
         match self.nodes[n].kind {
@@ -1474,6 +1802,9 @@ impl Brain {
         if self.prev.is_some_and(|c| self.nodes[c].removed) {
             self.prev = None;
         }
+        if self.pclass.is_some_and(|c| self.nodes[c].removed) {
+            self.pclass = None;
+        }
     }
 
     fn gc_inner(&mut self) {
@@ -1507,9 +1838,7 @@ impl Brain {
                 self.scr.remove(&name);
                 self.backoff.remove(&name);
                 // free memory the node no longer needs, but keep its frozen state
-                if let Kind::BindReal(_) | Kind::BindSym(_) = self.nodes[n].kind {
-                    self.nodes[n].h = Vec::new();
-                }
+                self.nodes[n].h = Hist::freed();
                 self.events.push(Event {
                     t,
                     kind: "gc".into(),
@@ -1615,6 +1944,17 @@ impl Brain {
                     Kind::BindSym(b) => {
                         let _ = write!(s, ",\"cells\":{},\"evictions\":0", b.map.len());
                     }
+                    Kind::ChunkReal(k, _) => {
+                        let _ = write!(
+                            s,
+                            ",\"cells\":{},\"evictions\":{}",
+                            k.pool.n_alive(),
+                            k.pool.evictions
+                        );
+                    }
+                    Kind::ChunkSym(k, _) => {
+                        let _ = write!(s, ",\"cells\":{},\"evictions\":0", k.map.len());
+                    }
                     _ => {}
                 }
                 s.push('}');
@@ -1638,10 +1978,16 @@ impl Brain {
         let _ = write!(o, "\"kept\":{{{}}},", kp.join(","));
         // byte-pool purity over the last 50k ticks
         let lo = tt.saturating_sub(50000);
-        let cells: Vec<i64> = self.nodes[0].h[lo..tt]
-            .iter()
-            .map(|&x| x as i64 + 1)
-            .collect();
+        let cells: Vec<i64> = if tt > lo {
+            self.nodes[0]
+                .h
+                .range(lo, tt - 1)
+                .iter()
+                .map(|&x| x as i64 + 1)
+                .collect()
+        } else {
+            vec![]
+        };
         let by: Vec<i64> = self.data[lo..tt].iter().map(|&x| x as i64).collect();
         let (hc, hb, hj) = (ent(&[&cells]), ent(&[&by]), ent(&[&cells, &by]));
         let _ = write!(
@@ -1661,8 +2007,182 @@ impl Brain {
     }
 }
 
+/// Witten-Bell counts for one context: total and per next value.
+#[derive(Default)]
+struct WbCtx {
+    n: u32,
+    d: HashMap<i32, u32>,
+}
+
+impl WbCtx {
+    fn p(&self, y: i32, lower: f64) -> f64 {
+        let t = self.d.len() as f64;
+        (*self.d.get(&y).unwrap_or(&0) as f64 + t * lower) / (self.n as f64 + t)
+    }
+    fn add(&mut self, y: i32) {
+        self.n += 1;
+        *self.d.entry(y).or_insert(0) += 1;
+    }
+    /// Halve every count; false if nothing is left.
+    fn halve(&mut self) -> bool {
+        self.d.retain(|_, c| {
+            *c /= 2;
+            *c > 0
+        });
+        self.n = self.d.values().sum();
+        self.n > 0
+    }
+}
+
+/// What a running screen measures.
+pub enum Cand {
+    /// A virtual exact chunk at this z (trie over (previous id or start, byte)).
+    Chunk {
+        z: f64,
+        prev: i32,
+        map: HashMap<(i32, i32), i32>,
+    },
+    /// The chunk node's state latched at its last boundary.
+    Prev { chunk: usize, z: f64, last: i32 },
+    /// Same context, but measured beyond the current chunk instead of the current byte (log only).
+    PrevGivenChunk { chunk: usize, z: f64, last: i32 },
+    /// A node's state, measured beyond the byte (base None) or beyond another node's state.
+    Node {
+        node: usize,
+        base: Option<usize>,
+        label: &'static str,
+    },
+}
+
+/// A prequential count screen: Witten-Bell p(y' | s, y) against p(y' | y), scored on each tick before
+/// learning from it, from the moment the candidate is proposed. Its value is the mean gain over the
+/// most recent `window` ticks, so it can use far more data than a stored window.
+pub struct RunScreen {
+    pub cand: Cand,
+    pub born: usize,
+    window: usize,
+    base: HashMap<i32, WbCtx>,
+    ctx: HashMap<(i32, i32), WbCtx>,
+    uni: Vec<f64>,
+    uni_n: f64,
+    pending: Option<(i32, i32)>,
+    fed: u64,
+    blocks: std::collections::VecDeque<(f64, usize)>,
+}
+
+impl RunScreen {
+    pub fn new(cand: Cand, born: usize, window: usize) -> Self {
+        RunScreen {
+            cand,
+            born,
+            window,
+            base: HashMap::new(),
+            ctx: HashMap::new(),
+            uni: vec![1.0; 257],
+            uni_n: 257.0,
+            pending: None,
+            fed: 0,
+            blocks: Default::default(),
+        }
+    }
+
+    /// Feed tick t: y = byte state at t (the outcome for the pending pair), s = the context now,
+    /// b = the baseline context now (usually y itself).
+    fn feed(&mut self, y: i32, s: i32, b: i32) {
+        if let Some((sp, yp)) = self.pending.take() {
+            if y >= 0 {
+                let yi = (y as usize).min(256);
+                let mut pb = self.uni[yi] / self.uni_n;
+                if let Some(c) = self.base.get(&yp) {
+                    pb = c.p(y, pb);
+                }
+                let mut ps = pb;
+                if let Some(c) = self.ctx.get(&(sp, yp)) {
+                    ps = c.p(y, pb);
+                }
+                let g = ps.log2() - pb.log2();
+                match self.blocks.back_mut() {
+                    Some(b) if b.1 < 1000 => {
+                        b.0 += g;
+                        b.1 += 1;
+                    }
+                    _ => self.blocks.push_back((g, 1)),
+                }
+                while self.blocks.len() * 1000 > self.window + 1000 {
+                    self.blocks.pop_front();
+                }
+                self.base.entry(yp).or_default().add(y);
+                self.ctx.entry((sp, yp)).or_default().add(y);
+                self.uni[yi] += 1.0;
+                self.uni_n += 1.0;
+                self.fed += 1;
+                if self.fed % 1_000_000 == 0 {
+                    // exponential forgetting keeps the tables to recently seen contexts
+                    self.base.retain(|_, c| c.halve());
+                    self.ctx.retain(|_, c| c.halve());
+                }
+            }
+        }
+        self.pending = Some((s, b));
+    }
+
+    /// Mean gain in bits per tick over the recent window, and the ticks it covers.
+    pub fn value(&self) -> (f64, usize) {
+        let (g, n) = self
+            .blocks
+            .iter()
+            .fold((0.0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+        (if n > 0 { g / n as f64 } else { 0.0 }, n)
+    }
+}
+
 // -------------------------------------------------------------------- word moves
 impl Brain {
+    /// Advance the running screens by one tick (called after the nodes update).
+    fn feed_screens(&mut self, t: usize) {
+        if self.run_scr.is_empty() {
+            return;
+        }
+        let y = self.nodes[0].state;
+        let mut rs = std::mem::take(&mut self.run_scr);
+        for r in rs.iter_mut() {
+            let s = match &mut r.cand {
+                Cand::Chunk { z, prev, map } => {
+                    if y < 0 {
+                        *prev = -1;
+                        -1
+                    } else {
+                        let k = (
+                            if self.boundary(t, *z) || *prev < 0 {
+                                -1
+                            } else {
+                                *prev
+                            },
+                            y,
+                        );
+                        let n = map.len() as i32;
+                        *prev = *map.entry(k).or_insert(n);
+                        *prev
+                    }
+                }
+                Cand::Prev { chunk, z, last } | Cand::PrevGivenChunk { chunk, z, last } => {
+                    if t >= 1 && self.boundary(t, *z) && !self.nodes[*chunk].removed {
+                        *last = self.nodes[*chunk].h[t - 1];
+                    }
+                    *last
+                }
+                Cand::Node { node, .. } => self.nodes[*node].state,
+            };
+            let b = match &r.cand {
+                Cand::PrevGivenChunk { chunk, .. } => self.nodes[*chunk].state,
+                Cand::Node { base: Some(n), .. } => self.nodes[*n].state,
+                _ => y,
+            };
+            r.feed(y, s, b);
+        }
+        self.run_scr = rs;
+    }
+
     /// The chunk ids a trie would give over the last w ticks (a virtual screen, nothing built).
     fn virtual_chunk(&self, z: f64, w: usize) -> Vec<i64> {
         let t = self.t;
@@ -1693,7 +2213,7 @@ impl Brain {
     fn make_chunk(&mut self, z: f64) -> Node {
         let t = self.t;
         let name = format!("chunk(z={z})");
-        let mut h = vec![-1; self.tt];
+        let mut h = Hist::new();
         let kind = if self.cfg.real {
             let mut pool = Pool::new(self.cfg.chunk_cap, 48, 40);
             pool.hebb = self.cfg.hebb;
@@ -1738,7 +2258,7 @@ impl Brain {
 
     fn make_prevword(&mut self, c: usize, z: f64) -> Node {
         let t = self.t;
-        let mut h = vec![-1; self.tt];
+        let mut h = Hist::new();
         let mut st = -1;
         for tt in (t + 1).saturating_sub(40000).max(1)..=t {
             if self.boundary(tt, z) {
@@ -1757,6 +2277,58 @@ impl Brain {
         nd
     }
 
+    fn make_pclass(&mut self, c: usize, z: f64) -> Node {
+        let t = self.t;
+        let k = 64;
+        let codes = (0..=k).map(|_| bits::rand_code(&mut self.rng)).collect();
+        let mut cc = ChunkClass {
+            k,
+            codes,
+            succ: HashMap::new(),
+            seen: HashMap::new(),
+            assign: HashMap::new(),
+            cent: None,
+            pending2: -1,
+            last: -1,
+            texts: HashMap::new(),
+            last_cut: 0,
+        };
+        let lo = (t + 1).saturating_sub(200_000).max(1);
+        for tt in lo..=t {
+            let done = if self.boundary(tt, z) {
+                Some(self.nodes[c].h[tt - 1])
+            } else {
+                None
+            };
+            if let Some(dc) = done {
+                if tt > cc.last_cut && tt - cc.last_cut <= 40 {
+                    cc.texts.insert(dc, self.data[cc.last_cut..tt].to_vec());
+                }
+                cc.last_cut = tt;
+            }
+            cc.observe(self.nodes[0].h[tt], done);
+        }
+        cc.refit(&mut self.rng);
+        let mut h = Hist::new();
+        let mut last = -1;
+        for tt in (t + 1).saturating_sub(40000).max(1)..=t {
+            if self.boundary(tt, z) {
+                last = self.nodes[c].h[tt - 1];
+            }
+            h[tt] = cc.class(last);
+        }
+        cc.last = last;
+        let mut nd = self.new_node(
+            format!("class[{}]", self.nodes[c].name),
+            Kind::PrevClass(Box::new(cc), z),
+            vec![c],
+            format!("{k}"),
+        );
+        nd.state = h[t];
+        nd.h = h;
+        nd
+    }
+
     fn chunk_z(&self, c: usize) -> f64 {
         match &self.nodes[c].kind {
             Kind::ChunkReal(_, z) | Kind::ChunkSym(_, z) => *z,
@@ -1765,6 +2337,9 @@ impl Brain {
     }
 
     fn word_moves(&mut self, w: usize) {
+        if self.cfg.run_window > 0 {
+            return self.word_moves_running();
+        }
         let t = self.t;
         let y = self.series(0, w);
         let (yp, yn) = (&y[..w - 1], &y[1..]);
@@ -1797,7 +2372,7 @@ impl Brain {
             }
             Some(c) if self.prev.is_none() => {
                 let z = self.chunk_z(c);
-                let ch = &self.nodes[c].h[t + 1 - w..=t];
+                let ch = self.nodes[c].h.range(t + 1 - w, t);
                 let mut last: i64 = -1;
                 let mut s = Vec::with_capacity(w);
                 for (j, tt) in (t + 1 - w..=t).enumerate() {
@@ -1827,6 +2402,212 @@ impl Brain {
             }
             _ => {}
         }
+    }
+
+    fn word_moves_running(&mut self) {
+        let t = self.t;
+        let thr = self.cfg.tmp_thr;
+        match self.chunk {
+            None => {
+                if self
+                    .run_scr
+                    .iter()
+                    .any(|r| matches!(r.cand, Cand::Prev { .. }))
+                {
+                    self.run_scr.clear(); // the chunk was cleaned up: screen chunks again from now
+                    return;
+                }
+                let mut best: Option<(f64, f64)> = None;
+                for r in &self.run_scr {
+                    if let Cand::Chunk { z, .. } = r.cand {
+                        let (v, n) = r.value();
+                        self.events.push(Event {
+                            t,
+                            kind: "screen-chunk".into(),
+                            a: format!("z={z}"),
+                            b: Some(format!("n={n}")),
+                            v: Some(v),
+                        });
+                        if n >= 5000 && v > thr && best.map_or(true, |b| v > b.0) {
+                            best = Some((v, z));
+                        }
+                    }
+                }
+                if let Some((v, z)) = best {
+                    let nd = self.make_chunk(z);
+                    let i = self.add(nd, format!("screen byte {v:.2}"));
+                    self.chunk = Some(i);
+                    self.run_scr = vec![
+                        RunScreen::new(
+                            Cand::Prev {
+                                chunk: i,
+                                z,
+                                last: -1,
+                            },
+                            t,
+                            self.cfg.run_window,
+                        ),
+                        RunScreen::new(
+                            Cand::PrevGivenChunk {
+                                chunk: i,
+                                z,
+                                last: -1,
+                            },
+                            t,
+                            self.cfg.run_window,
+                        ),
+                    ];
+                }
+            }
+            Some(c) => {
+                let name = self.nodes[c].name.clone();
+                let (v, n) = match self.run_scr.first() {
+                    Some(r) => r.value(),
+                    None => return,
+                };
+                self.events.push(Event {
+                    t,
+                    kind: "screen-prevword".into(),
+                    a: name.clone(),
+                    b: Some(format!("n={n}")),
+                    v: Some(v),
+                });
+                let mut v2 = f64::NEG_INFINITY;
+                if let Some(r) = self.run_scr.get(1) {
+                    let n2;
+                    (v2, n2) = r.value();
+                    self.events.push(Event {
+                        t,
+                        kind: "screen-prev-given-chunk".into(),
+                        a: name,
+                        b: Some(format!("n={n2}")),
+                        v: Some(v2),
+                    });
+                }
+                for r in self.run_scr.iter().skip(2) {
+                    if let Cand::Node { node, label, .. } = r.cand {
+                        let (v3, n3) = r.value();
+                        self.events.push(Event {
+                            t,
+                            kind: label.into(),
+                            a: self.nodes[node].name.clone(),
+                            b: Some(format!("n={n3}")),
+                            v: Some(v3),
+                        });
+                    }
+                }
+                // Compress: the previous chunk carries information, but its edge failed to learn it
+                // (too many states for one edge): group chunks into classes by what follows them.
+                let pname = format!("prevword[{}]", self.nodes[c].name);
+                let failed = self
+                    .events
+                    .iter()
+                    .any(|e| e.kind == "reject" && e.b.as_deref() == Some(pname.as_str()));
+                let kept_prev = self
+                    .kept
+                    .iter()
+                    .any(|&e| self.nodes[self.slab[e].src].name == pname);
+                // the information is either additive (edge tried and failed) or only in conjunction with the chunk
+                let pressure = (failed && v > thr) || (v2 > thr && n >= 20000);
+                if self.cfg.classes
+                    && self.pclass.is_none()
+                    && !kept_prev
+                    && pressure
+                    && self.derived.len() < self.cfg.max_derived
+                {
+                    let z = self.chunk_z(c);
+                    let nd = self.make_pclass(c, z);
+                    let i = self.add(nd, format!("prev screens {v:.2} / given chunk {v2:.2}"));
+                    self.pclass = Some(i);
+                    self.run_scr.truncate(2);
+                    self.run_scr.push(RunScreen::new(
+                        Cand::Node {
+                            node: i,
+                            base: None,
+                            label: "screen-class",
+                        },
+                        t,
+                        self.cfg.run_window,
+                    ));
+                    self.run_scr.push(RunScreen::new(
+                        Cand::Node {
+                            node: i,
+                            base: Some(c),
+                            label: "screen-class-given-chunk",
+                        },
+                        t,
+                        self.cfg.run_window,
+                    ));
+                }
+                // Conjoin: the previous chunk informs only together with the current chunk -> bind the two.
+                if self.cfg.conjoin_words
+                    && v2 > thr
+                    && n >= 20000
+                    && self.derived.len() + 2 <= self.cfg.max_derived
+                {
+                    let pw = match self.prev {
+                        Some(p) => Some(p),
+                        None if self.pclass.is_none() => {
+                            let z = self.chunk_z(c);
+                            let nd = self.make_prevword(c, z);
+                            let i = self.add(nd, format!("conjoin part, given chunk {v2:.2}"));
+                            self.prev = Some(i);
+                            Some(i)
+                        }
+                        None => None,
+                    };
+                    if let Some(pw) = pw {
+                        let (a, b) = (self.nodes[pw].name.clone(), self.nodes[c].name.clone());
+                        if self.live(&format!("({a}*{b})")).is_none()
+                            && self.live(&format!("({b}*{a})")).is_none()
+                        {
+                            let before = self.derived.len();
+                            self.bind(pw, c, format!("conjoin: prev given chunk {v2:.2}"));
+                            if self.derived.len() > before {
+                                // the conjoin's part must not be cleaned up while the bind is untried
+                                self.tried.remove(&a);
+                            }
+                        }
+                    }
+                }
+                if self.prev.is_none() && self.pclass.is_none() && n >= 5000 && v > thr {
+                    let z = self.chunk_z(c);
+                    let nd = self.make_prevword(c, z);
+                    let i = self.add(nd, format!("screen byte {v:.2}"));
+                    self.prev = Some(i);
+                }
+            }
+        }
+    }
+
+    /// For the chunk-class node: each class's most frequent member chunks, as text.
+    pub fn class_report(&self) -> Option<String> {
+        let i = self.pclass?;
+        let k = match &self.nodes[i].kind {
+            Kind::PrevClass(k, _) => k,
+            _ => return None,
+        };
+        let mut by: Vec<Vec<(u32, i32)>> = vec![vec![]; k.k];
+        for (&c, &a) in &k.assign {
+            by[a].push((*k.seen.get(&c).unwrap_or(&0), c));
+        }
+        let mut out = vec![];
+        for (j, mut m) in by.into_iter().enumerate() {
+            m.sort_unstable_by(|a, b| b.cmp(a));
+            let tot: u32 = m.iter().map(|x| x.0).sum();
+            let ex: Vec<String> = m
+                .iter()
+                .take(12)
+                .filter_map(|&(_, c)| k.texts.get(&c))
+                .map(|b| json_str(&String::from_utf8_lossy(b)))
+                .collect();
+            out.push(format!(
+                "{{\"class\":{j},\"members\":{},\"uses\":{tot},\"top\":[{}]}}",
+                m.len(),
+                ex.join(",")
+            ));
+        }
+        Some(format!("[{}]", out.join(",")))
     }
 
     /// Boundary alignment with real word starts over [lo, hi), and how many chunks are one whole word.

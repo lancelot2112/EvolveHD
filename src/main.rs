@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! evolvehd text  --data corpus/bookA.bin,corpus/bookB.bin [--seed 0] [--symbolic] [--oracle 4] [--no-grow]
-//!                [--noise 0.25,4] [--merge 8] [--hebb 0.02] [--drop-random] [--words] [--chunk-cap 4096]
+//!                [--noise 0.25,4] [--merge 8] [--hebb 0.02] [--drop-random] [--words] [--run-window 200000] [--classes] [--conjoin-words] [--long-trials 5] [--long-trial-states 4096] [--chunk-cap 4096]
 //!                [--out run.json]
 //! evolvehd ngram --data corpus/bookA.bin,corpus/bookB.bin [--order 4]
 //! evolvehd table [--corpus corpus] [--out-dir runs]   # the standard text table, jobs run in parallel
@@ -53,6 +53,17 @@ fn cfg_from(args: &[String]) -> Cfg {
     }
     c.drop_lowest = !flag(args, "--drop-random");
     c.words = flag(args, "--words");
+    c.classes = flag(args, "--classes");
+    c.conjoin_words = flag(args, "--conjoin-words");
+    if let Some(x) = arg(args, "--long-trial-states") {
+        c.long_trial_states = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--long-trials") {
+        c.long_trials = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--run-window") {
+        c.run_window = x.parse().unwrap();
+    }
     if let Some(x) = arg(args, "--chunk-cap") {
         c.chunk_cap = x.parse().unwrap();
     }
@@ -98,7 +109,13 @@ fn run_one(name: &str, data: Vec<u8>, cfg: Cfg, out: Option<String>) -> String {
     } else if let Some(r) = b.word_report(b.t / 2, b.t) {
         b.extra_json.push(("words_last_half".to_string(), r));
     }
+    if let Some(r) = b.class_report() {
+        b.extra_json.push(("classes".to_string(), r));
+    }
     for (k, r) in &b.extra_json {
+        if k == "classes" {
+            continue;
+        }
         let grab = |f: &str| {
             r.split(&format!("\"{f}\":"))
                 .nth(1)
@@ -150,6 +167,17 @@ fn main() {
             let data = load(arg(&args, "--data").expect("--data"));
             let order: usize = arg(&args, "--order").unwrap_or("4").parse().unwrap();
             let bits = witten_bell_bits(&data, order);
+            if let Some(p) = arg(&args, "--out") {
+                let bl: Vec<String> = bits
+                    .chunks(1000)
+                    .map(|c| format!("{}", c.iter().sum::<f64>() / c.len() as f64))
+                    .collect();
+                std::fs::write(
+                    p,
+                    format!("{{\"order\":{order},\"bpb\":[{}]}}", bl.join(",")),
+                )
+                .unwrap();
+            }
             let m = |lo: usize, hi: usize| {
                 bits[lo..hi.min(bits.len())].iter().sum::<f64>() / (hi.min(bits.len()) - lo) as f64
             };
