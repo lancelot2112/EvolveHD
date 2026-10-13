@@ -20,6 +20,7 @@ These are the design rules the experiments forced, grouped by layer. Each links 
 - **Bind with shift-bind, after cleanup.** XOR leaks half of each part into the pair code ([04](experiments/04-audit-sims.md)).
 - **Context primes; only input drives.** A plan wired as an equal driver destroys perception ([04](experiments/04-audit-sims.md)).
 - **Readouts must be graded for probabilistic data.** One binary writer mask encodes a set, not a distribution; text needed stochastic multi-level masks ([11](experiments/11-real-text.md)).
+- **Give writer masks room.** A 640-bit level written 8 bits at a time loses rare successors to frequent ones; 1,024 bits and 16-bit writes recovered 0.08 bits per byte on hand-wired order 4 (0.14 for the full readout v2 on grown exact nodes), with no extra memory ([16](experiments/16-readout-and-generation.md)).
 - **Under noise, merge duplicate cells.** Rare low-overlap inputs and Hebbian drift split each symbol across cells ([11](experiments/11-real-text.md)).
 
 ## Growth

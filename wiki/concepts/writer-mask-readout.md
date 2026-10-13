@@ -21,7 +21,16 @@ One binary mask encodes a *set* of successors, not a distribution. That was enou
 | 8 levels × 640 bits, 8-bit writes | 3.67 |
 | Witten-Bell exact counts | 3.49 |
 
-With exact order-4 contexts the readout still trails count-based backoff by about 0.22 bits per byte (2.18 against 1.96). That gap is an [open question](../open-questions.md).
+With exact order-4 contexts this readout trails count-based backoff by about 0.22 bits per byte (2.18 against 1.96).
+
+## Readout v2
+
+About a third of that gap was mask capacity ([16](../experiments/16-readout-and-generation.md)). A 640-bit level holds about 20 target codes, and each write sets only 8 of the target's 32 bits, so frequent successors crowd out rare ones. Readout v2 uses:
+- **1,024 bits per level and 16-bit writes.** Hand-wired order 4 went from 2.182 to 2.103 (with template rows), and grown exact nodes from 2.321 to 2.183 (full readout v2). Memory is unchanged.
+- **Template rows:** new rows copy one random template per edge instead of drawing their own masks. Accuracy was unchanged on the hand-wired chain, and runs are 5–10% faster.
+- **A learned confidence gain:** a second gain per edge on scores scaled by the row's Witten-Bell confidence n / (n + T). It gains 0.002–0.004; an earlier fixed confidence scale cost 0.011.
+
+About 0.14 bits per byte remain between log-linear writer masks and Witten-Bell backoff over the same contexts. That is an [open question](../open-questions.md).
 
 ## History
 
@@ -38,6 +47,6 @@ With exact order-4 contexts the readout still trails count-based backoff by abou
 
 ## Evidence in
 
-[01 · early engine](../experiments/01-early-engine.md) · [06 · growth interfaces](../experiments/06-growth-interfaces.md) · [08 · bootstrapping](../experiments/08-bootstrapping.md) · [11 · real text](../experiments/11-real-text.md)
+[01 · early engine](../experiments/01-early-engine.md) · [06 · growth interfaces](../experiments/06-growth-interfaces.md) · [08 · bootstrapping](../experiments/08-bootstrapping.md) · [11 · real text](../experiments/11-real-text.md) · [16 · readout and generation](../experiments/16-readout-and-generation.md)
 
 *[All concepts](README.md) · [Wiki home](../README.md)*

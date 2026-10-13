@@ -1,6 +1,6 @@
 # 15 · Pools that grow on demand (2026-10-13)
 
-*[All experiments](README.md)* · [← 14](14-full-corpus.md)
+*[All experiments](README.md)* · [← 14](14-full-corpus.md) · [16 →](16-readout-and-generation.md)
 
 **Concepts:** [Matcher pools](../concepts/matcher-pools.md#growing-pools) · [Capacity and budget](../concepts/capacity-and-budget.md) · [Sleep and consolidation](../concepts/sleep-and-consolidation.md) · [Growth operators](../concepts/growth-operators.md#conjoin)
 

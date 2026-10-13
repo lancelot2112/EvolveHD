@@ -19,6 +19,7 @@ Every simulation so far, oldest first. Each page gives the question, setup, the 
 | 13 | [Word pairs: more data, then conjoin](13-word-pairs.md) | Oct 13 | With more data the previous word carries 0.2+ bits beyond the current chunk; a conjoin of the two is kept and cuts 0.05–0.09 bits per byte (exact nodes); successor classes fail; real pools lack the capacity |
 | 14 | [The whole corpus](14-full-corpus.md) | Oct 13 | 11.7M bytes, 18 books: 2.56 bits per byte against 2.11 for order-4 counts; the gap doesn't close with data because real pools forget; distill pays for the first time (KJV Bible) |
 | 15 | [Pools that grow on demand](15-growing-pools.md) | Oct 13 | Real pools that double under eviction pressure reach exact-node quality. Over the whole corpus: 2.125 bits per byte against 2.107 for order-4 counts, beating them on 10 of 18 books |
+| 16 | [A better readout, and generation](16-readout-and-generation.md) | Oct 13 | Wider writer masks recover most of the readout gap (grown exact 2.321 → 2.183); on Austen the best system is 0.035 bits per byte behind order-4 counts; its continuations have words from the training text at the same rate as theirs |
 
 The rules these results forced are collected in [lessons](../lessons.md); the ideas behind them are in [concepts](../concepts/README.md); terms are in the [glossary](../glossary.md).
 

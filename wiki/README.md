@@ -12,9 +12,10 @@ The goal is not to simulate a brain. It is a robust learner that uses the streng
   - Over the whole book it beats gzip.
   - A new chunk move, a context reset at surprising bytes, takes real pools to 2.55 ([12](experiments/12-words.md)).
   - With exact nodes, a conjoin of the previous and current word-piece is kept, cutting a further 0.05–0.09 bits per byte: the first word-level structure ([13](experiments/13-word-pairs.md)).
+  - A wider writer-mask readout recovers about a third of the readout's gap to count models. Trained on three Austen novels, the best system is 0.035 bits per byte behind order-4 counts on the last 500k, and it continues a prompt with words found in the training text at the same rate as they do ([16](experiments/16-readout-and-generation.md)).
   - Over the whole 11.7M-byte Gutenberg corpus, fixed real pools reached 2.56 against 2.11 for order-4 counts ([14](experiments/14-full-corpus.md)). Pools that grow on demand reach 2.125, beating order-4 counts on 10 of 18 books, and bzip2 (2.135) on the whole file ([15](experiments/15-growing-pools.md)).
 - **All seven primitives exist as grammar moves** and pass their standalone tests: Expand, Associate, Compress, Gate, Select, Correct, Broadcast.
-- **Open:** learning speed at size (every new cell needs its own writer-mask rows), the memory horizon of growing pools, the readout's gap to count models on long books, and scaling the screens to thousands of nodes.
+- **Open:** learning speed at size (every new cell needs its own writer-mask rows), the memory horizon of growing pools, the readout's remaining 0.14-bit gap to count models over the same contexts, and scaling the screens to thousands of nodes.
 - **The Rust crate** ports the text experiment and reproduces its table, about 10 times faster than Python ([reference code](reference-code.md#the-rust-crate)). The Python sims in [`reference/python`](../reference/python) remain the reference for everything else.
 
 ## Reading order

@@ -20,6 +20,10 @@ Association area with 25% input noise ([04](../experiments/04-audit-sims.md)):
 | Plan as priming | 0.98 | 0.71 | 0.86 |
 | Priming while sensing, drive in silence | 0.98 | 0.71 | 0.84, no repeats |
 
+## Generation
+
+Freezing learning and feeding each sampled prediction back in as input turns Prime into Drive: the system imagines a continuation instead of sensing one. After training on three Austen novels, 92% of the words in its continuations occur in the training text, the same rate as an order-4 count model's ([16](../experiments/16-readout-and-generation.md)).
+
 ## Related
 
 [Primitives and channels](../primitives.md) · [Writer-mask readout](writer-mask-readout.md) · [Broadcast](broadcast.md) · [Time: delays and holds](time-delays-and-holds.md)
