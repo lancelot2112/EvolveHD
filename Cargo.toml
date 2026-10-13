@@ -1,0 +1,14 @@
+[package]
+name = "evolvehd"
+version = "0.1.0"
+edition = "2021"
+description = "Networks that grow from seven primitives over high-dimensional bit vectors"
+license = "MIT"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+debug = false
+lto = "thin"
+codegen-units = 1
