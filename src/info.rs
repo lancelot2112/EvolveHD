@@ -75,6 +75,65 @@ pub fn ent_nested(cols: &[&[i64]]) -> (f64, f64, usize) {
     (hp, ha, dp)
 }
 
+/// Bits per tick that context (s, yp) adds over yp alone for predicting yn, on held-out data:
+/// counts from the first half, Witten-Bell interpolation, log-loss gain on the second half.
+/// Unlike the shift-null screen, it stays honest for contexts with thousands of states.
+pub fn heldout_gain(s: &[i64], yp: &[i64], yn: &[i64]) -> f64 {
+    use std::collections::HashMap;
+    let n = s.len();
+    let h = n / 2;
+    if h == 0 || n == h {
+        return 0.0;
+    }
+    let v = yn.iter().copied().max().unwrap_or(0) as usize + 1;
+    let mut p0 = vec![1.0f64; v];
+    for &y in &yn[..h] {
+        p0[y as usize] += 1.0;
+    }
+    let z: f64 = p0.iter().sum();
+    p0.iter_mut().for_each(|x| *x /= z);
+    struct C {
+        n: u32,
+        d: HashMap<i64, u32>,
+    }
+    let mut cb: HashMap<i64, C> = HashMap::new();
+    let mut cs: HashMap<(i64, i64), C> = HashMap::new();
+    for i in 0..h {
+        let e = cb.entry(yp[i]).or_insert_with(|| C {
+            n: 0,
+            d: HashMap::new(),
+        });
+        e.n += 1;
+        *e.d.entry(yn[i]).or_insert(0) += 1;
+        let e = cs.entry((s[i], yp[i])).or_insert_with(|| C {
+            n: 0,
+            d: HashMap::new(),
+        });
+        e.n += 1;
+        *e.d.entry(yn[i]).or_insert(0) += 1;
+    }
+    let mut tot = 0.0;
+    for i in h..n {
+        let y = yn[i];
+        let mut pb = if (y as usize) < v {
+            p0[y as usize]
+        } else {
+            1e-9
+        };
+        if let Some(c) = cb.get(&yp[i]) {
+            let t = c.d.len() as f64;
+            pb = (*c.d.get(&y).unwrap_or(&0) as f64 + t * pb) / (c.n as f64 + t);
+        }
+        let mut ps = pb;
+        if let Some(c) = cs.get(&(s[i], yp[i])) {
+            let t = c.d.len() as f64;
+            ps = (*c.d.get(&y).unwrap_or(&0) as f64 + t * pb) / (c.n as f64 + t);
+        }
+        tot += ps.log2() - pb.log2();
+    }
+    tot / (n - h) as f64
+}
+
 /// I(a; b).
 pub fn mi(a: &[i64], b: &[i64]) -> f64 {
     ent(&[a]) + ent(&[b]) - ent(&[a, b])
@@ -148,5 +207,12 @@ mod tests {
         let (h1, h2, d) = ent_nested(&[&s, &yp]);
         assert!((h1 - ent(&[&s])).abs() < 1e-9 && (h2 - ent(&[&s, &yp])).abs() < 1e-9 && d == 2);
         assert_eq!(roll(&[1, 2, 3, 4], 1), vec![4, 1, 2, 3]);
+        // a context that fixes the next value gains about a bit over yp alone; noise gains nothing
+        let ctx: Vec<i64> = (0..8000).map(|i| (i * 13 / 7) % 2).collect();
+        let yp0: Vec<i64> = vec![0; 8000];
+        let yn0 = ctx.clone();
+        assert!(heldout_gain(&ctx, &yp0, &yn0) > 0.9);
+        let noise: Vec<i64> = (0..8000).map(|i| (i * 7919 % 31) as i64).collect();
+        assert!(heldout_gain(&noise, &yp0, &yn0) < 0.05);
     }
 }

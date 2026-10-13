@@ -211,7 +211,10 @@ impl Edge {
             let mut ra: Vec<u16> = Vec::with_capacity(w);
             if self.drop_lowest {
                 // Python reference rule: 4w+8 draws, keep eligible, sort, take the lowest
-                let mut c: Vec<u16> = (0..4 * w + 8).map(|_| rng.below(D) as u16).filter(|&b| bits::get(m, b as usize) && !bits::get(tgt, b as usize)).collect();
+                let mut c: Vec<u16> = (0..4 * w + 8)
+                    .map(|_| rng.below(D) as u16)
+                    .filter(|&b| bits::get(m, b as usize) && !bits::get(tgt, b as usize))
+                    .collect();
                 c.sort_unstable();
                 c.dedup();
                 c.truncate(add.len());

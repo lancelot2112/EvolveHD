@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! evolvehd text  --data corpus/bookA.bin,corpus/bookB.bin [--seed 0] [--symbolic] [--oracle 4] [--no-grow]
-//!                [--noise 0.25,4] [--merge 8] [--hebb 0.02] [--drop-random] [--out run.json]
+//!                [--noise 0.25,4] [--merge 8] [--hebb 0.02] [--drop-random] [--words] [--chunk-cap 4096]
+//!                [--out run.json]
 //! evolvehd ngram --data corpus/bookA.bin,corpus/bookB.bin [--order 4]
 //! evolvehd table [--corpus corpus] [--out-dir runs]   # the standard text table, jobs run in parallel
 //! ```
@@ -51,6 +52,10 @@ fn cfg_from(args: &[String]) -> Cfg {
         c.merge = m.parse().unwrap();
     }
     c.drop_lowest = !flag(args, "--drop-random");
+    c.words = flag(args, "--words");
+    if let Some(x) = arg(args, "--chunk-cap") {
+        c.chunk_cap = x.parse().unwrap();
+    }
     if let Some(h) = arg(args, "--hebb") {
         c.hebb = h.parse().unwrap();
     }
@@ -83,6 +88,31 @@ fn run_one(name: &str, data: Vec<u8>, cfg: Cfg, out: Option<String>) -> String {
     let mut b = Brain::new(data, cfg);
     b.run();
     let secs = t0.elapsed().as_secs_f64();
+    let mut words = String::new();
+    if b.t >= 400_000 {
+        for (k, lo, hi) in [("words_A", 200_000, 300_000), ("words_B", 300_000, 400_000)] {
+            if let Some(r) = b.word_report(lo, hi) {
+                b.extra_json.push((k.to_string(), r));
+            }
+        }
+    } else if let Some(r) = b.word_report(b.t / 2, b.t) {
+        b.extra_json.push(("words_last_half".to_string(), r));
+    }
+    for (k, r) in &b.extra_json {
+        let grab = |f: &str| {
+            r.split(&format!("\"{f}\":"))
+                .nth(1)
+                .and_then(|x| x.split([',', '}']).next())
+                .unwrap_or("?")
+                .to_string()
+        };
+        words.push_str(&format!(
+            "  [{k}: precision {} recall {} whole {}]",
+            grab("precision"),
+            grab("recall"),
+            grab("whole_word_segments")
+        ));
+    }
     if std::env::var("EVOLVEHD_PROF").is_ok() {
         let p = b.prof;
         eprintln!("prof: total {secs:.1}s, controller {:.1}s (temporal {:.1}, synergy {:.1}, screen {:.1})", p[4], p[1], p[2], p[3]);
@@ -97,7 +127,7 @@ fn run_one(name: &str, data: Vec<u8>, cfg: Cfg, out: Option<String>) -> String {
         .map(|&e| b.nodes[b.slab_src(e)].name.clone())
         .collect();
     format!(
-        "{name:<44} {secs:7.1}s  {}  kept: {}",
+        "{name:<44} {secs:7.1}s  {}  kept: {}{words}",
         columns(&b),
         kept.join(" ")
     )

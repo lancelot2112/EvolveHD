@@ -12,7 +12,7 @@
 //! Trials are shadow trials scored by paired log-loss. Every bits-per-byte figure is prequential.
 use crate::bits::{self, Bits, Code, D};
 use crate::edge::{Edge, TargetIndex};
-use crate::info::{ent, ent_nested, roll, CmiScreen};
+use crate::info::{ent, ent_nested, heldout_gain, roll, CmiScreen};
 use crate::pool::{rotate, Pool};
 use crate::rng::Rng;
 use std::collections::{HashMap, HashSet};
@@ -45,6 +45,9 @@ pub struct Cfg {
     pub hebb: f64,
     /// Writer masks drop their lowest-numbered eligible bits, as the Python reference did.
     pub drop_lowest: bool,
+    /// Offer the word moves: surprise-reset chunks and a previous-chunk hold.
+    pub words: bool,
+    pub chunk_cap: usize,
 }
 
 impl Default for Cfg {
@@ -74,6 +77,8 @@ impl Default for Cfg {
             bind_cap: 1024,
             hebb: 1.0,
             drop_lowest: true,
+            words: false,
+            chunk_cap: 4096,
         }
     }
 }
@@ -163,10 +168,92 @@ pub struct Distill {
     cent: Option<Vec<Vec<f64>>>,
 }
 
+/// A recurrent bind reset at surprising bytes: its state is the run of bytes since the last cut.
+pub struct ChunkReal {
+    pub pool: Pool,
+    start: Code,
+    cache: HashMap<(i32, u32, i32, u32), usize>,
+    code_key: Vec<Option<(i32, u32, i32, u32)>>,
+}
+
+impl ChunkReal {
+    #[allow(clippy::too_many_arguments)]
+    fn step(
+        &mut self,
+        prev: i32,
+        b: i32,
+        bgen: u32,
+        bcode: &Code,
+        reset: bool,
+        t: usize,
+        rng: &mut Rng,
+    ) -> i32 {
+        if b < 0 {
+            return -1;
+        }
+        let (key, pc) = if reset || prev < 0 {
+            ((-1, 0, b, bgen), self.start)
+        } else {
+            (
+                (prev, self.pool.gen[prev as usize], b, bgen),
+                self.pool.codes[prev as usize],
+            )
+        };
+        if let Some(&c) = self.cache.get(&key) {
+            if self.pool.alive[c] && self.code_key[c] == Some(key) {
+                self.pool.last[c] = t as u64;
+                return c as i32;
+            }
+        }
+        let mut inp: Bits = bits::from_positions(bcode);
+        for &x in rotate(&pc, 333).iter() {
+            bits::set(&mut inp, x as usize);
+        }
+        let idx = bits::positions(&inp);
+        let m = self.pool.match_input(&idx, &inp, t as u64, rng);
+        if m.recruited || bits::and_count(&self.pool.masks[m.cell], &inp) >= self.pool.k {
+            self.cache.insert(key, m.cell);
+            self.code_key[m.cell] = Some(key);
+        }
+        m.cell as i32
+    }
+}
+
+/// Exact chunk: a trie over (previous chunk or start, byte).
+pub struct ChunkSym {
+    map: HashMap<(i32, i32), usize>,
+    pub codes: Vec<Code>,
+    rng: Rng,
+}
+
+impl ChunkSym {
+    fn step(&mut self, prev: i32, b: i32, reset: bool) -> i32 {
+        if b < 0 {
+            return -1;
+        }
+        let k = (if reset || prev < 0 { -1 } else { prev }, b);
+        if let Some(&c) = self.map.get(&k) {
+            return c as i32;
+        }
+        let c = self.map.len();
+        self.map.insert(k, c);
+        self.codes.push(bits::rand_code(&mut self.rng));
+        c as i32
+    }
+}
+
 pub enum Kind {
     Byte,
-    Delay { d: usize },
-    Hold { v: i32 },
+    ChunkReal(Box<ChunkReal>, f64),
+    ChunkSym(Box<ChunkSym>, f64),
+    /// The chunk completed at the last cut (parts[0] = the chunk).
+    PrevWord(f64),
+    Delay {
+        d: usize,
+    },
+    Hold {
+        v: i32,
+    },
     BindReal(Box<BindReal>),
     BindSym(Box<BindSym>),
     Distill(Box<Distill>),
@@ -181,6 +268,8 @@ impl Kind {
             Kind::Hold { .. } => "hold",
             Kind::BindReal(_) | Kind::BindSym(_) => "bind",
             Kind::Distill(_) => "distill",
+            Kind::ChunkReal(..) | Kind::ChunkSym(..) => "chunk",
+            Kind::PrevWord(_) => "hold",
             Kind::Taken => "?",
         }
     }
@@ -248,6 +337,15 @@ pub struct Brain {
     pub merged: usize,
     /// Seconds spent in: [tick body, temporal, synergy, screen, other controller work].
     pub prof: [f64; 5],
+    /// Running mean and sd of the byte's bits, as seen before tick t (the surprise statistic).
+    pub mu: Vec<f64>,
+    pub sd: Vec<f64>,
+    sm: f64,
+    sv: f64,
+    pub chunk: Option<usize>,
+    pub prev: Option<usize>,
+    /// Extra top-level entries for the summary JSON (key, raw JSON).
+    pub extra_json: Vec<(String, String)>,
 }
 
 fn log_softmax_at(logits: &[f64], yi: usize) -> (Vec<f64>, f64) {
@@ -345,6 +443,13 @@ impl Brain {
             alive_dirty: true,
             merged: 0,
             prof: [0.0; 5],
+            mu: vec![0.0; tt],
+            sd: vec![1.0; tt],
+            sm: 4.0,
+            sv: 1.0,
+            chunk: None,
+            prev: None,
+            extra_json: vec![],
         };
         b.slab[0].drop_lowest = cfg.drop_lowest;
         if cfg.oracle > 0 {
@@ -370,6 +475,9 @@ impl Brain {
             Kind::BindReal(b) => b.pool.codes[c],
             Kind::BindSym(b) => b.codes[c],
             Kind::Distill(d) => d.codes[c],
+            Kind::ChunkReal(k, _) => k.pool.codes[c],
+            Kind::ChunkSym(k, _) => k.codes[c],
+            Kind::PrevWord(_) => self.code_of(self.nodes[n].parts[0], c as i32),
             Kind::Taken => unreachable!(),
         }
     }
@@ -383,7 +491,9 @@ impl Brain {
             Kind::Byte => self.byte.pool.gen[c],
             Kind::Delay { .. } | Kind::Hold { .. } => self.gen_of(self.nodes[n].parts[0], c as i32),
             Kind::BindReal(b) => b.pool.gen[c],
-            Kind::BindSym(_) | Kind::Distill(_) => 1,
+            Kind::BindSym(_) | Kind::Distill(_) | Kind::ChunkSym(..) => 1,
+            Kind::ChunkReal(k, _) => k.pool.gen[c],
+            Kind::PrevWord(_) => self.gen_of(self.nodes[n].parts[0], c as i32),
             Kind::Taken => unreachable!(),
         }
     }
@@ -792,6 +902,8 @@ impl Brain {
 
     pub fn tick(&mut self) {
         let t = self.t;
+        self.mu[t] = self.sm;
+        self.sd[t] = self.sv.sqrt();
         let eps = self.cfg.eps;
         let byte = self.data[t];
         if self.alive_dirty {
@@ -909,7 +1021,16 @@ impl Brain {
             self.check();
             self.prof[4] += c0.elapsed().as_secs_f64();
         }
+        let a = 1.0 / 2000.0;
+        let d = self.bits[t] - self.sm;
+        self.sm += a * d;
+        self.sv = (1.0 - a) * self.sv + a * d * d;
         self.t += 1;
+    }
+
+    /// A surprising byte at t starts a new chunk.
+    pub fn boundary(&self, t: usize, z: f64) -> bool {
+        self.bits[t] > self.mu[t] + z * self.sd[t]
     }
 
     fn update_node(&mut self, i: usize, t: usize) {
@@ -962,6 +1083,37 @@ impl Brain {
                 let s = self.cluster(&mut d, self.nodes[src].state);
                 self.nodes[i].kind = Kind::Distill(d);
                 s
+            }
+            Kind::ChunkReal(_, z) => {
+                let z = *z;
+                let b = self.nodes[0].state;
+                let (bg, bc) = if b >= 0 {
+                    (self.gen_of(0, b), self.code_of(0, b))
+                } else {
+                    (0, [0; bits::CK])
+                };
+                let reset = self.boundary(t, z);
+                let prev = self.nodes[i].state;
+                let rng = &mut self.rng;
+                match &mut self.nodes[i].kind {
+                    Kind::ChunkReal(k, _) => k.step(prev, b, bg, &bc, reset, t, rng),
+                    _ => unreachable!(),
+                }
+            }
+            Kind::ChunkSym(_, z) => {
+                let reset = self.boundary(t, *z);
+                let (prev, b) = (self.nodes[i].state, self.nodes[0].state);
+                match &mut self.nodes[i].kind {
+                    Kind::ChunkSym(k, _) => k.step(prev, b, reset),
+                    _ => unreachable!(),
+                }
+            }
+            Kind::PrevWord(z) => {
+                if t >= 1 && self.boundary(t, *z) {
+                    self.nodes[self.nodes[i].parts[0]].h[t - 1]
+                } else {
+                    self.nodes[i].state
+                }
             }
             Kind::Byte | Kind::Taken => return,
         };
@@ -1151,6 +1303,13 @@ impl Brain {
     }
 
     fn temporal(&mut self, w: usize) {
+        self.temporal_inner(w);
+        if self.cfg.words && self.derived.len() < self.cfg.max_derived {
+            self.word_moves(w);
+        }
+    }
+
+    fn temporal_inner(&mut self, w: usize) {
         let t = self.t;
         let w = w.min(t + 1 - 16);
         let y = self.series(0, w);
@@ -1308,6 +1467,16 @@ impl Brain {
     }
 
     fn gc(&mut self) {
+        self.gc_inner();
+        if self.chunk.is_some_and(|c| self.nodes[c].removed) {
+            self.chunk = None;
+        }
+        if self.prev.is_some_and(|c| self.nodes[c].removed) {
+            self.prev = None;
+        }
+    }
+
+    fn gc_inner(&mut self) {
         let t = self.t;
         let mut used: HashSet<usize> = self
             .kept
@@ -1484,8 +1653,238 @@ impl Brain {
             json_f((hc + hb - hj) / hb.max(1e-9)),
             json_f(hj - hb)
         );
+        for (k, v) in &self.extra_json {
+            let _ = write!(o, "{}:{},", json_str(k), v);
+        }
         let _ = write!(o, "\"ticks\":{},\"secs\":{}}}", tt, json_f(secs));
         o
+    }
+}
+
+// -------------------------------------------------------------------- word moves
+impl Brain {
+    /// The chunk ids a trie would give over the last w ticks (a virtual screen, nothing built).
+    fn virtual_chunk(&self, z: f64, w: usize) -> Vec<i64> {
+        let t = self.t;
+        let mut ids = vec![-1i64; w];
+        let mut m: HashMap<(i64, i64), i64> = HashMap::new();
+        let mut prev: i64 = -1;
+        for (i, tt) in (t + 1 - w..=t).enumerate() {
+            let b = self.nodes[0].h[tt] as i64;
+            if b < 0 {
+                prev = -1;
+                continue;
+            }
+            let k = (
+                if self.boundary(tt, z) || prev < 0 {
+                    -1
+                } else {
+                    prev
+                },
+                b,
+            );
+            let n = m.len() as i64;
+            prev = *m.entry(k).or_insert(n);
+            ids[i] = prev;
+        }
+        ids
+    }
+
+    fn make_chunk(&mut self, z: f64) -> Node {
+        let t = self.t;
+        let name = format!("chunk(z={z})");
+        let mut h = vec![-1; self.tt];
+        let kind = if self.cfg.real {
+            let mut pool = Pool::new(self.cfg.chunk_cap, 48, 40);
+            pool.hebb = self.cfg.hebb;
+            let start = bits::rand_code(&mut self.rng);
+            let mut k = ChunkReal {
+                pool,
+                start,
+                cache: HashMap::new(),
+                code_key: vec![None; self.cfg.chunk_cap],
+            };
+            let mut prev = -1;
+            for tt in (t + 1).saturating_sub(20000)..=t {
+                let b = self.nodes[0].h[tt];
+                let (bg, bc) = if b >= 0 {
+                    (self.gen_of(0, b), self.code_of(0, b))
+                } else {
+                    (0, [0; bits::CK])
+                };
+                prev = k.step(prev, b, bg, &bc, self.boundary(tt, z), tt, &mut self.rng);
+                h[tt] = prev;
+            }
+            Kind::ChunkReal(Box::new(k), z)
+        } else {
+            let seed = self.rng.next_u64();
+            let mut k = ChunkSym {
+                map: HashMap::new(),
+                codes: vec![],
+                rng: Rng::new(seed),
+            };
+            let mut prev = -1;
+            for tt in (t + 1).saturating_sub(40000)..=t {
+                prev = k.step(prev, self.nodes[0].h[tt], self.boundary(tt, z));
+                h[tt] = prev;
+            }
+            Kind::ChunkSym(Box::new(k), z)
+        };
+        let mut nd = self.new_node(name, kind, vec![0], format!("{z}"));
+        nd.state = h[t];
+        nd.h = h;
+        nd
+    }
+
+    fn make_prevword(&mut self, c: usize, z: f64) -> Node {
+        let t = self.t;
+        let mut h = vec![-1; self.tt];
+        let mut st = -1;
+        for tt in (t + 1).saturating_sub(40000).max(1)..=t {
+            if self.boundary(tt, z) {
+                st = self.nodes[c].h[tt - 1];
+            }
+            h[tt] = st;
+        }
+        let mut nd = self.new_node(
+            format!("prevword[{}]", self.nodes[c].name),
+            Kind::PrevWord(z),
+            vec![c],
+            format!("{z}"),
+        );
+        nd.state = st;
+        nd.h = h;
+        nd
+    }
+
+    fn chunk_z(&self, c: usize) -> f64 {
+        match &self.nodes[c].kind {
+            Kind::ChunkReal(_, z) | Kind::ChunkSym(_, z) => *z,
+            _ => unreachable!(),
+        }
+    }
+
+    fn word_moves(&mut self, w: usize) {
+        let t = self.t;
+        let y = self.series(0, w);
+        let (yp, yn) = (&y[..w - 1], &y[1..]);
+        let thr = self.cfg.tmp_thr;
+        match self.chunk {
+            None => {
+                let mut best: Option<(f64, f64)> = None;
+                for z in [0.5, 1.0, 1.5] {
+                    let s: Vec<i64> = self.virtual_chunk(z, w)[..w - 1]
+                        .iter()
+                        .map(|x| x + 1)
+                        .collect();
+                    let v = heldout_gain(&s, yp, yn);
+                    self.events.push(Event {
+                        t,
+                        kind: "screen-chunk".into(),
+                        a: format!("z={z}"),
+                        b: None,
+                        v: Some(v),
+                    });
+                    if v > thr && best.map_or(true, |b| v > b.0) {
+                        best = Some((v, z));
+                    }
+                }
+                if let Some((v, z)) = best {
+                    let nd = self.make_chunk(z);
+                    let i = self.add(nd, format!("screen byte {v:.2}"));
+                    self.chunk = Some(i);
+                }
+            }
+            Some(c) if self.prev.is_none() => {
+                let z = self.chunk_z(c);
+                let ch = &self.nodes[c].h[t + 1 - w..=t];
+                let mut last: i64 = -1;
+                let mut s = Vec::with_capacity(w);
+                for (j, tt) in (t + 1 - w..=t).enumerate() {
+                    if self.boundary(tt, z) {
+                        last = j as i64;
+                    }
+                    s.push(if last >= 1 {
+                        ch[last as usize - 1] as i64 + 1
+                    } else {
+                        0
+                    });
+                }
+                let v = heldout_gain(&s[..w - 1], yp, yn);
+                let name = self.nodes[c].name.clone();
+                self.events.push(Event {
+                    t,
+                    kind: "screen-prevword".into(),
+                    a: name,
+                    b: None,
+                    v: Some(v),
+                });
+                if v > thr {
+                    let nd = self.make_prevword(c, z);
+                    let i = self.add(nd, format!("screen byte {v:.2}"));
+                    self.prev = Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Boundary alignment with real word starts over [lo, hi), and how many chunks are one whole word.
+    pub fn word_report(&self, lo: usize, hi: usize) -> Option<String> {
+        let c = self.chunk?;
+        let z = self.chunk_z(c);
+        let hi = hi.min(self.t);
+        let alpha = |b: u8| {
+            (b as char).is_ascii_alphabetic() || b == b'\'' || (b >= 0xC0 && b != 0xD7 && b != 0xF7)
+        };
+        let isa =
+            |b: u8| (b as char).is_ascii_alphabetic() || (b >= 0xC0 && b != 0xD7 && b != 0xF7);
+        let d = &self.data;
+        let (mut nb, mut ws, mut both) = (0usize, 0usize, 0usize);
+        let mut starts = vec![];
+        for t in lo..hi {
+            let bnd = self.boundary(t, z);
+            let wstart = alpha(d[t]) && !alpha(d[t - 1]);
+            nb += bnd as usize;
+            ws += wstart as usize;
+            both += (bnd && wstart) as usize;
+            if bnd {
+                starts.push(t);
+            }
+        }
+        let (mut whole, mut segs) = (0usize, 0usize);
+        let mut ex = vec![];
+        for p in starts.windows(2) {
+            let (a, b) = (p[0], p[1]);
+            let seg = &d[a..b];
+            segs += 1;
+            let mut e = seg.len();
+            while e > 0 && b" \n,.;:!?\"-".contains(&seg[e - 1]) {
+                e -= 1;
+            }
+            let core = &seg[..e];
+            let starts_word = a == 0 || !alpha(d[a - 1]);
+            let ends_word = seg.len() > core.len() || b >= d.len() || !isa(d[b]);
+            if core.len() >= 2 && core.iter().all(|&x| isa(x)) && starts_word && ends_word {
+                whole += 1;
+            }
+            if ex.len() < 40 {
+                ex.push(json_str(&String::from_utf8_lossy(seg)));
+            }
+        }
+        let mean_len = if starts.len() > 1 {
+            (starts[starts.len() - 1] - starts[0]) as f64 / (starts.len() - 1) as f64
+        } else {
+            0.0
+        };
+        Some(format!(
+            "{{\"z\":{z},\"boundaries\":{nb},\"word_starts\":{ws},\"precision\":{},\"recall\":{},\"segments\":{segs},\"whole_word_segments\":{},\"mean_seg_len\":{},\"examples\":[{}]}}",
+            json_f(both as f64 / nb.max(1) as f64),
+            json_f(both as f64 / ws.max(1) as f64),
+            json_f(whole as f64 / segs.max(1) as f64),
+            json_f(mean_len),
+            ex.join(",")
+        ))
     }
 }
 
