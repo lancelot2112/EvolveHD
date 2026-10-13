@@ -27,7 +27,9 @@ Each term links to the page that explains it. For the ideas behind the terms, st
 | [**Opportunity**](concepts/attention.md) | Screen information on an unsolved target that no kept edge has captured; part of the attention score |
 | [**Pool**](concepts/matcher-pools.md) | A set of matcher cells sharing an input, with recruitment, LRU eviction and k-WTA |
 | [**Prime**](concepts/drive-and-prime.md) | Writer-mask votes that add evidence to existing candidates, without creating winners |
+| [**Running count screen**](concepts/screens.md#running-count-screen) | A screen that keeps its own counts from the candidate's proposal on and scores each tick before learning from it; it can use far more data than a window |
 | [**Screen**](concepts/screens.md) | A cheap estimate of how much a candidate would add: conditional MI against a shift null, or a held-out predictive gain |
+| [**Trial extension**](concepts/shadow-trials.md#extensions-for-many-state-sources) | A trial of a source with more than 4,096 states that is positive but under the bar continues, up to 5 times its normal length |
 | [**Shadow trial**](concepts/shadow-trials.md) | A trial edge that learns and is scored but does not vote |
 | [**Shift-bind**](concepts/shift-bind.md) | Bind two codes by rotating one by an amount derived from the other, then cleaning up; keeps the pair code unlike either part |
 | [**Station**](experiments/09-attention-temporal.md) | One world plus one grown brain, in the attention experiments |

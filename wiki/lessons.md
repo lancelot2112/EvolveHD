@@ -34,6 +34,8 @@ These are the design rules the experiments forced, grouped by layer. Each links 
 - **Compress keeps depth affordable.** Without distill, representations grow multiplicatively and stall after two levels ([08](experiments/08-bootstrapping.md)).
 - **Growth adapts to capacity.** With real 1024-cell pools it built factored skip-pair contexts and beat a hand-wired chain on the same pools ([11](experiments/11-real-text.md)).
 - **Screen big contexts on held-out data.** A shift-null MI screen scored chunks at −0.5 bits when they add 0.37; held-out log-loss gain is honest ([12](experiments/12-words.md)).
+- **Measure big contexts against the right baseline, with enough data.** The previous word looked worthless in a 15k-tick window and weak beyond the current byte, but beyond the current chunk it carried 0.21 bits and kept growing ([13](experiments/13-word-pairs.md)).
+- **Give slow learners a long enough trial.** Writer masks need many writes per state; a 31,000-state bind showed at most 0.0045 bits in normal trials and was kept with an extension ([13](experiments/13-word-pairs.md)).
 - **Inline beats blind population search for wiring.** Use populations, if at all, for the grammar's own thresholds ([07](experiments/07-graph-growth.md)).
 
 ## Attention and time
@@ -45,5 +47,6 @@ These are the design rules the experiments forced, grouped by layer. Each links 
 - **Reward attention with the grammar's own signals:** significant progress, structure grown, and uncaptured screen information ([09](experiments/09-attention-temporal.md), [10](experiments/10-full-primitives.md)).
 - **A surprise alarm must restart what the screens look at.** Faster learning and early re-checks alone did little ([10](experiments/10-full-primitives.md)).
 - **Surprise is a good place to cut, not a word detector.** A context reset at surprising bytes paid more than any other edge, but its units are runs the model can follow, not words ([12](experiments/12-words.md)).
+- **Compressing by what comes next keeps the wrong variable.** Successor clusters failed for byte contexts and again for words; the word itself, joined with the next one, was what paid ([11](experiments/11-real-text.md), [13](experiments/13-word-pairs.md)).
 - **Global consensus needs fatigue,** or it locks ([05](experiments/05-claustrum-consensus.md)).
 - **Hopeless and slow can't be told apart cheaply.** Ruling out brute force costs about 35k ticks per input ([10](experiments/10-full-primitives.md)).

@@ -15,6 +15,10 @@ Everything is finite: cells per pool, derived nodes per area, trial slots, learn
 
 On text, a 1024-cell real bind pool can't hold 3-byte contexts. The data rule refused those binds, so growth built **factored skip-pair binds** instead. With the same real pools, the grown structure beat a hand-wired order-4 chain: 2.61 against 2.74 bits per byte. Capacity still cost 0.28 bits against exact, unlimited tables ([11](../experiments/11-real-text.md)).
 
+## Capacity at the word level
+
+A 4,096-cell chunk pool cannot hold English word prefixes: it was evicted 101,000 times in 400k bytes. A conjoin over it (1,024 cells) was evicted 37,000 times and gained nothing with real pools, while the same move with exact nodes cut 0.05–0.09 bits per byte. The real conjoin never had an extended trial, so capacity is the likely cause rather than a proven one ([13](../experiments/13-word-pairs.md)). Word-level structure needs pools that grow with demand, or a cheaper code for word identity.
+
 ## Capacity triggers growth elsewhere
 
 When sleep ends near the cap (38 of 40 cells), that is the trigger for growing a parallel vector rather than splitting one. Splitting was rejected because it fragments the readers' windows ([03](../experiments/03-grow-sleep.md), [history](../history.md)).
@@ -31,6 +35,6 @@ When sleep ends near the cap (38 of 40 cells), that is the trigger for growing a
 
 ## Evidence in
 
-[03 · grow sleep](../experiments/03-grow-sleep.md) · [11 · real text](../experiments/11-real-text.md)
+[03 · grow sleep](../experiments/03-grow-sleep.md) · [11 · real text](../experiments/11-real-text.md) · [13 · word pairs](../experiments/13-word-pairs.md)
 
 *[All concepts](README.md) · [Wiki home](../README.md)*

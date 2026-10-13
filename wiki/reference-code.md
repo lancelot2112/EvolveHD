@@ -38,11 +38,15 @@ A 400k-byte grown text run takes 6 to 12 minutes in Python; toy-world runs take 
 | `ByteReal`, `ByteSym`, `Delay`, `Hold`, `BindReal`, `BindSym`, `Distill` | `brain` (`Kind` enum) |
 | `TextBrain.tick`, `check`, `screen`, `fill`, `temporal`, `synergy`, `gc`, `summary` | `brain::Brain` |
 | `ngram.py` | `baseline` |
-| `word_sim.py` (chunks, held-out screen) | not yet ported |
+| `word_sim.py`: `ChunkReal`, `ChunkSym`, `PrevWord`, `heldout_gain`, `word_report` | `brain` (`Kind::ChunkReal`, `ChunkSym`, `PrevWord`), `info::heldout_gain` |
 
-Deliberate differences:
-- When a writer mask drops bits, the Python code took the lowest-numbered candidates (a side effect of `np.unique`). Rust samples them at random.
-- Removed nodes free their history but keep their frozen state, as Python objects did.
+Rust-only additions, all off by default: running count screens (`--run-window`), word-pair conjoin (`--conjoin-words`), chunk classes (`--classes`), and trial extensions for many-state sources (`--long-trials`, threshold `--long-trial-states`). See [13](experiments/13-word-pairs.md).
+
+Differences from the Python code:
+- **Writer-mask drop rule.** Python drops the lowest-numbered eligible bits, a side effect of `np.unique`. Rust first sampled them at random. Over six noisy seeds, Python's rule scored 3.28 bits per byte on book B's first 50k against 3.45 for random (Python itself: 3.22). On clean runs the two differ by up to 0.016. Python's rule is now the default; `--drop-random` restores the other. A likely reason it helps is that high-numbered bits are dropped less often, so each mask mixes fast- and slow-forgetting bits. That is a hypothesis, not tested.
+- **Histories are ring buffers** of 2^20 ticks per node, so a 12M-byte run fits in memory. Screens, replays and delays never look further back.
+- **Memory is bounded on long runs:** discarded edges free their writer masks, pool caches keep one key per cell, and running screens halve their counts every million ticks.
+- Removed nodes keep their frozen state, as Python objects did.
 
 ### Validation (bits per byte, seed 0 unless noted)
 
@@ -55,10 +59,11 @@ Deliberate differences:
 | Grown, real pools, seed 0 | 2.625 → 2.611 | 2.911 → 2.927 | 2.826 → 2.842 | 2.832 → 2.817 |
 | Grown, real pools, seed 1 | 2.593 → 2.609 | 2.943 → 2.914 | 2.853 → 2.822 | 2.819 → 2.816 |
 | Grown, real pools, fresh on book B | – | 3.620 → 3.621 | 2.939 → 2.945 | – |
-| Noisy input, recruit < 10, merge, Hebbian 2% | 3.181 → 3.128 | 3.260 → 3.850 | – | 3.267 → 3.202 |
-| Same, seed 1 (Python → Rust); Rust seed 2 | 3.000 → 3.005; 3.126 | 3.180 → 3.398; 3.410 | 3.216 → 3.322; 3.323 | 3.222 → 3.154; 3.184 |
+| Noisy input, recruit < 10, merge, Hebbian 2% (Rust: mean of 6 seeds, Python's drop rule) | 3.181, 3.000 → 3.109 | 3.260, 3.180 → 3.279 | –, 3.216 → 3.248 | 3.267, 3.222 → 3.248 |
+| Words: chunks, real pools | 2.546 → 2.543 | 2.898 → 2.899 | 2.799 → 2.805 | 2.753 → 2.752 |
+| Words: chunks, exact nodes | 2.284 → 2.283 | 2.676 → 2.664 | 2.539 → 2.518 | 2.577 → 2.579 |
 
-Every clean row agrees within the seed-to-seed spread (about 0.03). The grown structures match too: the same delays, byte pairs, skip pairs and exact 3-byte contexts are kept. **One known gap:** with noisy input, book A matches but book B is worse in Rust: 3.40–3.85 on its first 50k against 3.18–3.26 in Python. The same structure is kept, and recruits and duplicate merges are the same, so the difference is in learning, not growth. The likeliest cause is the mask-drop rule above; it is open.
+Every clean row agrees to within 0.04 (the largest gap: grown exact nodes, book B first 50k, 2.688 → 2.647); the spread between seeds is about 0.03. The grown structures match too: the same delays, byte pairs, skip pairs and exact 3-byte contexts are kept. Noisy runs vary by about 0.3 bits per byte between seeds. With random drops, Rust did worse than Python on book B under noise; with Python's drop rule they agree (above). Word reports match too: boundary precision 0.44 and 0.42 against Python's 0.43 and 0.42, and 16% and 14% whole-word chunks against 15%. The clean rows above were run with random drops; with Python's rule, now the default, they move by at most 0.016 (grown real pools 2.627 and 2.613, grown exact 2.321 on book A). The word rows use Python's rule.
 
 ### Speed
 

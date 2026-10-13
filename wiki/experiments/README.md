@@ -16,6 +16,8 @@ Every simulation so far, oldest first. Each page gives the question, setup, the 
 | 10 | [All seven primitives](10-full-primitives.md) | Oct 13 | Correct 0.125 → 0.72; Select reward 0.23 → 0.83; broadcast rewires in 5k ticks against 12k; budget 0.966 against 0.932 |
 | 11 | [Real text, real pools](11-real-text.md) | Oct 13 | Grows its own byte-context model: 2.61 bits per byte (real pools), 2.33 (exact nodes); beats gzip over a whole book |
 | 12 | [Words: chunking by surprise](12-words.md) | Oct 13 | A context reset at surprising bytes is the most valuable edge on text (−0.08 bits per byte, real pools); its cuts are morph-like, 2.4× chance at word starts |
+| 13 | [Word pairs: more data, then conjoin](13-word-pairs.md) | Oct 13 | With more data the previous word carries 0.2+ bits beyond the current chunk; a conjoin of the two is kept and cuts 0.05–0.09 bits per byte (exact nodes); successor classes fail; real pools lack the capacity |
+| 14 | [The whole corpus](14-full-corpus.md) | Oct 13 | 11.7M bytes, 18 books: 2.56 bits per byte against 2.11 for order-4 counts; the gap doesn't close with data because real pools forget; distill pays for the first time (KJV Bible) |
 
 The rules these results forced are collected in [lessons](../lessons.md); the ideas behind them are in [concepts](../concepts/README.md); terms are in the [glossary](../glossary.md).
 

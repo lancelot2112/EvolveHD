@@ -4,10 +4,11 @@ Ordered roughly by how much they block the next step.
 
 ## Grammar and representation
 
-- [ ] **Words.** Chunking by surprise pays, but its chunks are morph-like runs (15% are whole words), and a previous-chunk context screens negative at a 30k window ([12](experiments/12-words.md)). Next: distill chunks by their contexts into word classes, then screen previous-class holds; intermediate targets, so nodes predict their own next state.
+- [ ] **Words with real pools.** With exact nodes, a conjoin of the previous and current chunk is kept and cuts 0.05–0.09 bits per byte. With real pools it gains nothing; the 4,096-cell chunk pool is evicted about every 4 bytes, but the real conjoin never had an extended trial, so this is not yet proven ([13](experiments/13-word-pairs.md)). Pools that grow on demand, or a smaller code for word identity?
+- [ ] **Word classes.** Classes of chunks by what follows them added nothing beyond the current chunk ([13](experiments/13-word-pairs.md)). What grouping keeps what the previous word tells about the next? Intermediate targets, where nodes predict their own next state, may supply it.
 - [ ] **Compress for text.** Distilling a bind into 32 clusters of predicted successors never paid. The chunk is the first text variable kept on its own merits ([12](experiments/12-words.md)); is it the right thing to compress?
 - [ ] **Readout gap.** Hand-wired exact contexts trail Witten-Bell counts of the same order by about 0.22 bits per byte. Better writer rule, or backoff between context orders?
-- [ ] **Capacity.** 1024-cell bind pools cost 0.28 bits per byte against exact tables. Grow capacity on demand (a parallel pool), or rely on factored binds?
+- [ ] **Capacity (now the main limit).** 1,024-cell bind pools cost 0.28 bits per byte against exact tables on 400k bytes. Over 11.7M bytes the gap to order-4 counts stays at 0.4–0.6, and pools are evicted up to once every 3 bytes ([14](experiments/14-full-corpus.md)). Grow a parallel pool when recently used cells are being evicted?
 - [ ] **Noise.** Where does duplicate merging live (a sleep phase)? And what overlap rule generalises beyond bytes? The Rust port does 0.2–0.6 bits worse than Python on book B under noise ([reference code](reference-code.md#validation-bits-per-byte-seed-0-unless-noted)), which suggests noisy runs are sensitive to the writer-mask drop rule.
 
 ## Scale and build

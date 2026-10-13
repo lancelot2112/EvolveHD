@@ -11,8 +11,10 @@ The goal is not to simulate a brain. It is a robust learner that uses the streng
   - 2.33 with exact nodes, against 2.18 for hand wiring.
   - Over the whole book it beats gzip.
   - A new chunk move, a context reset at surprising bytes, takes real pools to 2.55 ([12](experiments/12-words.md)).
+  - With exact nodes, a conjoin of the previous and current word-piece is kept, cutting a further 0.05–0.09 bits per byte: the first word-level structure ([13](experiments/13-word-pairs.md)).
+  - Over the whole 11.7M-byte Gutenberg corpus, real pools reach 2.56 against 2.11 for order-4 counts, and the gap doesn't close with more data ([14](experiments/14-full-corpus.md)).
 - **All seven primitives exist as grammar moves** and pass their standalone tests: Expand, Associate, Compress, Gate, Select, Correct, Broadcast.
-- **Open:** word-level structure (chunks are morph-like, not words, and previous-word context is not yet visible), the readout's 0.2-bit gap to count models, and scaling the screens to thousands of nodes.
+- **Open:** capacity. Real pools forget word-level structure before it can be learned; pools that grow on demand come next. Also open: the readout's 0.2-bit gap to count models, and scaling the screens to thousands of nodes.
 - **The Rust crate** ports the text experiment and reproduces its table, about 10 times faster than Python ([reference code](reference-code.md#the-rust-crate)). The Python sims in [`reference/python`](../reference/python) remain the reference for everything else.
 
 ## Reading order

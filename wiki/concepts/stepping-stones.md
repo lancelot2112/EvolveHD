@@ -20,7 +20,7 @@ expand → associate → compress, repeated:
 | No stepping stones (T2 and T6 replaced by noise) | 0: no screen ever fires |
 
 - **Order in time doesn't matter.** All puzzles were present from tick 0; the shallowest unsolved one is the only one with signal, so the system solves them in depth order by itself.
-- **Real data has stepping stones built in.** On text, the grammar grew delays, then byte pairs, then 3-byte and skip contexts ([11](../experiments/11-real-text.md)). The next level up appeared too: a chunk reset at surprising bytes paid by itself, but its cuts are morph-like, and word-to-word context was still invisible ([12](../experiments/12-words.md)).
+- **Real data has stepping stones built in.** On text, the grammar grew delays, then byte pairs, then 3-byte and skip contexts ([11](../experiments/11-real-text.md)). The next level up appeared too: a chunk reset at surprising bytes paid by itself, but its cuts are morph-like, and word-to-word context was still invisible ([12](../experiments/12-words.md)). With more data per screen, the previous word showed up, and a conjoin of the two chunks was kept ([13](../experiments/13-word-pairs.md)). Each level was the stepping stone for the next: bytes → byte contexts → chunks → chunk pairs.
 - **Without stepping stones, only brute force works:** a granule layer whose cost explodes with the number of inputs ([10](../experiments/10-full-primitives.md)).
 
 ## Design consequence
@@ -33,6 +33,6 @@ The environment definition is a set of information sources with compositional st
 
 ## Evidence in
 
-[08 · bootstrapping](../experiments/08-bootstrapping.md) · [12 · words](../experiments/12-words.md)
+[08 · bootstrapping](../experiments/08-bootstrapping.md) · [12 · words](../experiments/12-words.md) · [13 · word pairs](../experiments/13-word-pairs.md)
 
 *[All concepts](README.md) · [Wiki home](../README.md)*

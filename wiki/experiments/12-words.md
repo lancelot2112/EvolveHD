@@ -1,6 +1,6 @@
 # 12 · Words: chunking by surprise (2026-10-13)
 
-*[All experiments](README.md)* · [← 11](11-real-text.md)
+*[All experiments](README.md)* · [← 11](11-real-text.md) · [13 →](13-word-pairs.md)
 
 **Concepts:** [Time: delays and holds](../concepts/time-delays-and-holds.md) · [Screens](../concepts/screens.md) · [Growth operators](../concepts/growth-operators.md#chunk) · [Broadcast](../concepts/broadcast.md) · [Stepping stones](../concepts/stepping-stones.md)
 
@@ -79,6 +79,9 @@ Sample chunks (exact nodes, book A): `upplied` · `, to ` · `Henrietta, ` · `s
 - Leave previous-word holds out until there is a compressed chunk variable to latch.
 
 ## Next
+
+*Followed up in [13](13-word-pairs.md): with more data the previous chunk does carry information, but only together with the current one.*
+
 
 - Distill chunks by their left and right contexts into 32–256 classes, then screen previous-class holds.
 - Repeat with seeds 1–3, and log chunk-pool evictions at 1,024 and 4,096 cells.

@@ -66,6 +66,8 @@ Seven experiments built and tested a grammar that grows networks inline:
 
 - [Real text](experiments/11-real-text.md): the grammar grows a byte-context model on two books, with real pools. Capacity shapes what it grows, structure transfers between authors, and noise needs merging.
 - [Words](experiments/12-words.md): cutting the stream at surprising bytes gives a chunk context that pays (2.55 bits per byte with real pools). The chunks are morph-like runs, not words, and a previous-word context is invisible at this data size.
+- [Word pairs](experiments/13-word-pairs.md): with running count screens, the previous word becomes visible. A conjoin of the two word-pieces is kept with exact nodes, after trials of many-state sources were allowed to run longer.
+- [The whole corpus](experiments/14-full-corpus.md): 11.7M bytes in 44 minutes. Real pools stay 0.4–0.6 bits per byte behind order-4 counts, so capacity is now the limit.
 - The [growth grammar spec](https://claude.ai/code/artifact/d37e3fa6-5a32-45a9-a6cc-88fcb7fc4d09) was written, and the text experiment was ported to Rust in this repo; it reproduces the Python table about 10 times faster.
 
 The design rules these phases forced are collected in [lessons](lessons.md); what remains is in [open questions](open-questions.md).

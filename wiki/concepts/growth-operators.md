@@ -25,13 +25,15 @@ Synergy or gain-over-best-part over pairs anchored on the target and its kept so
 
 When the screen sees information but an additive edge can't use it, the information is conditional on the target's own state. Conjoin binds the source with the target. This is how a context × self conjunction (T4 = perm_L(T4)) was solved ([07](../experiments/07-graph-growth.md)). It falls out of a rule and resembles HTM's context cells.
 
+The partner need not be the target. The previous word told little beyond the current byte, but 0.21 bits beyond the current [chunk](#chunk). So conjoin bound it with the chunk: one cell per (previous word, current word so far). With [trial extensions](shadow-trials.md#extensions-for-many-state-sources) it was kept in every exact run, cutting 0.05–0.09 bits per byte. That is the first word-level structure growth has kept ([13](../experiments/13-word-pairs.md)). The trigger is a [running screen](screens.md#running-count-screen) measured beyond the partner.
+
 ## Distill
 
 Compress a kept bind into a small variable:
 - **toy worlds:** the edge's argmax guess (8 states);
 - **text:** 32 k-means clusters of the bind's cells by predicted successor profile.
 
-Without distill, level 3 of the staged world stalled, because its bind would have had 4,096 cells; with distill it was solved in 6/6 runs ([08](../experiments/08-bootstrapping.md)). **On text, distill never paid** ([11](../experiments/11-real-text.md)). The chunk is a better target: the next step is to cluster chunks by the contexts they occur in ([12](../experiments/12-words.md)).
+Without distill, level 3 of the staged world stalled, because its bind would have had 4,096 cells; with distill it was solved in 6/6 runs ([08](../experiments/08-bootstrapping.md)). **On text, distill never paid** ([11](../experiments/11-real-text.md)). Grouping completed chunks into 64 classes by what follows them (the next chunk's first two bytes) failed the same way: class edges gained at most 0.009 bits, and the classes added nothing beyond the current chunk. What a later level needs from a word was the word itself, in conjunction with the next one ([13](../experiments/13-word-pairs.md)).
 
 ## Delay and hold
 
@@ -61,6 +63,6 @@ Every 10k ticks, remove derived nodes that nothing uses, that have been tried at
 
 ## Evidence in
 
-[06 · growth interfaces](../experiments/06-growth-interfaces.md) · [07 · graph growth](../experiments/07-graph-growth.md) · [08 · bootstrapping](../experiments/08-bootstrapping.md) · [10 · full primitives](../experiments/10-full-primitives.md) · [11 · real text](../experiments/11-real-text.md) · [12 · words](../experiments/12-words.md)
+[06 · growth interfaces](../experiments/06-growth-interfaces.md) · [07 · graph growth](../experiments/07-graph-growth.md) · [08 · bootstrapping](../experiments/08-bootstrapping.md) · [10 · full primitives](../experiments/10-full-primitives.md) · [11 · real text](../experiments/11-real-text.md) · [12 · words](../experiments/12-words.md) · [13 · word pairs](../experiments/13-word-pairs.md)
 
 *[All concepts](README.md) · [Wiki home](../README.md)*
