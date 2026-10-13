@@ -56,9 +56,9 @@ Deliberate differences:
 | Grown, real pools, seed 1 | 2.593 → 2.609 | 2.943 → 2.914 | 2.853 → 2.822 | 2.819 → 2.816 |
 | Grown, real pools, fresh on book B | – | 3.620 → 3.621 | 2.939 → 2.945 | – |
 | Noisy input, recruit < 10, merge, Hebbian 2% | 3.181 → 3.128 | 3.260 → 3.850 | – | 3.267 → 3.202 |
-| Same, Rust seeds 1 and 2 | 3.005, 3.126 | 3.398, 3.410 | 3.322, 3.323 | 3.154, 3.184 |
+| Same, seed 1 (Python → Rust); Rust seed 2 | 3.000 → 3.005; 3.126 | 3.180 → 3.398; 3.410 | 3.216 → 3.322; 3.323 | 3.222 → 3.154; 3.184 |
 
-Every clean row agrees within the seed-to-seed spread (about 0.03). The grown structures match too: the same delays, byte pairs, skip pairs and exact 3-byte contexts are kept. The noisy run is the most seed-sensitive. Rust seed 0 did badly on book B, but seeds 1 and 2 land near Python's figure.
+Every clean row agrees within the seed-to-seed spread (about 0.03). The grown structures match too: the same delays, byte pairs, skip pairs and exact 3-byte contexts are kept. **One known gap:** with noisy input, book A matches but book B is worse in Rust: 3.40–3.85 on its first 50k against 3.18–3.26 in Python. The same structure is kept, and recruits and duplicate merges are the same, so the difference is in learning, not growth. The likeliest cause is the mask-drop rule above; it is open.
 
 ### Speed
 

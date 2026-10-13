@@ -8,7 +8,7 @@ Ordered roughly by how much they block the next step.
 - [ ] **Compress for text.** Distilling a bind into 32 clusters of predicted successors never paid. The chunk is the first text variable kept on its own merits ([12](experiments/12-words.md)); is it the right thing to compress?
 - [ ] **Readout gap.** Hand-wired exact contexts trail Witten-Bell counts of the same order by about 0.22 bits per byte. Better writer rule, or backoff between context orders?
 - [ ] **Capacity.** 1024-cell bind pools cost 0.28 bits per byte against exact tables. Grow capacity on demand (a parallel pool), or rely on factored binds?
-- [ ] **Noise.** Where does duplicate merging live (a sleep phase)? And what overlap rule generalises beyond bytes?
+- [ ] **Noise.** Where does duplicate merging live (a sleep phase)? And what overlap rule generalises beyond bytes? The Rust port does 0.2–0.6 bits worse than Python on book B under noise ([reference code](reference-code.md#validation-bits-per-byte-seed-0-unless-noted)), which suggests noisy runs are sensitive to the writer-mask drop rule.
 
 ## Scale and build
 
