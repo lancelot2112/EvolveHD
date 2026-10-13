@@ -10,8 +10,9 @@ use crate::rng::Rng;
 use std::collections::HashMap;
 
 pub const LEVELS: usize = 8;
-pub const KW: usize = 640;
-pub const SWAPS: usize = 8;
+/// Default bits per mask level, and most bits written per update (the Python reference's values).
+pub const KW_DEFAULT: usize = 640;
+pub const SWAPS_DEFAULT: usize = 8;
 
 /// Which target cells own each bit. Rebuilt whenever the target pool's set of live cells changes.
 pub struct TargetIndex {
@@ -42,6 +43,35 @@ impl TargetIndex {
     }
 }
 
+impl TargetIndex {
+    /// The live target cell whose code this is (the owner of all its bits).
+    pub fn cell_of_code(&self, code: &Code) -> Option<usize> {
+        let o0 = &self.owners[code[0] as usize];
+        o0.iter()
+            .copied()
+            .find(|&c| code.iter().all(|&b| self.owners[b as usize].contains(&c)))
+            .map(|c| c as usize)
+    }
+}
+
+/// Overlap counts of a row's masks with every live target code.
+fn count_rows(masks: &[Bits], tcodes: &[Code], talive: &[bool]) -> Vec<i32> {
+    let mut counts = vec![0; tcodes.len()];
+    for (c, code) in tcodes.iter().enumerate() {
+        if !talive[c] {
+            continue;
+        }
+        let mut n = 0;
+        for m in masks.iter() {
+            for &b in code.iter() {
+                n += bits::get(m, b as usize) as i32;
+            }
+        }
+        counts[c] = n;
+    }
+    counts
+}
+
 impl Default for TargetIndex {
     fn default() -> Self {
         Self::new()
@@ -53,6 +83,28 @@ pub struct Row {
     pub masks: Vec<Bits>,
     pub counts: Vec<i32>,
     pub version: u64,
+    /// Writes into this row, and which target cells it has been written toward (cells below 256).
+    pub n: u32,
+    pub seen: [u64; 4],
+}
+
+impl Row {
+    /// Witten-Bell confidence n / (n + T), T = distinct targets written.
+    pub fn confidence(&self) -> f64 {
+        let t: u32 = self.seen.iter().map(|w| w.count_ones()).sum();
+        if self.n == 0 {
+            0.0
+        } else {
+            self.n as f64 / (self.n + t) as f64
+        }
+    }
+}
+
+/// The shared starting masks for new rows of one edge, with their counts for one target version.
+struct Template {
+    masks: Vec<Bits>,
+    counts: Vec<i32>,
+    version: u64,
 }
 
 pub struct Edge {
@@ -69,6 +121,18 @@ pub struct Edge {
     prob: [f64; LEVELS],
     /// Drop the lowest-numbered eligible bits (the Python reference's rule) instead of random ones.
     pub drop_lowest: bool,
+    /// New rows copy one random template instead of drawing their own masks.
+    pub template: bool,
+    /// Scale each row's scores by its Witten-Bell confidence n / (n + T).
+    pub confidence: bool,
+    tmpl: Option<Template>,
+    /// Second gain, on confidence-scaled scores (used when `confidence` is on), and the current row's confidence.
+    pub beta_c: f64,
+    v_c: f64,
+    lam: f64,
+    /// Bits per mask level, and most bits written per update.
+    pub kw: usize,
+    pub swaps: usize,
 }
 
 impl Edge {
@@ -89,6 +153,14 @@ impl Edge {
             n: 0,
             prob,
             drop_lowest: false,
+            template: false,
+            confidence: false,
+            tmpl: None,
+            beta_c: 0.0,
+            v_c: 0.01,
+            lam: 0.0,
+            kw: KW_DEFAULT,
+            swaps: SWAPS_DEFAULT,
         }
     }
 
@@ -107,37 +179,49 @@ impl Edge {
             None => true,
         };
         if fresh {
-            let mut masks = vec![ZERO; LEVELS];
-            for m in masks.iter_mut() {
-                for b in rng.choose_distinct(D, KW) {
-                    bits::set(m, b);
+            let kw = self.kw;
+            let rand_masks = |rng: &mut Rng| {
+                let mut masks = vec![ZERO; LEVELS];
+                for m in masks.iter_mut() {
+                    for b in rng.choose_distinct(D, kw) {
+                        bits::set(m, b);
+                    }
                 }
-            }
-            self.rows.insert(
-                i,
-                Row {
-                    gen,
-                    masks,
+                masks
+            };
+            let row = if self.template {
+                let t = self.tmpl.get_or_insert_with(|| Template {
+                    masks: rand_masks(rng),
                     counts: Vec::new(),
                     version: u64::MAX,
-                },
-            );
+                });
+                if t.version != tix.version {
+                    t.counts = count_rows(&t.masks, tcodes, talive);
+                    t.version = tix.version;
+                }
+                Row {
+                    gen,
+                    masks: t.masks.clone(),
+                    counts: t.counts.clone(),
+                    version: t.version,
+                    n: 0,
+                    seen: [0; 4],
+                }
+            } else {
+                Row {
+                    gen,
+                    masks: rand_masks(rng),
+                    counts: Vec::new(),
+                    version: u64::MAX,
+                    n: 0,
+                    seen: [0; 4],
+                }
+            };
+            self.rows.insert(i, row);
         }
         let r = self.rows.get_mut(&i).unwrap();
         if r.version != tix.version {
-            r.counts = vec![0; tcodes.len()];
-            for (c, code) in tcodes.iter().enumerate() {
-                if !talive[c] {
-                    continue;
-                }
-                let mut n = 0;
-                for m in r.masks.iter() {
-                    for &b in code.iter() {
-                        n += bits::get(m, b as usize) as i32;
-                    }
-                }
-                r.counts[c] = n;
-            }
+            r.counts = count_rows(&r.masks, tcodes, talive);
             r.version = tix.version;
         }
         r
@@ -161,9 +245,11 @@ impl Edge {
             return;
         }
         let r = self.row(state as u32, gen, tix, tcodes, talive, rng);
+        let lam = r.confidence();
         let s = 1.0 / (CK * LEVELS) as f64;
         let v: Vec<f64> = alive_idx.iter().map(|&c| r.counts[c] as f64 * s).collect();
         self.sc = Some(v);
+        self.lam = lam;
     }
 
     /// Write the target's winner code into the current source cell's masks.
@@ -190,6 +276,12 @@ impl Edge {
         }
         self.row(cur, gen, tix, tcodes, talive, rng);
         let r = self.rows.get_mut(&cur).unwrap();
+        r.n += 1;
+        if let Some(c) = tix.cell_of_code(ycode) {
+            if c < 256 {
+                r.seen[c / 64] |= 1 << (c % 64);
+            }
+        }
         for k in 0..LEVELS {
             if !lv[k] {
                 continue;
@@ -203,7 +295,7 @@ impl Edge {
             if add.is_empty() {
                 continue;
             }
-            let w = SWAPS.min(add.len());
+            let w = self.swaps.min(add.len());
             if w < add.len() {
                 add = rng.sample(&add, w);
             }
@@ -245,7 +337,20 @@ impl Edge {
         }
     }
 
-    /// Gradient step on the edge gain: d(log p(y))/d(beta) = s(y) - E_p[s], RMS-normalised.
+    /// This edge's addition to the logits: beta * s, plus beta_c * confidence * s when enabled.
+    pub fn contribution(&self) -> Option<Vec<f64>> {
+        let sc = self.sc.as_ref()?;
+        let w = self.beta
+            + if self.confidence {
+                self.beta_c * self.lam
+            } else {
+                0.0
+            };
+        Some(sc.iter().map(|s| w * s).collect())
+    }
+
+    /// Gradient step on the edge gains: d(log p(y))/d(beta) = s(y) - E_p[s], RMS-normalised;
+    /// the confidence gain sees the same gradient times the row's confidence.
     pub fn learn_beta(&mut self, p: &[f64], yi: usize, lr: f64) {
         let sc = match &self.sc {
             Some(s) => s,
@@ -255,6 +360,11 @@ impl Edge {
         let g = sc[yi] - e;
         self.v = 0.999 * self.v + 0.001 * g * g;
         self.beta += lr * g / (self.v.sqrt() + 1e-4);
+        if self.confidence {
+            let gc = g * self.lam;
+            self.v_c = 0.999 * self.v_c + 0.001 * gc * gc;
+            self.beta_c += lr * gc / (self.v_c.sqrt() + 1e-4);
+        }
     }
 
     pub fn reset_stats(&mut self) {

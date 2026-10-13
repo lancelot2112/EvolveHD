@@ -3,14 +3,21 @@
 //! ```text
 //! evolvehd text  --data corpus/bookA.bin,corpus/bookB.bin [--seed 0] [--symbolic] [--oracle 4] [--no-grow]
 //!                [--noise 0.25,4] [--merge 8] [--hebb 0.02] [--drop-random] [--words] [--run-window 200000] [--classes] [--conjoin-words] [--long-trials 5] [--long-trial-states 4096]
-//!                [--grow-pools] [--max-pool 131072] [--pool-budget 1048576] [--young-age 50000] [--chunk-cap 4096]
+//!                [--grow-pools] [--readout2 | --row-template --confidence --mask-bits 1024 --write-bits 16]
+//!                [--max-pool 131072] [--generate "prompt one|prompt two" --gen-len 300 --temp 0.7 --gen-out file] [--pool-budget 1048576] [--young-age 50000] [--chunk-cap 4096]
 //!                [--out run.json]
 //! evolvehd ngram --data corpus/bookA.bin,corpus/bookB.bin [--order 4]
 //! evolvehd table [--corpus corpus] [--out-dir runs]   # the standard text table, jobs run in parallel
 //! ```
-use evolvehd::baseline::witten_bell_bits;
+use evolvehd::baseline::{witten_bell_bits, WbModel};
 use evolvehd::brain::{Brain, Cfg};
+use evolvehd::rng::Rng;
 use std::time::Instant;
+
+fn arg_owned(k: &str) -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    arg(&args, k).map(String::from)
+}
 
 fn arg<'a>(args: &'a [String], k: &str) -> Option<&'a str> {
     args.iter()
@@ -57,6 +64,21 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.classes = flag(args, "--classes");
     c.conjoin_words = flag(args, "--conjoin-words");
     c.grow_pools = flag(args, "--grow-pools");
+    c.row_template = flag(args, "--row-template");
+    c.confidence = flag(args, "--confidence");
+    if flag(args, "--readout2") {
+        // wider writer masks, full-width writes, template rows, learned confidence gain
+        c.mask_bits = 1024;
+        c.write_bits = 16;
+        c.row_template = true;
+        c.confidence = true;
+    }
+    if let Some(x) = arg(args, "--mask-bits") {
+        c.mask_bits = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--write-bits") {
+        c.write_bits = x.parse().unwrap();
+    }
     if let Some(x) = arg(args, "--max-pool") {
         c.max_pool = x.parse().unwrap();
     }
@@ -148,6 +170,35 @@ fn run_one(name: &str, data: Vec<u8>, cfg: Cfg, out: Option<String>) -> String {
     if let Some(p) = out {
         std::fs::write(&p, b.summary_json(1000, secs)).unwrap();
     }
+    let cols = columns(&b);
+    if let Some(prompts) = arg_owned("--generate") {
+        let n: usize = arg_owned("--gen-len")
+            .map(|x| x.parse().unwrap())
+            .unwrap_or(300);
+        let temp: f64 = arg_owned("--temp")
+            .map(|x| x.parse().unwrap())
+            .unwrap_or(0.7);
+        let train = b.data[..b.t].to_vec();
+        let wb = WbModel::train(&train, 4);
+        let mut out = String::new();
+        for (i, pr) in prompts.split('|').enumerate() {
+            let mut r1 = Rng::new(1000 + i as u64);
+            let mut r2 = Rng::new(1000 + i as u64);
+            let g = b.generate(pr.as_bytes(), n, temp, &mut r1);
+            let w = wb.generate(pr.as_bytes(), n, temp, &mut r2);
+            out.push_str(&format!(
+                "=== prompt: {pr:?}\n--- grown\n{}{}\n--- witten-bell order 4\n{}{}\n\n",
+                pr,
+                String::from_utf8_lossy(&g),
+                pr,
+                String::from_utf8_lossy(&w)
+            ));
+        }
+        if let Some(p) = arg_owned("--gen-out") {
+            std::fs::write(p, &out).unwrap();
+        }
+        eprintln!("{out}");
+    }
     let kept: Vec<String> = b
         .kept
         .iter()
@@ -156,7 +207,7 @@ fn run_one(name: &str, data: Vec<u8>, cfg: Cfg, out: Option<String>) -> String {
         .collect();
     format!(
         "{name:<44} {secs:7.1}s  {}  kept: {}{words}",
-        columns(&b),
+        cols,
         kept.join(" ")
     )
 }

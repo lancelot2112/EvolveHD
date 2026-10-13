@@ -68,6 +68,13 @@ pub struct Cfg {
     pub pool_budget: usize,
     /// An eviction of a cell used within this many ticks counts as pressure.
     pub young_age: u64,
+    /// New writer-mask rows copy a per-edge template (much cheaper than drawing fresh masks).
+    pub row_template: bool,
+    /// Scale each row's evidence by its Witten-Bell confidence n / (n + T).
+    pub confidence: bool,
+    /// Writer-mask bits per level (Python: 640) and most bits written per update (Python: 8).
+    pub mask_bits: usize,
+    pub write_bits: usize,
 }
 
 impl Default for Cfg {
@@ -108,6 +115,10 @@ impl Default for Cfg {
             max_pool: 1 << 17,
             pool_budget: 1 << 20,
             young_age: 50_000,
+            row_template: false,
+            confidence: false,
+            mask_bits: 640,
+            write_bits: 8,
         }
     }
 }
@@ -587,6 +598,8 @@ pub struct Brain {
     pub extra_json: Vec<(String, String)>,
     /// Running count screens for the word moves (when cfg.run_window > 0).
     pub run_scr: Vec<RunScreen>,
+    /// No learning or growth (generation mode).
+    pub frozen: bool,
 }
 
 fn log_softmax_at(logits: &[f64], yi: usize) -> (Vec<f64>, f64) {
@@ -693,8 +706,13 @@ impl Brain {
             pclass: None,
             extra_json: vec![],
             run_scr: vec![],
+            frozen: false,
         };
         b.slab[0].drop_lowest = cfg.drop_lowest;
+        b.slab[0].template = cfg.row_template;
+        b.slab[0].confidence = cfg.confidence;
+        b.slab[0].kw = cfg.mask_bits;
+        b.slab[0].swaps = cfg.write_bits;
         if cfg.oracle > 0 {
             b.oracle(cfg.oracle);
         }
@@ -704,6 +722,10 @@ impl Brain {
     fn mk_edge(&self, src: usize, beta: f64) -> Edge {
         let mut e = Edge::new(src, beta);
         e.drop_lowest = self.cfg.drop_lowest;
+        e.template = self.cfg.row_template;
+        e.confidence = self.cfg.confidence;
+        e.kw = self.cfg.mask_bits;
+        e.swaps = self.cfg.write_bits;
         e
     }
 
@@ -1167,8 +1189,8 @@ impl Brain {
         let trials = self.trials.clone();
         for &e in &kept {
             if self.score_edge(e) {
-                let (beta, sc) = (self.slab[e].beta, self.slab[e].sc.as_ref().unwrap());
-                logits.iter_mut().zip(sc).for_each(|(l, s)| *l += beta * s);
+                let c = self.slab[e].contribution().unwrap();
+                logits.iter_mut().zip(&c).for_each(|(l, s)| *l += s);
             }
         }
         let mut tsc = vec![];
@@ -1205,12 +1227,12 @@ impl Brain {
         self.bits[t] = -q.log2() - pb.log2();
         self.bits_map[t] = -pb.log2();
         self.novel[t] = novel;
-        if yi >= 0 && na > 0 {
+        if yi >= 0 && na > 0 && !self.frozen {
             let yi = yi as usize;
             let base_loss = -q.log2();
             for &e in &tsc {
-                let (beta, sc) = (self.slab[e].beta, self.slab[e].sc.clone().unwrap());
-                let lw: Vec<f64> = logits.iter().zip(&sc).map(|(l, s)| l + beta * s).collect();
+                let c = self.slab[e].contribution().unwrap();
+                let lw: Vec<f64> = logits.iter().zip(&c).map(|(l, s)| l + s).collect();
                 let (pw, lpw) = log_softmax_at(&lw, yi);
                 let qw = (1.0 - eps) * lpw.exp() + eps / 256.0;
                 let d = base_loss + qw.log2();
@@ -1226,8 +1248,8 @@ impl Brain {
                 if self.slab[e].sc.is_none() {
                     continue;
                 }
-                let (beta, sc) = (self.slab[e].beta, self.slab[e].sc.as_ref().unwrap());
-                let lo: Vec<f64> = logits.iter().zip(sc).map(|(l, s)| l - beta * s).collect();
+                let c = self.slab[e].contribution().unwrap();
+                let lo: Vec<f64> = logits.iter().zip(&c).map(|(l, s)| l - s).collect();
                 let (_, lpo) = log_softmax_at(&lo, yi);
                 let qo = (1.0 - eps) * lpo.exp() + eps / 256.0;
                 let d = -qo.log2() - base_loss;
@@ -1258,7 +1280,7 @@ impl Brain {
         if novel {
             self.alive_dirty = true;
         }
-        if self.cfg.real && self.cfg.merge > 0 && t % 1000 == 999 {
+        if self.cfg.real && self.cfg.merge > 0 && t % 1000 == 999 && !self.frozen {
             let n = self.byte.pool.consolidate(self.cfg.merge);
             if n > 0 {
                 self.merged += n;
@@ -1268,7 +1290,7 @@ impl Brain {
         for i in self.derived.clone() {
             self.update_node(i, t);
         }
-        if self.cfg.words && self.cfg.run_window > 0 {
+        if self.cfg.words && self.cfg.run_window > 0 && !self.frozen {
             if self.chunk.is_none() && self.run_scr.is_empty() {
                 for z in [0.5, 1.0, 1.5] {
                     self.run_scr.push(RunScreen::new(
@@ -1284,7 +1306,7 @@ impl Brain {
             }
             self.feed_screens(t);
         }
-        if self.cfg.grow && t % 1000 == 999 {
+        if self.cfg.grow && t % 1000 == 999 && !self.frozen {
             let c0 = std::time::Instant::now();
             self.check();
             self.prof[4] += c0.elapsed().as_secs_f64();
@@ -1294,6 +1316,77 @@ impl Brain {
         self.sm += a * d;
         self.sv = (1.0 - a) * self.sv + a * d * d;
         self.t += 1;
+    }
+
+    /// The system's distribution over the next byte, from the current node states.
+    pub fn predict(&mut self) -> Vec<f64> {
+        if self.alive_dirty {
+            self.refresh_alive();
+        }
+        let na = self.alive_idx.len();
+        let mut logits = vec![0.0; na];
+        for e in self.kept.clone() {
+            if self.score_edge(e) {
+                let c = self.slab[e].contribution().unwrap();
+                logits.iter_mut().zip(&c).for_each(|(l, s)| *l += s);
+            }
+        }
+        let mut out = vec![0.0; 256];
+        if na == 0 {
+            return vec![1.0 / 256.0; 256];
+        }
+        let m = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let z: f64 = logits.iter().map(|l| (l - m).exp()).sum();
+        for (j, &c) in self.alive_idx.iter().enumerate() {
+            let cb = &self.cellbyte[c];
+            let b = (0..256).max_by_key(|&i| cb[i]).unwrap();
+            out[b] += (logits[j] - m).exp() / z;
+        }
+        out
+    }
+
+    /// Room for n more bytes in the stream.
+    fn extend(&mut self, n: usize) {
+        self.tt += n;
+        self.data.resize(self.tt, 0);
+        self.bits.resize(self.tt, 0.0);
+        self.bits_map.resize(self.tt, 0.0);
+        self.novel.resize(self.tt, false);
+        self.hit.resize(self.tt, false);
+        self.mu.resize(self.tt, 0.0);
+        self.sd.resize(self.tt, 1.0);
+    }
+
+    /// Freeze learning, read `prompt`, then sample `n` bytes, feeding each back in as input.
+    /// `temp` < 1 sharpens the distribution. Returns the generated bytes.
+    pub fn generate(&mut self, prompt: &[u8], n: usize, temp: f64, rng: &mut Rng) -> Vec<u8> {
+        self.frozen = true;
+        self.extend(prompt.len() + n);
+        for &b in prompt {
+            let t = self.t;
+            self.data[t] = b;
+            self.tick();
+        }
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let p = self.predict();
+            let w: Vec<f64> = p.iter().map(|x| x.powf(1.0 / temp)).collect();
+            let z: f64 = w.iter().sum();
+            let mut u = rng.f64() * z;
+            let mut b = 0;
+            for (i, x) in w.iter().enumerate() {
+                if u < *x {
+                    b = i;
+                    break;
+                }
+                u -= x;
+            }
+            let t = self.t;
+            self.data[t] = b as u8;
+            self.tick();
+            out.push(b as u8);
+        }
+        out
     }
 
     /// A surprising byte at t starts a new chunk.
