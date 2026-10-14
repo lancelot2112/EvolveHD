@@ -2237,6 +2237,42 @@ impl Brain {
         }
     }
 
+    /// Approximate memory in MB: (writer-mask rows, their count, node histories, matcher pools, per-tick arrays).
+    pub fn mem_mb(&self) -> (f64, usize, f64, f64, f64) {
+        let mb = 1.0 / (1024.0 * 1024.0);
+        let mut rows = 0usize;
+        let mut row_b = 0usize;
+        for e in &self.slab {
+            for r in e.rows.values() {
+                rows += 1;
+                row_b += r.masks.len() * std::mem::size_of::<Bits>()
+                    + r.counts.len()
+                        * std::mem::size_of_val(&r.counts.first().copied().unwrap_or_default())
+                    + 96;
+            }
+        }
+        let hist = self.nodes.iter().filter(|n| !n.removed).count() * RING * 4;
+        let pool_b = |p: &Pool| p.cap * (std::mem::size_of::<Bits>() + 64 + 40);
+        let mut pools = pool_b(&self.byte.pool);
+        for n in &self.nodes {
+            match &n.kind {
+                Kind::BindReal(b) => pools += pool_b(&b.pool) + b.cache.len() * 48,
+                Kind::ChunkReal(k, _) => pools += pool_b(&k.pool) + k.cache.len() * 56,
+                Kind::BindSym(b) => pools += b.codes.len() * 64 + b.map.len() * 40,
+                Kind::ChunkSym(k, _) => pools += k.codes.len() * 64 + k.map.len() * 40,
+                _ => {}
+            }
+        }
+        let tick = self.tt * (8 * 4 + 2 + 4 + 1);
+        (
+            row_b as f64 * mb,
+            rows,
+            hist as f64 * mb,
+            pools as f64 * mb,
+            tick as f64 * mb,
+        )
+    }
+
     /// Mean bits per byte over [lo, hi).
     pub fn bpb(&self, lo: usize, hi: usize) -> f64 {
         let hi = hi.min(self.t);

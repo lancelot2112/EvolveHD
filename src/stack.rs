@@ -97,8 +97,9 @@ impl Stack {
                 let mut line = format!("t={} secs={:.0}", i + 1, t0.elapsed().as_secs_f64());
                 for (l, b) in self.levels.iter().enumerate() {
                     let lo = b.t.saturating_sub(progress / 4usize.pow(l as u32)).max(0);
+                    let (rmb, rows, hmb, pmb, tmb) = b.mem_mb();
                     line += &format!(
-                        " | L{l}: t={} bits={:.3} kept={}",
+                        " | L{l}: t={} bits={:.3} kept={} mem: rows {rows} {rmb:.0}MB hist {hmb:.0} pools {pmb:.0} ticks {tmb:.0}",
                         b.t,
                         if b.t > lo { b.bpb(lo, b.t) } else { 0.0 },
                         b.kept.len()

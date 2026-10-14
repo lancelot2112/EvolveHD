@@ -74,7 +74,7 @@ fn level_base() -> f64 {
 }
 
 /// Overlap counts of a row's masks with every live target code.
-fn count_rows(masks: &[Bits], tcodes: &[Code], talive: &[bool], rk: usize) -> Vec<i32> {
+fn count_rows(masks: &[Bits], tcodes: &[Code], talive: &[bool], rk: usize) -> Vec<i16> {
     let mut counts = vec![0; tcodes.len()];
     for (c, code) in tcodes.iter().enumerate() {
         if !talive[c] {
@@ -83,7 +83,7 @@ fn count_rows(masks: &[Bits], tcodes: &[Code], talive: &[bool], rk: usize) -> Ve
         let mut n = 0;
         for m in masks.iter() {
             for &b in code[..rk].iter() {
-                n += bits::get(m, b as usize) as i32;
+                n += bits::get(m, b as usize) as i16;
             }
         }
         counts[c] = n;
@@ -100,7 +100,7 @@ impl Default for TargetIndex {
 pub struct Row {
     pub gen: u32,
     pub masks: Vec<Bits>,
-    pub counts: Vec<i32>,
+    pub counts: Vec<i16>,
     pub version: u64,
     /// Writes into this row, and which target cells it has been written toward (cells below 1,024).
     pub n: u32,
@@ -122,7 +122,7 @@ impl Row {
 /// The shared starting masks for new rows of one edge, with their counts for one target version.
 struct Template {
     masks: Vec<Bits>,
-    counts: Vec<i32>,
+    counts: Vec<i16>,
     version: u64,
 }
 
