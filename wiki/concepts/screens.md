@@ -30,6 +30,10 @@ A running screen keeps its own counts for p(y′ | s, b) and p(y′ | b), where 
 
 Choose the baseline carefully. Measured beyond the current byte, the previous word looked weak (+0.13 at 400k ticks); beyond the current chunk it was +0.21 and growing, to about 0.30 on 2M bytes. That difference is what said the information was a conjunction, and so pointed to [conjoin](growth-operators.md#conjoin).
 
+## Estimator bias
+
+Held-out and running screens score a context with Witten-Bell counts on the joint context (candidate, baseline), backing off to the baseline. Backoff pays heavily for sparse contexts: a context seen once costs about a bit whenever it is wrong. Training the held-out screen on only half its window, and halving running counts every million ticks, add to the penalty. So these screens understate contexts with many states relative to the data. On the level-1 word-piece stream of Austen, the two previous symbols screen at −0.075 bits held out and about −0.013 in a running-screen analogue, while Kneser-Ney counts find +0.034 and a learned mixture with the baseline +0.055 ([19](../experiments/19-whole-corpus-stack.md)). A mixture gain (blend the baseline prediction with the candidate's, with a learned weight) can't fall much below zero and is the fairer test. Using it inside the engine is untested.
+
 ## Why
 
 Random candidate order found 2 of 6 structures in 50k ticks; screening found all of them by 10k ([07](../experiments/07-graph-growth.md)). Co-activity grew a compress node in 6/6 worlds with hidden structure and 0/6 without ([06](../experiments/06-growth-interfaces.md)).
@@ -48,6 +52,6 @@ Every check compares every source with every target, and synergy compares pairs,
 
 ## Evidence in
 
-[06 · growth interfaces](../experiments/06-growth-interfaces.md) · [07 · graph growth](../experiments/07-graph-growth.md) · [09 · attention temporal](../experiments/09-attention-temporal.md) · [11 · real text](../experiments/11-real-text.md) · [12 · words](../experiments/12-words.md) · [13 · word pairs](../experiments/13-word-pairs.md)
+[06 · growth interfaces](../experiments/06-growth-interfaces.md) · [07 · graph growth](../experiments/07-graph-growth.md) · [09 · attention temporal](../experiments/09-attention-temporal.md) · [11 · real text](../experiments/11-real-text.md) · [12 · words](../experiments/12-words.md) · [13 · word pairs](../experiments/13-word-pairs.md) · [19 · whole-corpus stack](../experiments/19-whole-corpus-stack.md)
 
 *[All concepts](README.md) · [Wiki home](../README.md)*

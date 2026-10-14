@@ -1,6 +1,6 @@
 # 18 · Sparser codes, and counting with every bit (2026-10-13)
 
-*[All experiments](README.md)* · [← 17](17-level-stack.md)
+*[All experiments](README.md)* · [← 17](17-level-stack.md) · [19 →](19-whole-corpus-stack.md)
 
 **Concepts:** [Writer-mask readout](../concepts/writer-mask-readout.md#readout-v3) · [Sparse codes](../concepts/sparse-codes.md#readout-codes) · [Stepping stones](../concepts/stepping-stones.md)
 
@@ -118,7 +118,7 @@ The run used readout v3 at every level, plus `--upper "--code-bits 8 --write-bit
 - **Still no level 2.**
   - Level 1's chunk screens stayed negative (−0.29 to −0.02 bits).
   - 48 of its 49 delay and hold trials were rejected, with gains from −0.0009 to +0.0005; the last was still running when the stream ended.
-- **On this much data there is no longer structure that counts can use.** Even exact counts do worse with two symbols of context than with one (order 2 4.349, order 1 4.329). That may be sparsity rather than absence: 500k symbols over 513 values is little for pairs. The shared "other" symbol is 46% of the stream.
+- **Witten-Bell counts do worse with two symbols of context than with one** (order 2 4.349, order 1 4.329). *Correction ([19](19-whole-corpus-stack.md)): that is Witten-Bell's penalty on sparse contexts. Kneser-Ney order 2 gains 0.034 bits here, and a mixture 0.055.* The shared "other" symbol is 46% of the stream.
 - **The top-down node is unchanged: slightly positive, far too small to keep.** Its 12 trials at level 0 gained −0.0002 to +0.0023 bits, against a 0.01 bar (in [17](17-level-stack.md): 13 trials, −0.0003 to +0.0015). Its screens beyond the chunk stayed negative (−0.12 to −0.02).
 
 ## Findings
@@ -128,7 +128,7 @@ The run used readout v3 at every level, plus `--upper "--code-bits 8 --write-bit
 3. **The readout gap at level 0 is nearly closed.**
    - With identical contexts it is 0.016 bits per byte behind order-4 counts, down from 0.22.
    - On Austen, the grown system beats order-4 counts on the last 500k bytes with exact nodes (1.840 against 1.878) and with growing real pools (1.843), and with real pools matches them over all three novels (1.948 against 1.944).
-4. **Level 1 learns, but a third level still doesn't appear.** On 2M bytes of Austen, even exact counts find nothing usable beyond order 1 in the word-piece stream. The next test needs more data, and probably a larger vocabulary than 512 with less "other".
+4. **Level 1 learns, but a third level still doesn't appear.** Witten-Bell order-2 counts do worse than order 1 on the word-piece stream. *Correction ([19](19-whole-corpus-stack.md)): order-2 information is there (Kneser-Ney +0.034 bits, a mixture +0.055); Witten-Bell backoff hides it, and the engine's screens use the same kind of estimator.*
 
 ## Code
 
