@@ -32,6 +32,14 @@ About a third of that gap was mask capacity ([16](../experiments/16-readout-and-
 
 About 0.14 bits per byte remain between log-linear writer masks and Witten-Bell backoff over the same contexts. That is an [open question](../open-questions.md).
 
+## Capacity limit
+
+A target code is 32 bits out of 2,048, so codes crowd each other in a row that holds many successors. The readout's error grows with their number: learning a pure Zipf unigram, it trails counts by 0.06 bits per symbol at 16 symbols, 0.10 at 64 and 0.44 at 512. Byte contexts have 16–40 successors, so this costs little. A 512-symbol word-piece stream needs a 489-way distribution in its busiest row. There the readout's error (0.44) equals all the gain order-1 context offers, and a brain over that stream predicted it slightly worse than unigram counts (4.71 against 4.70; order-1 counts 4.25). That is why a stack of levels stopped one level above bytes ([17](../experiments/17-level-stack.md)).
+
+Two smaller defects showed up on the way, both visible only in busy rows:
+- **Saturation.** Levels written with probability 2^−k saturate at about 256 writes. Aging (all counts halve every 256 writes) or a coarser base fixes it.
+- **Random background.** Rows that start full of random bits keep them when one successor dominates. Rows can start empty instead (`--sparse-rows`).
+
 ## History
 
 - **Toy worlds ([06](../experiments/06-growth-interfaces.md)–[10](../experiments/10-full-primitives.md)):** one level of 48 bits (self) or 128–160 bits (context), with integer vote weights of 1 + gain / 0.05, capped at 4.
@@ -47,6 +55,6 @@ About 0.14 bits per byte remain between log-linear writer masks and Witten-Bell 
 
 ## Evidence in
 
-[01 · early engine](../experiments/01-early-engine.md) · [06 · growth interfaces](../experiments/06-growth-interfaces.md) · [08 · bootstrapping](../experiments/08-bootstrapping.md) · [11 · real text](../experiments/11-real-text.md) · [16 · readout and generation](../experiments/16-readout-and-generation.md)
+[01 · early engine](../experiments/01-early-engine.md) · [06 · growth interfaces](../experiments/06-growth-interfaces.md) · [08 · bootstrapping](../experiments/08-bootstrapping.md) · [11 · real text](../experiments/11-real-text.md) · [16 · readout and generation](../experiments/16-readout-and-generation.md) · [17 · level stack](../experiments/17-level-stack.md)
 
 *[All concepts](README.md) · [Wiki home](../README.md)*

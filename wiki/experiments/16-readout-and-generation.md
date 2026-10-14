@@ -1,6 +1,6 @@
 # 16 · A better readout, and what the system can do (2026-10-13)
 
-*[All experiments](README.md)* · [← 15](15-growing-pools.md)
+*[All experiments](README.md)* · [← 15](15-growing-pools.md) · [17 →](17-level-stack.md)
 
 **Concepts:** [Writer-mask readout](../concepts/writer-mask-readout.md#readout-v2) · [Matcher pools](../concepts/matcher-pools.md#growing-pools) · [Drive and prime](../concepts/drive-and-prime.md)
 

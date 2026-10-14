@@ -3,7 +3,7 @@
 //! ```text
 //! evolvehd text  --data corpus/bookA.bin,corpus/bookB.bin [--seed 0] [--symbolic] [--oracle 4] [--no-grow]
 //!                [--noise 0.25,4] [--merge 8] [--hebb 0.02] [--drop-random] [--words] [--run-window 200000] [--classes] [--conjoin-words] [--long-trials 5] [--long-trial-states 4096]
-//!                [--grow-pools] [--readout2 | --row-template --confidence --mask-bits 1024 --write-bits 16] [--sparse-rows] [--age-every 128]
+//!                [--grow-pools] [--readout2 | --row-template --confidence --mask-bits 1024 --write-bits 16] [--sparse-rows] [--age-every 128] [--bias-edge]
 //!                [--max-pool 131072] [--generate "prompt one|prompt two" --gen-len 300 --temp 0.7 --gen-out file] [--pool-budget 1048576] [--young-age 50000] [--chunk-cap 4096]
 //!                [--out run.json]
 //! evolvehd ngram --data corpus/bookA.bin,corpus/bookB.bin [--order 4]
@@ -68,6 +68,7 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.grow_pools = flag(args, "--grow-pools");
     c.row_template = flag(args, "--row-template");
     c.sparse_rows = flag(args, "--sparse-rows");
+    c.bias_edge = flag(args, "--bias-edge");
     if let Some(x) = arg(args, "--age-every") {
         c.age_every = x.parse().unwrap();
     }

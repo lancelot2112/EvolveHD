@@ -70,6 +70,7 @@ Seven experiments built and tested a grammar that grows networks inline:
 - [The whole corpus](experiments/14-full-corpus.md): 11.7M bytes in 44 minutes. Real pools stay 0.4–0.6 bits per byte behind order-4 counts, so capacity is now the limit.
 - [Growing pools](experiments/15-growing-pools.md): pools double when they evict recently used cells. Real pools reach exact-node quality, and over the whole corpus 2.125 bits per byte against 2.107 for order-4 counts.
 - [Readout and generation](experiments/16-readout-and-generation.md): wider writer masks close most of the readout gap; the trained system continues text as wordlike as an order-4 count model.
+- [Level stack](experiments/17-level-stack.md): each level predicts the chunks of the one below with unchanged code. Level 1 spawned by itself but could not learn its stream: the readout's error grows with the number of outcomes, and at 512 it eats all the structure there is.
 - The [growth grammar spec](https://claude.ai/code/artifact/d37e3fa6-5a32-45a9-a6cc-88fcb7fc4d09) was written, and the text experiment was ported to Rust in this repo; it reproduces the Python table about 10 times faster.
 
 The design rules these phases forced are collected in [lessons](lessons.md); what remains is in [open questions](open-questions.md).

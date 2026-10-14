@@ -74,6 +74,8 @@ pub struct Cfg {
     pub sparse_rows: bool,
     /// Writer-mask rows age (all counts halve) every this many writes; 0 = never.
     pub age_every: u32,
+    /// Start with an order-0 edge from a constant source (the symbol frequencies, pooled over all contexts).
+    pub bias_edge: bool,
     /// Scale each row's evidence by its Witten-Bell confidence n / (n + T).
     pub confidence: bool,
     /// Writer-mask bits per level (Python: 640) and most bits written per update (Python: 8).
@@ -122,6 +124,7 @@ impl Default for Cfg {
             row_template: false,
             sparse_rows: false,
             age_every: 0,
+            bias_edge: false,
             confidence: false,
             mask_bits: 640,
             write_bits: 8,
@@ -455,6 +458,8 @@ pub struct UpperNode {
 
 pub enum Kind {
     Byte,
+    /// A source that is always in state 0: its one row learns the overall symbol frequencies (order 0).
+    Const(Code),
     Upper(Box<UpperNode>),
     /// parts[0] = the chunk.
     PrevClass(Box<ChunkClass>, f64),
@@ -486,6 +491,7 @@ impl Kind {
             Kind::PrevWord(_) => "hold",
             Kind::PrevClass(..) => "distill",
             Kind::Upper(_) => "upper",
+            Kind::Const(_) => "const",
             Kind::Taken => "?",
         }
     }
@@ -746,6 +752,14 @@ impl Brain {
             run_scr: vec![],
             frozen: false,
         };
+        if cfg.bias_edge {
+            let code = bits::rand_code(&mut b.rng);
+            let nd = b.new_node("bias".into(), Kind::Const(code), vec![], String::new());
+            let i = b.push_node(nd);
+            b.slab.push(b.mk_edge(i, 1.0));
+            b.kept.push(b.slab.len() - 1);
+            b.kept_since.insert("bias".into(), 0);
+        }
         b.slab[0].drop_lowest = cfg.drop_lowest;
         b.slab[0].template = cfg.row_template;
         b.slab[0].sparse = cfg.sparse_rows;
@@ -787,6 +801,7 @@ impl Brain {
             Kind::PrevWord(_) => self.code_of(self.nodes[n].parts[0], c as i32),
             Kind::PrevClass(k, _) => k.codes[c],
             Kind::Upper(u) => u.codes[c],
+            Kind::Const(code) => *code,
             Kind::Taken => unreachable!(),
         }
     }
@@ -804,7 +819,8 @@ impl Brain {
             | Kind::Distill(_)
             | Kind::ChunkSym(..)
             | Kind::PrevClass(..)
-            | Kind::Upper(_) => 1,
+            | Kind::Upper(_)
+            | Kind::Const(_) => 1,
             Kind::ChunkReal(k, _) => k.pool.gen[c],
             Kind::PrevWord(_) => self.gen_of(self.nodes[n].parts[0], c as i32),
             Kind::Taken => unreachable!(),
@@ -1635,6 +1651,7 @@ impl Brain {
                 }
                 s
             }
+            Kind::Const(_) => 0,
             Kind::Byte | Kind::Taken => return,
         };
         self.nodes[i].state = s;
