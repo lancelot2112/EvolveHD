@@ -3,12 +3,12 @@
 //! ```text
 //! evolvehd text  --data corpus/bookA.bin,corpus/bookB.bin [--seed 0] [--symbolic] [--oracle 4] [--no-grow]
 //!                [--noise 0.25,4] [--merge 8] [--hebb 0.02] [--drop-random] [--words] [--run-window 200000] [--classes] [--conjoin-words] [--long-trials 5] [--long-trial-states 4096]
-//!                [--grow-pools] [--readout2 | --row-template --confidence --mask-bits 1024 --write-bits 16] [--sparse-rows] [--age-every 128] [--bias-edge]
+//!                [--grow-pools] [--readout2 | --readout3 | --row-template --confidence --mask-bits 1024 --write-bits 16] [--sparse-rows] [--age-every 128] [--bias-edge] [--code-bits 8] [--bitwise-levels]
 //!                [--max-pool 131072] [--generate "prompt one|prompt two" --gen-len 300 --temp 0.7 --gen-out file] [--pool-budget 1048576] [--young-age 50000] [--chunk-cap 4096]
 //!                [--out run.json]
 //! evolvehd ngram --data corpus/bookA.bin,corpus/bookB.bin [--order 4]
 //! evolvehd table [--corpus corpus] [--out-dir runs]
-//! evolvehd stack --data ... [text flags] [--levels 3] [--vocab 512] [--out-dir runs/stack]   # the standard text table, jobs run in parallel
+//! evolvehd stack --data ... [text flags] [--levels 3] [--vocab 512] [--out-dir runs/stack] [--upper "flags for levels above 0"]   # the standard text table, jobs run in parallel
 //! ```
 use evolvehd::baseline::{witten_bell_bits, witten_bell_bits_syms, WbModel};
 use evolvehd::brain::{Brain, Cfg};
@@ -69,6 +69,7 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.row_template = flag(args, "--row-template");
     c.sparse_rows = flag(args, "--sparse-rows");
     c.bias_edge = flag(args, "--bias-edge");
+    c.bitwise_levels = flag(args, "--bitwise-levels");
     if let Some(x) = arg(args, "--age-every") {
         c.age_every = x.parse().unwrap();
     }
@@ -80,11 +81,22 @@ fn cfg_from(args: &[String]) -> Cfg {
         c.row_template = true;
         c.confidence = true;
     }
+    if flag(args, "--readout3") {
+        // readout2's masks, full writes, rows that start empty, and levels sampled per code bit
+        c.mask_bits = 1024;
+        c.write_bits = 32;
+        c.sparse_rows = true;
+        c.bitwise_levels = true;
+        c.confidence = true;
+    }
     if let Some(x) = arg(args, "--mask-bits") {
         c.mask_bits = x.parse().unwrap();
     }
     if let Some(x) = arg(args, "--write-bits") {
         c.write_bits = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--code-bits") {
+        c.code_bits = x.parse().unwrap();
     }
     if let Some(x) = arg(args, "--max-pool") {
         c.max_pool = x.parse().unwrap();
@@ -244,6 +256,13 @@ fn main() {
                 .unwrap_or(0);
             let t0 = Instant::now();
             let mut st = Stack::new(data, cfg_from(&args), levels, vocab);
+            if let Some(u) = arg(&args, "--upper") {
+                // the upper flags come first, so they win over the shared ones (the first occurrence counts)
+                let mut ua: Vec<String> = args[..2].to_vec();
+                ua.extend(u.split_whitespace().map(String::from));
+                ua.extend(args[2..].iter().cloned());
+                st.upper_cfg = Some(cfg_from(&ua));
+            }
             st.run(progress);
             let secs = t0.elapsed().as_secs_f64();
             let mut rep = String::new();

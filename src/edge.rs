@@ -18,6 +18,8 @@ pub const SWAPS_DEFAULT: usize = 8;
 pub struct TargetIndex {
     pub owners: Vec<Vec<u32>>,
     pub version: u64,
+    /// The readout uses only the first `rk` bits of each target code (sparser readout codes).
+    pub rk: usize,
 }
 
 impl TargetIndex {
@@ -25,6 +27,7 @@ impl TargetIndex {
         TargetIndex {
             owners: vec![Vec::new(); D],
             version: 0,
+            rk: CK,
         }
     }
 
@@ -34,7 +37,7 @@ impl TargetIndex {
         }
         for (c, code) in codes.iter().enumerate() {
             if alive[c] {
-                for &b in code.iter() {
+                for &b in code[..self.rk].iter() {
                     self.owners[b as usize].push(c as u32);
                 }
             }
@@ -49,7 +52,11 @@ impl TargetIndex {
         let o0 = &self.owners[code[0] as usize];
         o0.iter()
             .copied()
-            .find(|&c| code.iter().all(|&b| self.owners[b as usize].contains(&c)))
+            .find(|&c| {
+                code[..self.rk]
+                    .iter()
+                    .all(|&b| self.owners[b as usize].contains(&c))
+            })
             .map(|c| c as usize)
     }
 }
@@ -67,7 +74,7 @@ fn level_base() -> f64 {
 }
 
 /// Overlap counts of a row's masks with every live target code.
-fn count_rows(masks: &[Bits], tcodes: &[Code], talive: &[bool]) -> Vec<i32> {
+fn count_rows(masks: &[Bits], tcodes: &[Code], talive: &[bool], rk: usize) -> Vec<i32> {
     let mut counts = vec![0; tcodes.len()];
     for (c, code) in tcodes.iter().enumerate() {
         if !talive[c] {
@@ -75,7 +82,7 @@ fn count_rows(masks: &[Bits], tcodes: &[Code], talive: &[bool]) -> Vec<i32> {
         }
         let mut n = 0;
         for m in masks.iter() {
-            for &b in code.iter() {
+            for &b in code[..rk].iter() {
                 n += bits::get(m, b as usize) as i32;
             }
         }
@@ -149,6 +156,9 @@ pub struct Edge {
     /// Bits per mask level, and most bits written per update.
     pub kw: usize,
     pub swaps: usize,
+    /// Each code bit reaches level k with probability base^-k on its own, instead of the whole write
+    /// reaching the level or not: the fraction of a code's bits at each level becomes a smooth counter.
+    pub bitwise: bool,
 }
 
 impl Edge {
@@ -179,6 +189,7 @@ impl Edge {
             lam: 0.0,
             kw: KW_DEFAULT,
             swaps: SWAPS_DEFAULT,
+            bitwise: false,
         }
     }
 
@@ -223,7 +234,7 @@ impl Edge {
                     version: u64::MAX,
                 });
                 if t.version != tix.version {
-                    t.counts = count_rows(&t.masks, tcodes, talive);
+                    t.counts = count_rows(&t.masks, tcodes, talive, tix.rk);
                     t.version = tix.version;
                 }
                 Row {
@@ -248,7 +259,7 @@ impl Edge {
         }
         let r = self.rows.get_mut(&i).unwrap();
         if r.version != tix.version {
-            r.counts = count_rows(&r.masks, tcodes, talive);
+            r.counts = count_rows(&r.masks, tcodes, talive, tix.rk);
             r.version = tix.version;
         }
         r
@@ -273,7 +284,7 @@ impl Edge {
         }
         let r = self.row(state as u32, gen, tix, tcodes, talive, rng);
         let lam = r.confidence();
-        let s = 1.0 / (CK * LEVELS) as f64;
+        let s = 1.0 / (tix.rk * LEVELS) as f64;
         let v: Vec<f64> = alive_idx.iter().map(|&c| r.counts[c] as f64 * s).collect();
         self.sc = Some(v);
         self.lam = lam;
@@ -310,23 +321,27 @@ impl Edge {
                 r.masks[k] = r.masks[k + 1];
             }
             r.masks[LEVELS - 1] = ZERO;
-            r.counts = count_rows(&r.masks, tcodes, talive);
+            r.counts = count_rows(&r.masks, tcodes, talive, tix.rk);
         }
         if let Some(c) = tix.cell_of_code(ycode) {
             if c < 1024 {
                 r.seen[c / 64] |= 1 << (c % 64);
             }
         }
+        let bitwise = self.bitwise;
         for k in 0..LEVELS {
-            if !lv[k] {
+            if !bitwise && !lv[k] {
                 continue;
             }
             let m = &mut r.masks[k];
-            let mut add: Vec<u16> = ycode
+            let mut add: Vec<u16> = ycode[..tix.rk]
                 .iter()
                 .copied()
                 .filter(|&b| !bits::get(m, b as usize))
                 .collect();
+            if bitwise {
+                add.retain(|_| rng.f64() < prob[k]);
+            }
             if add.is_empty() {
                 continue;
             }

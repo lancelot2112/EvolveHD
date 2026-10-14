@@ -55,6 +55,8 @@ pub struct Stack {
     pub max_levels: usize,
     pub vocab: usize,
     cfg: Cfg,
+    /// Settings for levels above 0 (default: the same as level 0).
+    pub upper_cfg: Option<Cfg>,
     /// (level, byte tick, what happened)
     pub log: Vec<(usize, usize, String)>,
 }
@@ -68,6 +70,7 @@ impl Stack {
             max_levels,
             vocab,
             cfg,
+            upper_cfg: None,
             log: vec![],
         }
     }
@@ -129,7 +132,7 @@ impl Stack {
             self.levels[l].upper_state = u;
             self.levels[l].add_upper();
         } else if self.levels.len() < self.max_levels && self.levels[l].chunk_kept() {
-            let mut cfg = self.cfg.clone();
+            let mut cfg = self.upper_cfg.clone().unwrap_or_else(|| self.cfg.clone());
             cfg.seed = self.cfg.seed + 1000 * (l as u64 + 1);
             cfg.oracle = 0;
             self.levels.push(Brain::new_symbols(self.vocab + 1, cfg));

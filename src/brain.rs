@@ -81,6 +81,10 @@ pub struct Cfg {
     /// Writer-mask bits per level (Python: 640) and most bits written per update (Python: 8).
     pub mask_bits: usize,
     pub write_bits: usize,
+    /// Bits of each target code the readout uses (all 32 by default; fewer = sparser readout codes).
+    pub code_bits: usize,
+    /// Writer-mask levels are sampled per code bit instead of per write.
+    pub bitwise_levels: bool,
 }
 
 impl Default for Cfg {
@@ -128,6 +132,8 @@ impl Default for Cfg {
             confidence: false,
             mask_bits: 640,
             write_bits: 8,
+            code_bits: bits::CK,
+            bitwise_levels: false,
         }
     }
 }
@@ -576,6 +582,8 @@ pub struct Brain {
     /// The input stream: bytes at level 0, symbol ids above. `vocab` symbols in all.
     pub syms: Vec<u32>,
     pub vocab: usize,
+    /// Level 0 of text: the input symbols are bytes (a symbol stream may also have 256 symbols).
+    pub bytes: bool,
     /// Top-down input: the level above's predicted next symbol, as its input cell (-1 if none).
     pub upper_state: i32,
     pub upper: Option<usize>,
@@ -669,18 +677,18 @@ fn json_f(x: f64) -> String {
 impl Brain {
     pub fn new(data: Vec<u8>, cfg: Cfg) -> Self {
         let syms = data.iter().map(|&b| b as u32).collect();
-        Self::build(data, syms, 256, cfg)
+        Self::build(data, syms, 256, true, cfg)
     }
 
     /// A brain over a stream of symbols 0..vocab that will be fed one at a time (see `push`).
     pub fn new_symbols(vocab: usize, cfg: Cfg) -> Self {
-        Self::build(vec![], vec![], vocab, cfg)
+        Self::build(vec![], vec![], vocab, false, cfg)
     }
 
-    fn build(data: Vec<u8>, syms: Vec<u32>, vocab: usize, cfg: Cfg) -> Self {
+    fn build(data: Vec<u8>, syms: Vec<u32>, vocab: usize, bytes: bool, cfg: Cfg) -> Self {
         let tt = syms.len();
         let mut rng = Rng::new(cfg.seed);
-        let mut pool = match (cfg.real, vocab == 256) {
+        let mut pool = match (cfg.real, bytes) {
             (true, true) => Pool::new(192, 24, 10),
             (true, false) => Pool::new(vocab + 64, 24, 10),
             (false, _) => Pool::new(vocab, 0, 0),
@@ -707,6 +715,7 @@ impl Brain {
             data,
             syms,
             vocab,
+            bytes,
             upper_state: -1,
             upper: None,
             upper_retry: 0,
@@ -767,6 +776,8 @@ impl Brain {
         b.slab[0].confidence = cfg.confidence;
         b.slab[0].kw = cfg.mask_bits;
         b.slab[0].swaps = cfg.write_bits;
+        b.slab[0].bitwise = cfg.bitwise_levels;
+        b.tix.rk = cfg.code_bits.clamp(1, bits::CK);
         if cfg.oracle > 0 {
             b.oracle(cfg.oracle);
         }
@@ -782,6 +793,7 @@ impl Brain {
         e.confidence = self.cfg.confidence;
         e.kw = self.cfg.mask_bits;
         e.swaps = self.cfg.write_bits;
+        e.bitwise = self.cfg.bitwise_levels;
         e
     }
 
@@ -999,7 +1011,7 @@ impl Brain {
                 b = i;
             }
         }
-        if self.vocab != 256 {
+        if !self.bytes {
             return format!("#s{b}");
         }
         match b as u8 {
@@ -1328,7 +1340,7 @@ impl Brain {
                 self.slab[e].learn_beta(&p, yi, 0.003);
             }
             let ycode = self.byte.pool.codes[yu];
-            let tgt = bits::from_positions(&ycode);
+            let tgt = bits::from_positions(&ycode[..self.tix.rk]);
             for &e in kept.iter().chain(trials.iter()) {
                 let src = self.slab[e].src;
                 let g = self.gen_of(src, self.slab[e].cur);
@@ -1415,7 +1427,7 @@ impl Brain {
     /// Room for n more bytes in the stream.
     fn extend(&mut self, n: usize) {
         self.tt += n;
-        if self.vocab == 256 {
+        if self.bytes {
             self.data.resize(self.tt, 0);
         }
         self.syms.resize(self.tt, 0);
@@ -3038,7 +3050,7 @@ impl Brain {
 
     /// Boundary alignment with real word starts over [lo, hi), and how many chunks are one whole word.
     pub fn word_report(&self, lo: usize, hi: usize) -> Option<String> {
-        if self.vocab != 256 {
+        if !self.bytes {
             return None;
         }
         let c = self.chunk?;
