@@ -9,6 +9,7 @@
 //! - [`edge`]: Prime edges: stochastic multi-level writer masks with learned gains.
 //! - [`brain`]: nodes, the tick loop and the growth controller for a byte stream.
 //! - [`baseline`]: online Witten-Bell n-gram model, the yardstick for text runs.
+//! - [`stack`]: levels of brains, each over the chunks of the level below.
 pub mod baseline;
 pub mod bits;
 pub mod brain;
@@ -16,3 +17,4 @@ pub mod edge;
 pub mod info;
 pub mod pool;
 pub mod rng;
+pub mod stack;

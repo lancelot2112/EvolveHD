@@ -54,6 +54,18 @@ impl TargetIndex {
     }
 }
 
+/// Writes reach level k with probability base^-k (default 2, so counts resolve up to 2^8 = 256).
+/// Overridable for experiments with EVOLVEHD_LEVEL_BASE.
+fn level_base() -> f64 {
+    static V: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("EVOLVEHD_LEVEL_BASE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2.0)
+    })
+}
+
 /// Overlap counts of a row's masks with every live target code.
 fn count_rows(masks: &[Bits], tcodes: &[Code], talive: &[bool]) -> Vec<i32> {
     let mut counts = vec![0; tcodes.len()];
@@ -83,9 +95,9 @@ pub struct Row {
     pub masks: Vec<Bits>,
     pub counts: Vec<i32>,
     pub version: u64,
-    /// Writes into this row, and which target cells it has been written toward (cells below 256).
+    /// Writes into this row, and which target cells it has been written toward (cells below 1,024).
     pub n: u32,
-    pub seen: [u64; 4],
+    pub seen: [u64; 16],
 }
 
 impl Row {
@@ -123,6 +135,10 @@ pub struct Edge {
     pub drop_lowest: bool,
     /// New rows copy one random template instead of drawing their own masks.
     pub template: bool,
+    /// New rows start empty and fill up to kw bits per level, instead of starting full of random bits.
+    pub sparse: bool,
+    /// If > 0, every this many writes a row ages: its levels shift down one (all counts halve).
+    pub age_every: u32,
     /// Scale each row's scores by its Witten-Bell confidence n / (n + T).
     pub confidence: bool,
     tmpl: Option<Template>,
@@ -139,7 +155,7 @@ impl Edge {
     pub fn new(src: usize, beta: f64) -> Self {
         let mut prob = [0.0; LEVELS];
         for (k, p) in prob.iter_mut().enumerate() {
-            *p = 0.5f64.powi(k as i32);
+            *p = (1.0 / level_base()).powi(k as i32);
         }
         Edge {
             src,
@@ -154,6 +170,8 @@ impl Edge {
             prob,
             drop_lowest: false,
             template: false,
+            sparse: false,
+            age_every: 0,
             confidence: false,
             tmpl: None,
             beta_c: 0.0,
@@ -189,7 +207,16 @@ impl Edge {
                 }
                 masks
             };
-            let row = if self.template {
+            let row = if self.sparse {
+                Row {
+                    gen,
+                    masks: vec![ZERO; LEVELS],
+                    counts: vec![0; tcodes.len()],
+                    version: tix.version,
+                    n: 0,
+                    seen: [0; 16],
+                }
+            } else if self.template {
                 let t = self.tmpl.get_or_insert_with(|| Template {
                     masks: rand_masks(rng),
                     counts: Vec::new(),
@@ -205,7 +232,7 @@ impl Edge {
                     counts: t.counts.clone(),
                     version: t.version,
                     n: 0,
-                    seen: [0; 4],
+                    seen: [0; 16],
                 }
             } else {
                 Row {
@@ -214,7 +241,7 @@ impl Edge {
                     counts: Vec::new(),
                     version: u64::MAX,
                     n: 0,
-                    seen: [0; 4],
+                    seen: [0; 16],
                 }
             };
             self.rows.insert(i, row);
@@ -277,8 +304,16 @@ impl Edge {
         self.row(cur, gen, tix, tcodes, talive, rng);
         let r = self.rows.get_mut(&cur).unwrap();
         r.n += 1;
+        if self.age_every > 0 && r.n % self.age_every == 0 {
+            // age the row: every level takes the next one's bits, the top empties (all counts halve)
+            for k in 0..LEVELS - 1 {
+                r.masks[k] = r.masks[k + 1];
+            }
+            r.masks[LEVELS - 1] = ZERO;
+            r.counts = count_rows(&r.masks, tcodes, talive);
+        }
         if let Some(c) = tix.cell_of_code(ycode) {
-            if c < 256 {
+            if c < 1024 {
                 r.seen[c / 64] |= 1 << (c % 64);
             }
         }
@@ -299,6 +334,13 @@ impl Edge {
             if w < add.len() {
                 add = rng.sample(&add, w);
             }
+            // sparse rows fill freely up to kw bits and drop only what they must beyond that
+            let room = if self.sparse {
+                self.kw.saturating_sub(bits::count(m) as usize)
+            } else {
+                0
+            };
+            let need = add.len().saturating_sub(room);
             // bits to drop: set in the mask, not in the target code; sampled without replacement
             let mut ra: Vec<u16> = Vec::with_capacity(w);
             if self.drop_lowest {
@@ -309,11 +351,11 @@ impl Edge {
                     .collect();
                 c.sort_unstable();
                 c.dedup();
-                c.truncate(add.len());
+                c.truncate(need);
                 ra = c;
             } else {
                 let mut tries = 0;
-                while ra.len() < add.len() && tries < 4 * w + 8 {
+                while ra.len() < need && tries < 4 * w + 8 {
                     tries += 1;
                     let b = rng.below(D) as u16;
                     if bits::get(m, b as usize) && !bits::get(tgt, b as usize) && !ra.contains(&b) {
@@ -321,7 +363,7 @@ impl Edge {
                     }
                 }
             }
-            add.truncate(ra.len());
+            add.truncate(room + ra.len());
             for &b in &ra {
                 bits::clear(m, b as usize);
                 for &c in &tix.owners[b as usize] {

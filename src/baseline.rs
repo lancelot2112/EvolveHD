@@ -38,6 +38,36 @@ pub fn witten_bell_bits(data: &[u8], order: usize) -> Vec<f64> {
     out
 }
 
+/// The same model over a stream of symbols 0..vocab (orders up to 3), for the upper levels of a stack.
+pub fn witten_bell_bits_syms(data: &[u32], order: usize, vocab: usize) -> Vec<f64> {
+    let mut tabs: Vec<HashMap<u64, (u32, HashMap<u32, u32>)>> =
+        (0..=order).map(|_| HashMap::new()).collect();
+    let key = |i: usize, k: usize| -> u64 {
+        data[i - k..i]
+            .iter()
+            .fold(0u64, |x, &b| (x << 20) | b as u64)
+    };
+    let mut out = Vec::with_capacity(data.len());
+    for (i, &c) in data.iter().enumerate() {
+        let mut p = 1.0 / vocab as f64;
+        for k in 0..=order.min(i) {
+            if let Some((n, d)) = tabs[k].get(&key(i, k)) {
+                let t = d.len() as f64;
+                p = (*d.get(&c).unwrap_or(&0) as f64 + t * p) / (*n as f64 + t);
+            }
+        }
+        out.push(-p.log2());
+        for k in 0..=order.min(i) {
+            let e = tabs[k]
+                .entry(key(i, k))
+                .or_insert_with(|| (0, HashMap::new()));
+            e.0 += 1;
+            *e.1.entry(c).or_insert(0) += 1;
+        }
+    }
+    out
+}
+
 /// A trained Witten-Bell model that can give the next-byte distribution for any history, and sample.
 pub struct WbModel {
     order: usize,

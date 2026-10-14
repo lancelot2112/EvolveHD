@@ -70,6 +70,10 @@ pub struct Cfg {
     pub young_age: u64,
     /// New writer-mask rows copy a per-edge template (much cheaper than drawing fresh masks).
     pub row_template: bool,
+    /// Writer-mask rows start empty instead of full of random bits.
+    pub sparse_rows: bool,
+    /// Writer-mask rows age (all counts halve) every this many writes; 0 = never.
+    pub age_every: u32,
     /// Scale each row's evidence by its Witten-Bell confidence n / (n + T).
     pub confidence: bool,
     /// Writer-mask bits per level (Python: 640) and most bits written per update (Python: 8).
@@ -116,6 +120,8 @@ impl Default for Cfg {
             pool_budget: 1 << 20,
             young_age: 50_000,
             row_template: false,
+            sparse_rows: false,
+            age_every: 0,
             confidence: false,
             mask_bits: 640,
             write_bits: 8,
@@ -441,8 +447,15 @@ impl ChunkClass {
     }
 }
 
+/// Top-down input from the level above: its predicted next symbol, as a state of this level.
+pub struct UpperNode {
+    pub codes: Vec<Code>,
+    rng: Rng,
+}
+
 pub enum Kind {
     Byte,
+    Upper(Box<UpperNode>),
     /// parts[0] = the chunk.
     PrevClass(Box<ChunkClass>, f64),
     ChunkReal(Box<ChunkReal>, f64),
@@ -472,6 +485,7 @@ impl Kind {
             Kind::ChunkReal(..) | Kind::ChunkSym(..) => "chunk",
             Kind::PrevWord(_) => "hold",
             Kind::PrevClass(..) => "distill",
+            Kind::Upper(_) => "upper",
             Kind::Taken => "?",
         }
     }
@@ -538,7 +552,7 @@ pub struct Node {
 pub struct ByteNode {
     pub pool: Pool,
     pub bytecode: Vec<Code>,
-    pub sym: HashMap<u8, usize>,
+    pub sym: HashMap<u32, usize>,
 }
 
 /// One event in the growth log: [t, kind, a, b?, value?].
@@ -551,7 +565,16 @@ pub struct Event {
 }
 
 pub struct Brain {
+    /// The byte text (level 0 only; empty above), for reports and generation.
     pub data: Vec<u8>,
+    /// The input stream: bytes at level 0, symbol ids above. `vocab` symbols in all.
+    pub syms: Vec<u32>,
+    pub vocab: usize,
+    /// Top-down input: the level above's predicted next symbol, as its input cell (-1 if none).
+    pub upper_state: i32,
+    pub upper: Option<usize>,
+    /// After cleanup removes the upper node, it is offered again only from this tick on.
+    upper_retry: usize,
     pub t: usize,
     pub tt: usize,
     pub cfg: Cfg,
@@ -577,7 +600,7 @@ pub struct Brain {
     pub bits_map: Vec<f64>,
     pub novel: Vec<bool>,
     pub hit: Vec<bool>,
-    cellbyte: Vec<[u32; 256]>,
+    cellbyte: Vec<Vec<u32>>,
     cellbyte_n: Vec<u32>,
     tix: TargetIndex,
     alive_idx: Vec<usize>,
@@ -639,15 +662,25 @@ fn json_f(x: f64) -> String {
 
 impl Brain {
     pub fn new(data: Vec<u8>, cfg: Cfg) -> Self {
-        let tt = data.len();
+        let syms = data.iter().map(|&b| b as u32).collect();
+        Self::build(data, syms, 256, cfg)
+    }
+
+    /// A brain over a stream of symbols 0..vocab that will be fed one at a time (see `push`).
+    pub fn new_symbols(vocab: usize, cfg: Cfg) -> Self {
+        Self::build(vec![], vec![], vocab, cfg)
+    }
+
+    fn build(data: Vec<u8>, syms: Vec<u32>, vocab: usize, cfg: Cfg) -> Self {
+        let tt = syms.len();
         let mut rng = Rng::new(cfg.seed);
-        let mut pool = if cfg.real {
-            Pool::new(192, 24, 10)
-        } else {
-            Pool::new(256, 0, 0)
+        let mut pool = match (cfg.real, vocab == 256) {
+            (true, true) => Pool::new(192, 24, 10),
+            (true, false) => Pool::new(vocab + 64, 24, 10),
+            (false, _) => Pool::new(vocab, 0, 0),
         };
         pool.hebb = cfg.hebb;
-        let bytecode = (0..256).map(|_| bits::rand_code(&mut rng)).collect();
+        let bytecode = (0..vocab).map(|_| bits::rand_code(&mut rng)).collect();
         let byte = ByteNode {
             pool,
             bytecode,
@@ -666,6 +699,11 @@ impl Brain {
         };
         let mut b = Brain {
             data,
+            syms,
+            vocab,
+            upper_state: -1,
+            upper: None,
+            upper_retry: 0,
             t: 0,
             tt,
             cfg: cfg.clone(),
@@ -689,7 +727,7 @@ impl Brain {
             bits_map: vec![0.0; tt],
             novel: vec![false; tt],
             hit: vec![false; tt],
-            cellbyte: vec![[0; 256]; cap],
+            cellbyte: vec![vec![0; vocab]; cap],
             cellbyte_n: vec![0; cap],
             tix: TargetIndex::new(),
             alive_idx: vec![],
@@ -710,6 +748,8 @@ impl Brain {
         };
         b.slab[0].drop_lowest = cfg.drop_lowest;
         b.slab[0].template = cfg.row_template;
+        b.slab[0].sparse = cfg.sparse_rows;
+        b.slab[0].age_every = cfg.age_every;
         b.slab[0].confidence = cfg.confidence;
         b.slab[0].kw = cfg.mask_bits;
         b.slab[0].swaps = cfg.write_bits;
@@ -723,6 +763,8 @@ impl Brain {
         let mut e = Edge::new(src, beta);
         e.drop_lowest = self.cfg.drop_lowest;
         e.template = self.cfg.row_template;
+        e.sparse = self.cfg.sparse_rows;
+        e.age_every = self.cfg.age_every;
         e.confidence = self.cfg.confidence;
         e.kw = self.cfg.mask_bits;
         e.swaps = self.cfg.write_bits;
@@ -744,6 +786,7 @@ impl Brain {
             Kind::ChunkSym(k, _) => k.codes[c],
             Kind::PrevWord(_) => self.code_of(self.nodes[n].parts[0], c as i32),
             Kind::PrevClass(k, _) => k.codes[c],
+            Kind::Upper(u) => u.codes[c],
             Kind::Taken => unreachable!(),
         }
     }
@@ -757,7 +800,11 @@ impl Brain {
             Kind::Byte => self.byte.pool.gen[c],
             Kind::Delay { .. } | Kind::Hold { .. } => self.gen_of(self.nodes[n].parts[0], c as i32),
             Kind::BindReal(b) => b.pool.gen[c],
-            Kind::BindSym(_) | Kind::Distill(_) | Kind::ChunkSym(..) | Kind::PrevClass(..) => 1,
+            Kind::BindSym(_)
+            | Kind::Distill(_)
+            | Kind::ChunkSym(..)
+            | Kind::PrevClass(..)
+            | Kind::Upper(_) => 1,
             Kind::ChunkReal(k, _) => k.pool.gen[c],
             Kind::PrevWord(_) => self.gen_of(self.nodes[n].parts[0], c as i32),
             Kind::Taken => unreachable!(),
@@ -931,10 +978,13 @@ impl Brain {
         }
         let cb = &self.cellbyte[cell as usize];
         let mut b = 0;
-        for i in 0..256 {
+        for i in 0..self.vocab {
             if cb[i] > cb[b] {
                 b = i;
             }
+        }
+        if self.vocab != 256 {
+            return format!("#s{b}");
         }
         match b as u8 {
             b' ' => "' '".into(),
@@ -1122,7 +1172,7 @@ impl Brain {
         self.alive_dirty = false;
     }
 
-    fn observe(&mut self, byte: u8, t: usize) -> (i32, bool) {
+    fn observe(&mut self, byte: u32, t: usize) -> (i32, bool) {
         let r0 = self.byte.pool.recruits;
         let s = if self.cfg.real {
             let code = self.byte.bytecode[byte as usize];
@@ -1179,7 +1229,7 @@ impl Brain {
         self.mu[t] = self.sm;
         self.sd[t] = self.sv.sqrt();
         let eps = self.cfg.eps;
-        let byte = self.data[t];
+        let byte = self.syms[t];
         if self.alive_dirty {
             self.refresh_alive();
         }
@@ -1206,7 +1256,7 @@ impl Brain {
         if yi >= 0 && na > 0 {
             let (pp, lp) = log_softmax_at(&logits, yi as usize);
             p = pp;
-            q = (1.0 - eps) * lp.exp() + eps / 256.0;
+            q = (1.0 - eps) * lp.exp() + eps / self.vocab as f64;
             let am = logits
                 .iter()
                 .enumerate()
@@ -1217,11 +1267,11 @@ impl Brain {
                 .1;
             self.hit[t] = am == yi as usize;
         } else {
-            q = eps / 256.0;
+            q = eps / self.vocab as f64;
         }
         let yu = y as usize;
         let pb = (self.cellbyte[yu][byte as usize] as f64 + 0.02)
-            / (self.cellbyte_n[yu] as f64 + 0.02 * 256.0);
+            / (self.cellbyte_n[yu] as f64 + 0.02 * self.vocab as f64);
         self.cellbyte[yu][byte as usize] += 1;
         self.cellbyte_n[yu] += 1;
         self.bits[t] = -q.log2() - pb.log2();
@@ -1234,7 +1284,7 @@ impl Brain {
                 let c = self.slab[e].contribution().unwrap();
                 let lw: Vec<f64> = logits.iter().zip(&c).map(|(l, s)| l + s).collect();
                 let (pw, lpw) = log_softmax_at(&lw, yi);
-                let qw = (1.0 - eps) * lpw.exp() + eps / 256.0;
+                let qw = (1.0 - eps) * lpw.exp() + eps / self.vocab as f64;
                 let d = base_loss + qw.log2();
                 if t - self.trial_t0[&e] >= self.cfg.burn {
                     let ed = &mut self.slab[e];
@@ -1251,7 +1301,7 @@ impl Brain {
                 let c = self.slab[e].contribution().unwrap();
                 let lo: Vec<f64> = logits.iter().zip(&c).map(|(l, s)| l - s).collect();
                 let (_, lpo) = log_softmax_at(&lo, yi);
-                let qo = (1.0 - eps) * lpo.exp() + eps / 256.0;
+                let qo = (1.0 - eps) * lpo.exp() + eps / self.vocab as f64;
                 let d = -qo.log2() - base_loss;
                 let ed = &mut self.slab[e];
                 ed.sum += d;
@@ -1331,15 +1381,16 @@ impl Brain {
                 logits.iter_mut().zip(&c).for_each(|(l, s)| *l += s);
             }
         }
-        let mut out = vec![0.0; 256];
+        let v = self.vocab;
+        let mut out = vec![0.0; v];
         if na == 0 {
-            return vec![1.0 / 256.0; 256];
+            return vec![1.0 / v as f64; v];
         }
         let m = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let z: f64 = logits.iter().map(|l| (l - m).exp()).sum();
         for (j, &c) in self.alive_idx.iter().enumerate() {
             let cb = &self.cellbyte[c];
-            let b = (0..256).max_by_key(|&i| cb[i]).unwrap();
+            let b = (0..v).max_by_key(|&i| cb[i]).unwrap();
             out[b] += (logits[j] - m).exp() / z;
         }
         out
@@ -1348,7 +1399,10 @@ impl Brain {
     /// Room for n more bytes in the stream.
     fn extend(&mut self, n: usize) {
         self.tt += n;
-        self.data.resize(self.tt, 0);
+        if self.vocab == 256 {
+            self.data.resize(self.tt, 0);
+        }
+        self.syms.resize(self.tt, 0);
         self.bits.resize(self.tt, 0.0);
         self.bits_map.resize(self.tt, 0.0);
         self.novel.resize(self.tt, false);
@@ -1365,6 +1419,7 @@ impl Brain {
         for &b in prompt {
             let t = self.t;
             self.data[t] = b;
+            self.syms[t] = b as u32;
             self.tick();
         }
         let mut out = Vec::with_capacity(n);
@@ -1383,10 +1438,81 @@ impl Brain {
             }
             let t = self.t;
             self.data[t] = b as u8;
+            self.syms[t] = b as u32;
             self.tick();
             out.push(b as u8);
         }
         out
+    }
+
+    /// Feed one more input symbol and run a tick.
+    pub fn push(&mut self, sym: u32) {
+        self.extend(1);
+        let t = self.t;
+        self.syms[t] = sym;
+        self.tick();
+    }
+
+    /// The input cell this level expects next (argmax of the kept edges' mix), or -1.
+    pub fn predict_cell(&mut self) -> i32 {
+        if self.alive_dirty {
+            self.refresh_alive();
+        }
+        let na = self.alive_idx.len();
+        if na == 0 {
+            return -1;
+        }
+        let mut logits = vec![0.0; na];
+        for e in self.kept.clone() {
+            if self.score_edge(e) {
+                let c = self.slab[e].contribution().unwrap();
+                logits.iter_mut().zip(&c).for_each(|(l, s)| *l += s);
+            }
+        }
+        let j = (0..na)
+            .max_by(|&a, &b| logits[a].partial_cmp(&logits[b]).unwrap().then(b.cmp(&a)))
+            .unwrap();
+        self.alive_idx[j] as i32
+    }
+
+    /// Whether this level's chunk node exists and its edge is kept.
+    pub fn chunk_kept(&self) -> bool {
+        match self.chunk {
+            Some(c) => self.kept.iter().any(|&e| self.slab[e].src == c),
+            None => false,
+        }
+    }
+
+    /// If the chunk was cut at tick t: the chunk completed just before (its cell and generation).
+    pub fn completed_chunk(&self, t: usize) -> Option<(i32, u32)> {
+        let c = self.chunk?;
+        let z = self.chunk_z(c);
+        if t >= 1 && self.boundary(t, z) {
+            let cell = self.nodes[c].h[t - 1];
+            if cell >= 0 {
+                return Some((cell, self.gen_of(c, cell)));
+            }
+        }
+        None
+    }
+
+    /// Add the top-down node: the level above's predicted next symbol.
+    pub fn add_upper(&mut self) {
+        if self.upper.is_some() || self.t < self.upper_retry {
+            return;
+        }
+        let seed = self.rng.next_u64();
+        let nd = self.new_node(
+            "upper".into(),
+            Kind::Upper(Box::new(UpperNode {
+                codes: vec![],
+                rng: Rng::new(seed),
+            })),
+            vec![],
+            String::new(),
+        );
+        let i = self.add(nd, "a level above exists".into());
+        self.upper = Some(i);
     }
 
     /// A surprising byte at t starts a new chunk.
@@ -1488,7 +1614,7 @@ impl Brain {
                 match &mut self.nodes[i].kind {
                     Kind::PrevClass(k, _) => {
                         if let Some(dc) = done {
-                            if t > k.last_cut && t - k.last_cut <= 40 {
+                            if t > k.last_cut && t - k.last_cut <= 40 && t <= self.data.len() {
                                 k.texts.insert(dc, self.data[k.last_cut..t].to_vec());
                             }
                             k.last_cut = t;
@@ -1498,6 +1624,16 @@ impl Brain {
                     }
                     _ => unreachable!(),
                 }
+            }
+            Kind::Upper(_) => {
+                let s = self.upper_state;
+                if let Kind::Upper(u) = &mut self.nodes[i].kind {
+                    while s >= 0 && u.codes.len() <= s as usize {
+                        let c = bits::rand_code(&mut u.rng);
+                        u.codes.push(c);
+                    }
+                }
+                s
             }
             Kind::Byte | Kind::Taken => return,
         };
@@ -1992,6 +2128,10 @@ impl Brain {
         if self.pclass.is_some_and(|c| self.nodes[c].removed) {
             self.pclass = None;
         }
+        if self.upper.is_some_and(|c| self.nodes[c].removed) {
+            self.upper = None;
+            self.upper_retry = self.t + 100_000;
+        }
     }
 
     fn gc_inner(&mut self) {
@@ -2199,7 +2339,7 @@ impl Brain {
         } else {
             vec![]
         };
-        let by: Vec<i64> = self.data[lo..tt].iter().map(|&x| x as i64).collect();
+        let by: Vec<i64> = self.syms[lo..tt].iter().map(|&x| x as i64).collect();
         let (hc, hb, hj) = (ent(&[&cells]), ent(&[&by]), ent(&[&cells, &by]));
         let _ = write!(
             o,
@@ -2302,7 +2442,11 @@ impl RunScreen {
     fn feed(&mut self, y: i32, s: i32, b: i32) {
         if let Some((sp, yp)) = self.pending.take() {
             if y >= 0 {
-                let yi = (y as usize).min(256);
+                let yi = y as usize;
+                if yi >= self.uni.len() {
+                    self.uni_n += (yi + 1 - self.uni.len()) as f64;
+                    self.uni.resize(yi + 1, 1.0);
+                }
                 let mut pb = self.uni[yi] / self.uni_n;
                 if let Some(c) = self.base.get(&yp) {
                     pb = c.p(y, pb);
@@ -2519,7 +2663,7 @@ impl Brain {
                 None
             };
             if let Some(dc) = done {
-                if tt > cc.last_cut && tt - cc.last_cut <= 40 {
+                if tt > cc.last_cut && tt - cc.last_cut <= 40 && tt <= self.data.len() {
                     cc.texts.insert(dc, self.data[cc.last_cut..tt].to_vec());
                 }
                 cc.last_cut = tt;
@@ -2714,6 +2858,53 @@ impl Brain {
                         });
                     }
                 }
+                // Conjoin with the level above: its predicted symbol, measured beyond the chunk.
+                if let Some(u) = self.upper {
+                    if !self.run_scr.iter().any(|r| {
+                        matches!(
+                            r.cand,
+                            Cand::Node {
+                                label: "screen-upper-given-chunk",
+                                ..
+                            }
+                        )
+                    }) {
+                        self.run_scr.push(RunScreen::new(
+                            Cand::Node {
+                                node: u,
+                                base: Some(c),
+                                label: "screen-upper-given-chunk",
+                            },
+                            t,
+                            self.cfg.run_window,
+                        ));
+                    }
+                    let uv = self
+                        .run_scr
+                        .iter()
+                        .find(|r| {
+                            matches!(
+                                r.cand,
+                                Cand::Node {
+                                    label: "screen-upper-given-chunk",
+                                    ..
+                                }
+                            )
+                        })
+                        .map(|r| r.value());
+                    if let Some((v3, n3)) = uv {
+                        let (a, b) = (self.nodes[u].name.clone(), self.nodes[c].name.clone());
+                        if self.cfg.conjoin_words
+                            && v3 > thr
+                            && n3 >= 20000
+                            && self.derived.len() < self.cfg.max_derived
+                            && self.live(&format!("({a}*{b})")).is_none()
+                            && self.live(&format!("({b}*{a})")).is_none()
+                        {
+                            self.bind(u, c, format!("conjoin: upper given chunk {v3:.2}"));
+                        }
+                    }
+                }
                 // Compress: the previous chunk carries information, but its edge failed to learn it
                 // (too many states for one edge): group chunks into classes by what follows them.
                 let pname = format!("prevword[{}]", self.nodes[c].name);
@@ -2830,6 +3021,9 @@ impl Brain {
 
     /// Boundary alignment with real word starts over [lo, hi), and how many chunks are one whole word.
     pub fn word_report(&self, lo: usize, hi: usize) -> Option<String> {
+        if self.vocab != 256 {
+            return None;
+        }
         let c = self.chunk?;
         let z = self.chunk_z(c);
         let hi = hi.min(self.t);
