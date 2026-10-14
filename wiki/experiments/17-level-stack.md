@@ -1,6 +1,6 @@
 # 17 · A stack of levels (2026-10-13)
 
-*[All experiments](README.md)* · [← 16](16-readout-and-generation.md)
+*[All experiments](README.md)* · [← 16](16-readout-and-generation.md) · [18 →](18-sparser-codes.md)
 
 **Concepts:** [Stepping stones](../concepts/stepping-stones.md) · [Writer-mask readout](../concepts/writer-mask-readout.md#capacity-limit) · [Growth operators](../concepts/growth-operators.md#chunk) · [Drive and prime](../concepts/drive-and-prime.md)
 
@@ -26,7 +26,7 @@ Exact nodes, `--readout2 --words --run-window 200000 --conjoin-words --long-tria
 - **Level 1 spawned by itself** in every run, as soon as level 0 kept its chunk.
 - **Level 1 learned almost nothing.** On 483k word-pieces it predicts its stream slightly worse than unigram counts (4.710 against 4.696), while order-1 counts get 4.253. It kept one delay tap and nothing else. Only 488 of its 512 symbol slots were ever assigned; the shared "other" symbol is 48% of the stream.
 - **So level 1 grew no chunk, and there was no level 2.** Its chunk screens were negative at every check (−0.29 to −0.01 bits on Austen).
-- **The top-down node never helped.** Measured beyond the chunk at level 0, it screened between −0.10 and −0.02 bits, and all 13 of its trials were rejected. Level 0 was about the same with or without the stack: 2.051 against 2.038 over all of Austen, 1.899 against 1.903 on the last 500k.
+- **The top-down node never helped enough to keep.** Measured beyond the chunk at level 0, it screened between −0.10 and −0.02 bits, and all 13 of its trials were rejected (gains −0.0003 to +0.0015, against a 0.01 bar). Level 0 was about the same with or without the stack: 2.051 against 2.038 over all of Austen, 1.899 against 1.903 on the last 500k.
 
 ## Why level 1 can't learn: the readout's error grows with the number of outcomes
 
@@ -72,7 +72,7 @@ Smaller vocabularies don't escape this either, at least with readout2: with 64 a
 
 1. **The stack works as machinery.** Levels spawn themselves from a kept chunk and run unchanged code; top-down input is just another candidate.
 2. **No third level appeared, because level 1 cannot predict its own stream.** The writer-mask readout's error grows with the number of outcomes per row: 0.06 bits at 16, 0.44 at 512 on a pure unigram. On the word-piece stream that error is as large as all the structure there is to find.
-3. **This is the next design problem, and it is in the engine, not the grammar.** Higher levels need a bigger code space (wider vectors or sparser codes), or a factored readout: predict a word-piece through a few small steps instead of one choice among hundreds.
+3. **This is the next design problem, and it is in the engine, not the grammar.** Higher levels need a bigger code space (wider vectors or sparser codes), or a factored readout: predict a word-piece through a few small steps instead of one choice among hundreds. [18](18-sparser-codes.md) tried sparser codes and found that most of the error was noisy counting, not capacity.
 4. **Two readout defects were found on the way:** counters saturate on busy rows, and random background never clears in rows with one dominant successor. Sparse rows and aging reduce them, but neither gets level 1 below unigram counts, and they help level 0 only on the hand-wired chain.
 
 ## Code

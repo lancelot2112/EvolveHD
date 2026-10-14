@@ -21,6 +21,7 @@ Every simulation so far, oldest first. Each page gives the question, setup, the 
 | 15 | [Pools that grow on demand](15-growing-pools.md) | Oct 13 | Real pools that double under eviction pressure reach exact-node quality. Over the whole corpus: 2.125 bits per byte against 2.107 for order-4 counts, beating them on 10 of 18 books |
 | 16 | [A better readout, and generation](16-readout-and-generation.md) | Oct 13 | Wider writer masks recover most of the readout gap (grown exact 2.321 → 2.183); on Austen the best system is 0.035 bits per byte behind order-4 counts; its continuations have words from the training text at the same rate as theirs |
 | 17 | [A stack of levels](17-level-stack.md) | Oct 13 | A word-piece level spawns by itself, but predicts its stream no better than unigram counts: the readout's error grows with outcomes (0.44 bits at 512), so no third level appears |
+| 18 | [Sparser codes, and counting with every bit](18-sparser-codes.md) | Oct 13 | Sparser readout codes help only where rows hold many codes; the main error was one coin per level per write. Per-bit levels close the readout gap at level 0 (0.016 bits per byte behind order-4 counts with the same contexts), and the grown system matches order-4 counts over three Austen novels (1.948 against 1.944). Level 1 learns its stream, but still no level 2 |
 
 The rules these results forced are collected in [lessons](../lessons.md); the ideas behind them are in [concepts](../concepts/README.md); terms are in the [glossary](../glossary.md).
 

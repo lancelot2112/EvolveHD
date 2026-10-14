@@ -26,6 +26,7 @@ Each term links to the page that explains it. For the ideas behind the terms, st
 | [**k-WTA**](concepts/matcher-pools.md) | k-winners-take-all; here usually k = 1 |
 | [**Matcher**](engine-model.md) | Fires when the popcount of its masked window of history reaches a threshold |
 | [**Opportunity**](concepts/attention.md) | Screen information on an unsolved target that no kept edge has captured; part of the attention score |
+| [**Per-bit levels**](concepts/writer-mask-readout.md#readout-v3) | Each bit of a written code reaches writer-mask level k on its own coin (probability 2^−k), so levels count smoothly |
 | [**Pool**](concepts/matcher-pools.md) | A set of matcher cells sharing an input, with recruitment, LRU eviction and k-WTA |
 | [**Prime**](concepts/drive-and-prime.md) | Writer-mask votes that add evidence to existing candidates, without creating winners |
 | [**Running count screen**](concepts/screens.md#running-count-screen) | A screen that keeps its own counts from the candidate's proposal on and scores each tick before learning from it; it can use far more data than a window |

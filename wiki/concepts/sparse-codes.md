@@ -22,6 +22,10 @@ Every node in EvolveHD speaks the same format: **one winning cell, shown as a fi
 | Active bits per code | 32 |
 | Expected overlap of two random codes | 32 × 32 / 2048 = 0.5 bits |
 
+## Readout codes
+
+The readout may use fewer bits of a target's code than the rest of the engine (`--code-bits k`, the first k of the 32 positions). Matching still sees all 32, so noise tolerance is unchanged. Sparser readout codes let a writer-mask row hold more successors. That pays when rows must hold many codes, as at a word-piece level: there 8-bit codes beat 32-bit codes by 0.1–0.2 bits per symbol, while at bytes they make no difference ([18](../experiments/18-sparser-codes.md)). See [writer-mask readout](writer-mask-readout.md#capacity-limit).
+
 ## Related
 
 [Matcher pools](matcher-pools.md) · [Shift-bind](shift-bind.md) · [Writer-mask readout](writer-mask-readout.md) · [Primitives and channels](../primitives.md)
@@ -32,6 +36,6 @@ Every node in EvolveHD speaks the same format: **one winning cell, shown as a fi
 
 ## Evidence in
 
-[04 · audit sims](../experiments/04-audit-sims.md)
+[04 · audit sims](../experiments/04-audit-sims.md) · [18 · sparser codes](../experiments/18-sparser-codes.md)
 
 *[All concepts](README.md) · [Wiki home](../README.md)*
