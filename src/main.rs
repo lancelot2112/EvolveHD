@@ -70,6 +70,27 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.sparse_rows = flag(args, "--sparse-rows");
     c.bias_edge = flag(args, "--bias-edge");
     c.bitwise_levels = flag(args, "--bitwise-levels");
+    c.screen_mix = flag(args, "--screen-mix");
+    c.fresh_extensions = flag(args, "--fresh-extensions");
+    if let Some(x) = arg(args, "--mix-thr") {
+        c.mix_thr = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--window") {
+        c.w = x.parse().unwrap();
+    }
+    c.recency_kept = flag(args, "--recency-kept");
+    if let Some(x) = arg(args, "--bias-mask-bits") {
+        c.bias_mask_bits = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--bias-age") {
+        c.bias_age = Some(x.parse().unwrap());
+    }
+    if let Some(x) = arg(args, "--recency") {
+        c.recency = x.split(',').map(|v| v.parse().unwrap()).collect();
+    }
+    if let Some(x) = arg(args, "--vocab-halflife") {
+        c.vocab_halflife = x.parse().unwrap();
+    }
     if let Some(x) = arg(args, "--age-every") {
         c.age_every = x.parse().unwrap();
     }
@@ -274,6 +295,10 @@ fn main() {
                 std::fs::write(format!("{dir}/level{l}.json"), b.summary_json(1000, secs)).unwrap();
                 let raw: Vec<u8> = b.syms[..b.t].iter().flat_map(|x| x.to_le_bytes()).collect();
                 std::fs::write(format!("{dir}/level{l}.syms"), raw).unwrap();
+                if l + 1 < st.levels.len() {
+                    // the vocabulary this level hands up
+                    std::fs::write(format!("{dir}/level{l}.vocab.txt"), st.maps[l].dump()).unwrap();
+                }
                 let n = b.t;
                 let half = n / 2;
                 let own = if n > half { b.bpb(half, n) } else { 0.0 };
@@ -294,6 +319,12 @@ fn main() {
                     .map(|&e| b.nodes[b.slab_src(e)].name.clone())
                     .collect();
                 rep += &format!("  kept: {}\n", kept.join(" "));
+                if l + 1 < st.levels.len() && st.maps[l].halflife > 0 {
+                    rep += &format!(
+                        "  vocabulary handed up: {} slots given a new text\n",
+                        st.maps[l].swaps
+                    );
+                }
                 if l < st.maps.len() {
                     let mut top: Vec<(&Vec<u8>, &u32)> = st.maps[l].chunk_counts.iter().collect();
                     top.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));

@@ -134,6 +134,72 @@ pub fn heldout_gain(s: &[i64], yp: &[i64], yn: &[i64]) -> f64 {
     tot / (n - h) as f64
 }
 
+/// Like [`heldout_gain`], but scores a mixture (1 - l) p(yn | yp) + l p(yn | s, yp), with l chosen from a
+/// grid on the first fifth of the second half and the gain reported on the rest. A weight of 0 is among
+/// the choices, so a context with no information scores about zero instead of being charged for sparsity.
+pub fn heldout_gain_mix(s: &[i64], yp: &[i64], yn: &[i64]) -> f64 {
+    use std::collections::HashMap;
+    let n = s.len();
+    let h = n / 2;
+    if h == 0 || n == h {
+        return 0.0;
+    }
+    let v = yn.iter().copied().max().unwrap_or(0) as usize + 1;
+    let mut p0 = vec![1.0f64; v];
+    for &y in &yn[..h] {
+        p0[y as usize] += 1.0;
+    }
+    let z: f64 = p0.iter().sum();
+    p0.iter_mut().for_each(|x| *x /= z);
+    #[derive(Default)]
+    struct C {
+        n: u32,
+        d: HashMap<i64, u32>,
+    }
+    let wb = |c: Option<&C>, y: i64, lower: f64| match c {
+        Some(c) => {
+            let t = c.d.len() as f64;
+            (*c.d.get(&y).unwrap_or(&0) as f64 + t * lower) / (c.n as f64 + t)
+        }
+        None => lower,
+    };
+    let mut cb: HashMap<i64, C> = HashMap::new();
+    let mut cs: HashMap<(i64, i64), C> = HashMap::new();
+    for i in 0..h {
+        let e = cb.entry(yp[i]).or_default();
+        e.n += 1;
+        *e.d.entry(yn[i]).or_insert(0) += 1;
+        let e = cs.entry((s[i], yp[i])).or_default();
+        e.n += 1;
+        *e.d.entry(yn[i]).or_insert(0) += 1;
+    }
+    const LAMS: [f64; 9] = [0.0, 0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 0.9];
+    let cal = h + (n - h) / 5;
+    let mut acc = [[0.0f64; 9]; 2];
+    for i in h..n {
+        let y = yn[i];
+        let base = if (y as usize) < v {
+            p0[y as usize]
+        } else {
+            1e-9
+        };
+        let pb = wb(cb.get(&yp[i]), y, base);
+        let ps = wb(cs.get(&(s[i], yp[i])), y, pb);
+        let k = if i < cal { 0 } else { 1 };
+        for (j, &l) in LAMS.iter().enumerate() {
+            acc[k][j] += ((1.0 - l) * pb + l * ps).log2() - pb.log2();
+        }
+    }
+    let best = (0..LAMS.len())
+        .max_by(|&a, &b| acc[0][a].partial_cmp(&acc[0][b]).unwrap())
+        .unwrap();
+    if n > cal {
+        acc[1][best] / (n - cal) as f64
+    } else {
+        0.0
+    }
+}
+
 /// I(a; b).
 pub fn mi(a: &[i64], b: &[i64]) -> f64 {
     ent(&[a]) + ent(&[b]) - ent(&[a, b])
@@ -214,5 +280,7 @@ mod tests {
         assert!(heldout_gain(&ctx, &yp0, &yn0) > 0.9);
         let noise: Vec<i64> = (0..8000).map(|i| (i * 7919 % 31) as i64).collect();
         assert!(heldout_gain(&noise, &yp0, &yn0) < 0.05);
+        assert!(heldout_gain_mix(&ctx, &yp0, &yn0) > 0.8);
+        assert!(heldout_gain_mix(&noise, &yp0, &yn0).abs() < 0.05);
     }
 }

@@ -12,7 +12,7 @@
 //! Trials are shadow trials scored by paired log-loss. Every bits-per-byte figure is prequential.
 use crate::bits::{self, Bits, Code, D};
 use crate::edge::{Edge, TargetIndex};
-use crate::info::{ent, ent_nested, heldout_gain, roll, CmiScreen};
+use crate::info::{ent, ent_nested, heldout_gain, heldout_gain_mix, roll, CmiScreen};
 use crate::pool::{rotate, Pool};
 use crate::rng::Rng;
 use std::collections::{HashMap, HashSet};
@@ -85,6 +85,24 @@ pub struct Cfg {
     pub code_bits: usize,
     /// Writer-mask levels are sampled per code bit instead of per write.
     pub bitwise_levels: bool,
+    /// Running and held-out screens score a learned mixture with the baseline instead of joint backoff.
+    pub screen_mix: bool,
+    /// Screen threshold (bits) when screens score mixtures: they don't overstate, so it can be low.
+    pub mix_thr: f64,
+    /// An extended trial is judged on its gain since the last extension, not since it began, so a source
+    /// that learns slowly is not held back by its early ticks.
+    pub fresh_extensions: bool,
+    /// In a stack, the next level's vocabulary is keyed by chunk text and adapts, its counts halving every
+    /// this many chunks (0 = the first chunks seen twice, kept for good).
+    pub vocab_halflife: usize,
+    /// Recency moves: for each W, a candidate "recent(W)" whose edge has one small writer-mask row that
+    /// holds about the last W target codes, so it scores what was seen recently (a cache, in bits).
+    pub recency: Vec<usize>,
+    /// Install the recency edges as kept from the start (for measuring them), instead of trialling them.
+    pub recency_kept: bool,
+    /// The bias edge's own mask bits and aging (0 = the same as every edge), to set its memory apart.
+    pub bias_mask_bits: usize,
+    pub bias_age: Option<u32>,
 }
 
 impl Default for Cfg {
@@ -134,6 +152,14 @@ impl Default for Cfg {
             write_bits: 8,
             code_bits: bits::CK,
             bitwise_levels: false,
+            screen_mix: false,
+            mix_thr: 0.005,
+            fresh_extensions: false,
+            vocab_halflife: 0,
+            recency: vec![],
+            recency_kept: false,
+            bias_mask_bits: 0,
+            bias_age: None,
         }
     }
 }
@@ -589,6 +615,8 @@ pub struct Brain {
     pub upper: Option<usize>,
     /// After cleanup removes the upper node, it is offered again only from this tick on.
     upper_retry: usize,
+    /// Recency candidates: (window W, live node, offered again from this tick on).
+    recency: Vec<(usize, Option<usize>, usize)>,
     pub t: usize,
     pub tt: usize,
     pub cfg: Cfg,
@@ -602,6 +630,8 @@ pub struct Brain {
     pub kept: Vec<usize>,
     pub trials: Vec<usize>,
     trial_t0: HashMap<usize, usize>,
+    /// When an extended trial's current judging window began (fresh extensions).
+    judge_t0: HashMap<usize, usize>,
     backoff: HashMap<String, (usize, usize)>,
     priority: HashSet<String>,
     scr: HashMap<String, f64>,
@@ -719,6 +749,7 @@ impl Brain {
             upper_state: -1,
             upper: None,
             upper_retry: 0,
+            recency: cfg.recency.iter().map(|&w| (w, None, 0)).collect(),
             t: 0,
             tt,
             cfg: cfg.clone(),
@@ -731,6 +762,7 @@ impl Brain {
             kept: vec![0],
             trials: vec![],
             trial_t0: HashMap::new(),
+            judge_t0: HashMap::new(),
             backoff: HashMap::new(),
             priority: HashSet::new(),
             scr: HashMap::new(),
@@ -765,9 +797,38 @@ impl Brain {
             let code = bits::rand_code(&mut b.rng);
             let nd = b.new_node("bias".into(), Kind::Const(code), vec![], String::new());
             let i = b.push_node(nd);
-            b.slab.push(b.mk_edge(i, 1.0));
+            let mut e = b.mk_edge(i, 1.0);
+            if cfg.bias_mask_bits > 0 {
+                e.kw = cfg.bias_mask_bits;
+            }
+            if let Some(a) = cfg.bias_age {
+                e.age_every = a;
+            }
+            b.slab.push(e);
             b.kept.push(b.slab.len() - 1);
             b.kept_since.insert("bias".into(), 0);
+        }
+        if cfg.recency_kept {
+            for r in 0..b.recency.len() {
+                let w = b.recency[r].0;
+                let code = bits::rand_code(&mut b.rng);
+                let nd = b.new_node(
+                    format!("recent({w})"),
+                    Kind::Const(code),
+                    vec![],
+                    String::new(),
+                );
+                let i = b.push_node(nd);
+                let mut e = b.mk_edge(i, 1.0);
+                e.kw = (w * cfg.code_bits.clamp(1, bits::CK)).min(D);
+                e.sparse = true;
+                e.age_every = 0;
+                b.slab.push(e);
+                b.kept.push(b.slab.len() - 1);
+                b.kept_since.insert(format!("recent({w})"), 0);
+                b.recency[r].1 = Some(i);
+                b.recency[r].2 = usize::MAX;
+            }
         }
         b.slab[0].drop_lowest = cfg.drop_lowest;
         b.slab[0].template = cfg.row_template;
@@ -1371,7 +1432,8 @@ impl Brain {
         if self.cfg.words && self.cfg.run_window > 0 && !self.frozen {
             if self.chunk.is_none() && self.run_scr.is_empty() {
                 for z in [0.5, 1.0, 1.5] {
-                    self.run_scr.push(RunScreen::new(
+                    self.run_scr.push(RunScreen::make(
+                        self.cfg.screen_mix,
                         Cand::Chunk {
                             z,
                             prev: -1,
@@ -1479,6 +1541,25 @@ impl Brain {
         let t = self.t;
         self.syms[t] = sym;
         self.tick();
+    }
+
+    /// A screen threshold: the given one, or `mix_thr` when screens score mixtures.
+    fn thr(&self, normal: f64) -> f64 {
+        if self.cfg.screen_mix {
+            self.cfg.mix_thr
+        } else {
+            normal
+        }
+    }
+
+    /// Symbol `sym` now stands for something new: give it a fresh code, so readers treat it as a new input.
+    pub fn reassign_symbol(&mut self, sym: u32) {
+        if self.cfg.real {
+            self.byte.bytecode[sym as usize] = bits::rand_code(&mut self.rng);
+        } else if let Some(&c) = self.byte.sym.get(&sym) {
+            self.byte.pool.new_code(c, &mut self.rng);
+        }
+        self.alive_dirty = true;
     }
 
     /// The input cell this level expects next (argmax of the kept edges' mix), or -1.
@@ -1800,13 +1881,23 @@ impl Brain {
         // trial decisions
         for e in self.trials.clone() {
             let age = t - self.trial_t0[&e];
+            if let Some(&j0) = self.judge_t0.get(&e) {
+                if t - j0 < c.evalw {
+                    continue; // the fresh window after an extension is not full yet
+                }
+            }
             if age >= c.burn + c.evalw && self.slab[e].n > 100 {
                 let (m, z) = self.slab[e].stats();
                 // a many-state source still learning (positive, below the bar): extend its trial
                 let passes = m >= c.acc_gain && z >= c.acc_z;
                 if !passes && m > 0.0 && age < (c.burn + c.evalw) * self.trial_mult(e) {
+                    if c.fresh_extensions {
+                        self.slab[e].reset_stats();
+                        self.judge_t0.insert(e, t);
+                    }
                     continue;
                 }
+                self.judge_t0.remove(&e);
                 self.trials.retain(|&x| x != e);
                 let k = self.name_of_edge(e);
                 if m >= c.acc_gain && z >= c.acc_z {
@@ -1908,6 +1999,9 @@ impl Brain {
         if t % 10000 == 9999 {
             self.gc();
         }
+        if !self.recency.is_empty() {
+            self.add_recency();
+        }
         self.fill();
     }
 
@@ -1919,7 +2013,12 @@ impl Brain {
         for n in self.derived.clone() {
             let s = self.series(n, w);
             let sh = self.rng.range(500, w - 500);
-            out.push((self.nodes[n].name.clone(), sc.shift_screen(&s[..w - 1], sh)));
+            let v = if self.cfg.screen_mix {
+                heldout_gain_mix(&s[..w - 1], yp, yn)
+            } else {
+                sc.shift_screen(&s[..w - 1], sh)
+            };
+            out.push((self.nodes[n].name.clone(), v));
         }
         self.scr.extend(out);
     }
@@ -1948,14 +2047,21 @@ impl Brain {
             } else {
                 v
             };
-            if v > self.cfg.screen_thr {
+            if v > self.thr(self.cfg.screen_thr) {
                 cands.push((v, k.clone()));
             }
         }
         cands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then_with(|| b.1.cmp(&a.1)));
         for (_, k) in cands.into_iter().take(free) {
             let n = self.live(&k).unwrap();
-            self.slab.push(self.mk_edge(n, 0.0));
+            let mut e = self.mk_edge(n, 0.0);
+            if let Some(w) = self.recency_window(n) {
+                // one row that holds about the last w codes: it fills, then drops old bits at random
+                e.kw = (w * self.tix.rk).min(D);
+                e.sparse = true;
+                e.age_every = 0;
+            }
+            self.slab.push(e);
             let e = self.slab.len() - 1;
             self.trials.push(e);
             self.trial_t0.insert(e, t);
@@ -1984,7 +2090,7 @@ impl Brain {
         let y = self.series(0, w);
         let (yp, yn) = (&y[..w - 1], &y[1..]);
         let sc = CmiScreen::new(yp, yn);
-        let thr = self.cfg.tmp_thr;
+        let thr = self.thr(self.cfg.tmp_thr);
         // (value, Some(d)) for a delay, (value, None, x, v) for a hold
         let mut best: Option<(f64, Option<usize>, usize, i32)> = None;
         for d in [2usize, 3, 4, 5, 6, 8, 12, 16] {
@@ -1998,7 +2104,11 @@ impl Brain {
                 .map(|&x| x as i64 + 1)
                 .collect();
             let sh = self.rng.range(500, w - 500);
-            let v = sc.shift_screen(&s[..w - 1], sh);
+            let v = if self.cfg.screen_mix {
+                heldout_gain_mix(&s[..w - 1], yp, yn)
+            } else {
+                sc.shift_screen(&s[..w - 1], sh)
+            };
             if v > thr && best.map_or(true, |b| v > b.0) {
                 best = Some((v, Some(d), 0, 0));
             }
@@ -2047,7 +2157,11 @@ impl Brain {
                     hs.push(if seen { cur } else { 0 });
                 }
                 let sh = self.rng.range(500, w - 500);
-                let val = sc.shift_screen(&hs[..w - 1], sh);
+                let val = if self.cfg.screen_mix {
+                    heldout_gain_mix(&hs[..w - 1], yp, yn)
+                } else {
+                    sc.shift_screen(&hs[..w - 1], sh)
+                };
                 if val > thr && best.map_or(true, |b| val > b.0) {
                     best = Some((val, None, x, v));
                 }
@@ -2119,9 +2233,22 @@ impl Brain {
                 if self.contains(b, a) || self.contains(a, b) {
                     continue;
                 }
+                if matches!(self.nodes[a].kind, Kind::Const(_))
+                    || matches!(self.nodes[b].kind, Kind::Const(_))
+                {
+                    continue; // a constant adds nothing to a bind
+                }
                 let (sa, sb) = (&ser[&a], &ser[&b]);
                 let m = sb.iter().copied().max().unwrap_or(0) + 1;
                 let pair: Vec<i64> = sa.iter().zip(sb).map(|(x, z)| x * m + z).collect();
+                if self.cfg.screen_mix {
+                    // what b adds beyond the anchor a, as a held-out mixture gain (no data-per-context cutoff)
+                    let g = heldout_gain_mix(sb, sa, yn);
+                    if g > self.cfg.mix_thr && best.map_or(true, |bb| g > bb.0) {
+                        best = Some((g, a, b));
+                    }
+                    continue;
+                }
                 let (m0, nd) = mi_yn(&pair);
                 if nd > w / 4
                     || (self.cfg.real
@@ -2161,6 +2288,39 @@ impl Brain {
             self.upper = None;
             self.upper_retry = self.t + 100_000;
         }
+        let t = self.t;
+        for r in 0..self.recency.len() {
+            if let Some(c) = self.recency[r].1 {
+                if self.nodes[c].removed {
+                    self.recency[r].1 = None;
+                    self.recency[r].2 = t + 100_000;
+                }
+            }
+        }
+    }
+
+    /// Offer the recency candidates that are not live (after burn-in, and again after cleanup removed them).
+    fn add_recency(&mut self) {
+        for r in 0..self.recency.len() {
+            let (w, live, retry) = self.recency[r];
+            if live.is_some() || self.t < retry.max(self.cfg.evalw) {
+                continue;
+            }
+            let code = bits::rand_code(&mut self.rng);
+            let nd = self.new_node(
+                format!("recent({w})"),
+                Kind::Const(code),
+                vec![],
+                String::new(),
+            );
+            let i = self.add(nd, format!("recency over the last {w} symbols"));
+            self.recency[r].1 = Some(i);
+        }
+    }
+
+    /// The recency window of node n, if it is a recency candidate.
+    fn recency_window(&self, n: usize) -> Option<usize> {
+        self.recency.iter().find(|r| r.1 == Some(n)).map(|r| r.0)
     }
 
     fn gc_inner(&mut self) {
@@ -2484,6 +2644,10 @@ pub struct RunScreen {
     pending: Option<(i32, i32)>,
     fed: u64,
     blocks: std::collections::VecDeque<(f64, usize)>,
+    /// Score the gain of a mixture (1 - lam) p(y'|b) + lam p(y'|s,b), with lam learned online, instead of
+    /// backing off from the joint context alone (which charges heavily for contexts seen only a few times).
+    mix: bool,
+    lam: f64,
 }
 
 impl RunScreen {
@@ -2499,7 +2663,15 @@ impl RunScreen {
             pending: None,
             fed: 0,
             blocks: Default::default(),
+            mix: false,
+            lam: 0.1,
         }
+    }
+
+    pub fn make(mix: bool, cand: Cand, born: usize, window: usize) -> Self {
+        let mut r = Self::new(cand, born, window);
+        r.mix = mix;
+        r
     }
 
     /// Feed tick t: y = byte state at t (the outcome for the pending pair), s = the context now,
@@ -2520,7 +2692,15 @@ impl RunScreen {
                 if let Some(c) = self.ctx.get(&(sp, yp)) {
                     ps = c.p(y, pb);
                 }
-                let g = ps.log2() - pb.log2();
+                let g = if self.mix {
+                    // online EM step on the mixture weight, after scoring with the weight as it was
+                    let m = (1.0 - self.lam) * pb + self.lam * ps;
+                    let post = self.lam * ps / m;
+                    self.lam = (self.lam + 0.001 * (post - self.lam)).clamp(1e-4, 1.0 - 1e-4);
+                    m.log2() - pb.log2()
+                } else {
+                    ps.log2() - pb.log2()
+                };
                 match self.blocks.back_mut() {
                     Some(b) if b.1 < 1000 => {
                         b.0 += g;
@@ -2770,7 +2950,7 @@ impl Brain {
         let t = self.t;
         let y = self.series(0, w);
         let (yp, yn) = (&y[..w - 1], &y[1..]);
-        let thr = self.cfg.tmp_thr;
+        let thr = self.thr(self.cfg.tmp_thr);
         match self.chunk {
             None => {
                 let mut best: Option<(f64, f64)> = None;
@@ -2779,7 +2959,11 @@ impl Brain {
                         .iter()
                         .map(|x| x + 1)
                         .collect();
-                    let v = heldout_gain(&s, yp, yn);
+                    let v = if self.cfg.screen_mix {
+                        heldout_gain_mix(&s, yp, yn)
+                    } else {
+                        heldout_gain(&s, yp, yn)
+                    };
                     self.events.push(Event {
                         t,
                         kind: "screen-chunk".into(),
@@ -2812,7 +2996,11 @@ impl Brain {
                         0
                     });
                 }
-                let v = heldout_gain(&s[..w - 1], yp, yn);
+                let v = if self.cfg.screen_mix {
+                    heldout_gain_mix(&s[..w - 1], yp, yn)
+                } else {
+                    heldout_gain(&s[..w - 1], yp, yn)
+                };
                 let name = self.nodes[c].name.clone();
                 self.events.push(Event {
                     t,
@@ -2833,7 +3021,7 @@ impl Brain {
 
     fn word_moves_running(&mut self) {
         let t = self.t;
-        let thr = self.cfg.tmp_thr;
+        let thr = self.thr(self.cfg.tmp_thr);
         match self.chunk {
             None => {
                 if self
@@ -2865,7 +3053,8 @@ impl Brain {
                     let i = self.add(nd, format!("screen byte {v:.2}"));
                     self.chunk = Some(i);
                     self.run_scr = vec![
-                        RunScreen::new(
+                        RunScreen::make(
+                            self.cfg.screen_mix,
                             Cand::Prev {
                                 chunk: i,
                                 z,
@@ -2874,7 +3063,8 @@ impl Brain {
                             t,
                             self.cfg.run_window,
                         ),
-                        RunScreen::new(
+                        RunScreen::make(
+                            self.cfg.screen_mix,
                             Cand::PrevGivenChunk {
                                 chunk: i,
                                 z,
@@ -2934,7 +3124,8 @@ impl Brain {
                             }
                         )
                     }) {
-                        self.run_scr.push(RunScreen::new(
+                        self.run_scr.push(RunScreen::make(
+                            self.cfg.screen_mix,
                             Cand::Node {
                                 node: u,
                                 base: Some(c),
@@ -2994,7 +3185,8 @@ impl Brain {
                     let i = self.add(nd, format!("prev screens {v:.2} / given chunk {v2:.2}"));
                     self.pclass = Some(i);
                     self.run_scr.truncate(2);
-                    self.run_scr.push(RunScreen::new(
+                    self.run_scr.push(RunScreen::make(
+                        self.cfg.screen_mix,
                         Cand::Node {
                             node: i,
                             base: None,
@@ -3003,7 +3195,8 @@ impl Brain {
                         t,
                         self.cfg.run_window,
                     ));
-                    self.run_scr.push(RunScreen::new(
+                    self.run_scr.push(RunScreen::make(
+                        self.cfg.screen_mix,
                         Cand::Node {
                             node: i,
                             base: Some(c),

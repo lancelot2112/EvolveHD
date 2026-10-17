@@ -11,6 +11,16 @@ use std::collections::HashMap;
 /// Maps completed chunks of one level to symbols of the next.
 pub struct VocabMap {
     pub vocab: usize,
+    /// 0: the first `vocab` chunks seen twice, keyed by (cell, generation), kept for good (experiments 17–19).
+    /// > 0: keyed by chunk text, with counts that halve every `halflife` chunks; a text seen twice takes a
+    /// free slot, or the slot of the weakest symbol if its count is more than twice that symbol's.
+    pub halflife: usize,
+    counts: HashMap<Vec<u8>, f32>,
+    by_text: HashMap<Vec<u8>, u32>,
+    weakest: Option<(f32, u32)>,
+    n: u64,
+    /// Slots given a new text so far.
+    pub swaps: u64,
     ids: HashMap<(i32, u32), u32>,
     seen: HashMap<(i32, u32), u32>,
     /// The text of each symbol (as of when it was assigned), and of the "other" symbol.
@@ -21,15 +31,87 @@ pub struct VocabMap {
 }
 
 impl VocabMap {
-    fn new(vocab: usize) -> Self {
+    fn new(vocab: usize, halflife: usize) -> Self {
         VocabMap {
             vocab,
+            halflife,
+            counts: HashMap::new(),
+            by_text: HashMap::new(),
+            weakest: None,
+            n: 0,
+            swaps: 0,
             ids: HashMap::new(),
             seen: HashMap::new(),
             texts: vec![],
             chunk_counts: HashMap::new(),
             last_cut: 0,
         }
+    }
+
+    /// The symbol for a completed chunk, and the slot that was just given a new text (if any).
+    fn lookup(&mut self, key: (i32, u32), text: &[u8]) -> (u32, Option<u32>) {
+        if self.halflife == 0 {
+            return (self.id(key, text), None);
+        }
+        self.n += 1;
+        if self.n % self.halflife as u64 == 0 {
+            let by_text = &self.by_text;
+            self.counts.retain(|k, c| {
+                *c *= 0.5;
+                *c >= 0.5 || by_text.contains_key(k)
+            });
+            self.weakest = None;
+        }
+        let c = {
+            let e = self.counts.entry(text.to_vec()).or_insert(0.0);
+            *e += 1.0;
+            *e
+        };
+        if let Some(&i) = self.by_text.get(text) {
+            return (i, None);
+        }
+        if c < 2.0 {
+            return (self.vocab as u32, None);
+        }
+        if self.texts.len() < self.vocab {
+            let i = self.texts.len() as u32;
+            self.by_text.insert(text.to_vec(), i);
+            self.texts.push(text.to_vec());
+            return (i, None);
+        }
+        if self.weakest.is_none() || self.n % 256 == 0 {
+            let mut w = (f32::INFINITY, 0u32);
+            for (i, t) in self.texts.iter().enumerate() {
+                let ci = *self.counts.get(t).unwrap_or(&0.0);
+                if ci < w.0 {
+                    w = (ci, i as u32);
+                }
+            }
+            self.weakest = Some(w);
+        }
+        let (wc, wi) = self.weakest.unwrap();
+        if c > 2.0 * wc.max(0.5) {
+            let old = std::mem::replace(&mut self.texts[wi as usize], text.to_vec());
+            self.by_text.remove(&old);
+            self.by_text.insert(text.to_vec(), wi);
+            self.weakest = None;
+            self.swaps += 1;
+            return (wi, Some(wi));
+        }
+        (self.vocab as u32, None)
+    }
+
+    /// The vocabulary as text lines: symbol, current count, text.
+    pub fn dump(&self) -> String {
+        let mut o = String::new();
+        for (i, t) in self.texts.iter().enumerate() {
+            let c = self.counts.get(t).copied().unwrap_or(f32::NAN);
+            o += &format!(
+                "{i}\t{c:.1}\t{}\n",
+                String::from_utf8_lossy(t).replace('\n', "\\n")
+            );
+        }
+        o
     }
 
     /// The symbol for a completed chunk: its own id once seen twice and while there is room, else "other".
@@ -66,7 +148,7 @@ impl Stack {
         let b = Brain::new(data, cfg.clone());
         Stack {
             levels: vec![b],
-            maps: vec![VocabMap::new(vocab)],
+            maps: vec![VocabMap::new(vocab, cfg.vocab_halflife)],
             max_levels,
             vocab,
             cfg,
@@ -125,8 +207,11 @@ impl Stack {
         if text.len() <= 200 {
             *self.maps[l].chunk_counts.entry(text.clone()).or_insert(0) += 1;
         }
-        let sym = self.maps[l].id((cell, gen), &text);
+        let (sym, renamed) = self.maps[l].lookup((cell, gen), &text);
         if self.levels.len() > l + 1 {
+            if let Some(r) = renamed {
+                self.levels[l + 1].reassign_symbol(r);
+            }
             self.levels[l + 1].push(sym);
             self.after_tick(l + 1, byte_t);
             let u = self.levels[l + 1].predict_cell();
@@ -137,7 +222,8 @@ impl Stack {
             cfg.seed = self.cfg.seed + 1000 * (l as u64 + 1);
             cfg.oracle = 0;
             self.levels.push(Brain::new_symbols(self.vocab + 1, cfg));
-            self.maps.push(VocabMap::new(self.vocab));
+            self.maps
+                .push(VocabMap::new(self.vocab, self.cfg.vocab_halflife));
             self.log.push((
                 l + 1,
                 byte_t,
