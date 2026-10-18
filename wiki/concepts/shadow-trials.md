@@ -18,7 +18,7 @@ Counts learn in one visit; writer masks need many. A trial has to be long enough
 
 
 - **Long trials for brute force:** a granule-layer readout climbs slowly, so it needs two passing windows in a row and is rejected only at 60k ticks ([10](../experiments/10-full-primitives.md)).
-- **Extensions for many-state sources:** <a id="extensions-for-many-state-sources"></a>a source with more than 4,096 states learns slowly, because each state's writer mask gets only a few writes in a 12k-tick trial. If such a trial ends with a positive gain under the bar, it continues, up to 5 times its normal length. Clear passes and clear failures are decided on time as before. This let a 31,000-cell word-pair bind through: at most 0.0045 bits in normal trials, kept at 0.010 with the extension. Extensions on their own cost about 0.02 bits per byte, by holding trial slots longer ([13](../experiments/13-word-pairs.md)).
+- **Extensions for many-state sources:** <a id="extensions-for-many-state-sources"></a>a source with more than 4,096 states learns slowly, because each state's writer mask gets only a few writes in a 12k-tick trial. If such a trial ends with a positive gain under the bar, it continues, up to 5 times its normal length. Clear passes and clear failures are decided on time as before. This let a 31,000-cell word-pair bind through: at most 0.0045 bits in normal trials, kept at 0.010 with the extension. Extensions on their own cost about 0.02 bits per byte, by holding trial slots longer ([13](../experiments/13-word-pairs.md)). With `--fresh-extensions` an extended trial is judged on its gain since the last extension, not since it began, so a slow learner's early ticks don't hold it back. That let a word-piece level keep order-2 context: its bind gained 0.0035–0.0053 bits per trial; under the old rule a 20× extension still rejected it, and a 40× one never reached a verdict ([20](../experiments/20-fair-screens.md)).
 - **Interleaved trials for actions:** alternate ticks with and without the new context and compare reward, since counterfactual reward is unseen ([Go/NoGo selection](go-nogo-selection.md)).
 
 ## Why each rule exists
@@ -43,6 +43,6 @@ Wiring every candidate without trials cost 4 points against wiring nothing at al
 
 ## Evidence in
 
-[06 · growth interfaces](../experiments/06-growth-interfaces.md) · [07 · graph growth](../experiments/07-graph-growth.md) · [10 · full primitives](../experiments/10-full-primitives.md) · [13 · word pairs](../experiments/13-word-pairs.md)
+[06 · growth interfaces](../experiments/06-growth-interfaces.md) · [07 · graph growth](../experiments/07-graph-growth.md) · [10 · full primitives](../experiments/10-full-primitives.md) · [13 · word pairs](../experiments/13-word-pairs.md) · [20 · fair screens](../experiments/20-fair-screens.md)
 
 *[All concepts](README.md) · [Wiki home](../README.md)*

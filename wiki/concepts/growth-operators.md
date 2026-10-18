@@ -57,12 +57,16 @@ A 3-input puzzle went from chance to 0.72 with 10k cells. A 4-input puzzle neede
 
 Every 10k ticks, remove derived nodes that nothing uses, that have been tried at least once, and that are older than 15k ticks. Never remove a part of a live node. This is the structural form of [sleep](sleep-and-consolidation.md) and keeps the structure budget recycling ([capacity and budget](capacity-and-budget.md)).
 
+## Recency
+
+A candidate edge from a constant source whose one writer-mask row holds about the last W target codes, so it scores what was seen recently: a cache, in bits (`--recency W`). On whole-corpus words it is worth 0.056 bits per word over a slow-memory bias edge. But the bias edge at upper levels, which halves its counts every 1,024 writes, already acts as such a cache, and with it a recency edge adds nothing ([20](../experiments/20-fair-screens.md)).
+
 ## Related
 
 [Growth grammar](../growth-grammar.md) · [Screens](screens.md) · [Shadow trials](shadow-trials.md) · [Shift-bind](shift-bind.md) · [Primitives](../primitives.md)
 
 ## Evidence in
 
-[06 · growth interfaces](../experiments/06-growth-interfaces.md) · [07 · graph growth](../experiments/07-graph-growth.md) · [08 · bootstrapping](../experiments/08-bootstrapping.md) · [10 · full primitives](../experiments/10-full-primitives.md) · [11 · real text](../experiments/11-real-text.md) · [12 · words](../experiments/12-words.md) · [13 · word pairs](../experiments/13-word-pairs.md)
+[06 · growth interfaces](../experiments/06-growth-interfaces.md) · [07 · graph growth](../experiments/07-graph-growth.md) · [08 · bootstrapping](../experiments/08-bootstrapping.md) · [10 · full primitives](../experiments/10-full-primitives.md) · [11 · real text](../experiments/11-real-text.md) · [12 · words](../experiments/12-words.md) · [13 · word pairs](../experiments/13-word-pairs.md) · [20 · fair screens](../experiments/20-fair-screens.md)
 
 *[All concepts](README.md) · [Wiki home](../README.md)*

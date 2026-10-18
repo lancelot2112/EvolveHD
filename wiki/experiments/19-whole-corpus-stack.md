@@ -1,6 +1,6 @@
 # 19 · The stack on the whole corpus (2026-10-14)
 
-*[All experiments](README.md)* · [← 18](18-sparser-codes.md)
+*[All experiments](README.md)* · [← 18](18-sparser-codes.md) · [20 →](20-fair-screens.md)
 
 **Concepts:** [Stepping stones](../concepts/stepping-stones.md) · [Screens](../concepts/screens.md#estimator-bias) · [Capacity and budget](../concepts/capacity-and-budget.md) · [Writer-mask readout](../concepts/writer-mask-readout.md#readout-v3)
 

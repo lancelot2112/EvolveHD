@@ -32,7 +32,19 @@ Choose the baseline carefully. Measured beyond the current byte, the previous wo
 
 ## Estimator bias
 
-Held-out and running screens score a context with Witten-Bell counts on the joint context (candidate, baseline), backing off to the baseline. Backoff pays heavily for sparse contexts: a context seen once costs about a bit whenever it is wrong. Training the held-out screen on only half its window, and halving running counts every million ticks, add to the penalty. So these screens understate contexts with many states relative to the data. On the level-1 word-piece stream of Austen, the two previous symbols screen at −0.075 bits held out and about −0.013 in a running-screen analogue, while Kneser-Ney counts find +0.034 and a learned mixture with the baseline +0.055 ([19](../experiments/19-whole-corpus-stack.md)). A mixture gain (blend the baseline prediction with the candidate's, with a learned weight) can't fall much below zero and is the fairer test. Using it inside the engine is untested.
+Held-out and running screens score a context with Witten-Bell counts on the joint context (candidate, baseline), backing off to the baseline. Backoff pays heavily for sparse contexts: a context seen once costs about a bit whenever it is wrong. Training the held-out screen on only half its window, and halving running counts every million ticks, add to the penalty. So these screens understate contexts with many states relative to the data. On the level-1 word-piece stream of Austen, the two previous symbols screen at −0.075 bits held out and about −0.013 in a running-screen analogue, while Kneser-Ney counts find +0.034 and a learned mixture with the baseline +0.055 ([19](../experiments/19-whole-corpus-stack.md)). A mixture gain (blend the baseline prediction with the candidate's, with a learned weight) can't fall much below zero and is the fairer test.
+
+### Mixture screens
+
+With `--screen-mix`, every screen scores that mixture ([20](../experiments/20-fair-screens.md)):
+- **Running screens** learn the weight online, by an EM step.
+- **Windowed screens** (held-out, delay, hold, bind, node) choose it on a fifth of the held-out half and score the rest.
+- The threshold drops to 0.005 bits, because a mixture doesn't overstate.
+
+This replaces the shift-null mutual information for delays, holds and binds, which is noise once contexts have hundreds of thousands of states. Effects:
+- **Bytes:** grown exact nodes on two books go from 2.079 to 1.991 bits per byte on book A's last 100k (2.405 to 2.294 over the whole book). On Austen, with fresh extensions too, level 0 beats order-4 counts over the three novels together (1.903 against 1.944), though not on *Emma*.
+- **Whole words:** a grown word-level brain beats order-2 counts by 0.225 bits per word, with binds over the previous words and holds that latch earlier words.
+- **Word-pieces:** level 1 of a stack offers and keeps order-2 context for the first time.
 
 ## Why
 
@@ -52,6 +64,6 @@ Every check compares every source with every target, and synergy compares pairs,
 
 ## Evidence in
 
-[06 · growth interfaces](../experiments/06-growth-interfaces.md) · [07 · graph growth](../experiments/07-graph-growth.md) · [09 · attention temporal](../experiments/09-attention-temporal.md) · [11 · real text](../experiments/11-real-text.md) · [12 · words](../experiments/12-words.md) · [13 · word pairs](../experiments/13-word-pairs.md) · [19 · whole-corpus stack](../experiments/19-whole-corpus-stack.md)
+[06 · growth interfaces](../experiments/06-growth-interfaces.md) · [07 · graph growth](../experiments/07-graph-growth.md) · [09 · attention temporal](../experiments/09-attention-temporal.md) · [11 · real text](../experiments/11-real-text.md) · [12 · words](../experiments/12-words.md) · [13 · word pairs](../experiments/13-word-pairs.md) · [19 · whole-corpus stack](../experiments/19-whole-corpus-stack.md) · [20 · fair screens](../experiments/20-fair-screens.md)
 
 *[All concepts](README.md) · [Wiki home](../README.md)*
