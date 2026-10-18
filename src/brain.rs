@@ -2355,6 +2355,7 @@ impl Brain {
                 self.backoff.remove(&name);
                 // free memory the node no longer needs, but keep its frozen state
                 self.nodes[n].h = Hist::freed();
+                self.free_kind(n);
                 self.events.push(Event {
                     t,
                     kind: "gc".into(),
@@ -2363,6 +2364,24 @@ impl Brain {
                     v: None,
                 });
             }
+        }
+    }
+
+    /// Drop the parts of a removed node that only matching needs: masks, index and caches. Its codes and
+    /// generations stay, since live nodes may still read its frozen state.
+    fn free_kind(&mut self, n: usize) {
+        match &mut self.nodes[n].kind {
+            Kind::BindReal(b) => {
+                b.pool.freeze();
+                b.cache = HashMap::new();
+            }
+            Kind::ChunkReal(k, _) => {
+                k.pool.freeze();
+                k.cache = HashMap::new();
+            }
+            Kind::BindSym(b) => b.map = HashMap::new(),
+            Kind::ChunkSym(k, _) => k.map = HashMap::new(),
+            _ => {}
         }
     }
 
@@ -2415,6 +2434,16 @@ impl Brain {
         let pool_b = |p: &Pool| p.cap * (std::mem::size_of::<Bits>() + 64 + 40);
         let mut pools = pool_b(&self.byte.pool);
         for n in &self.nodes {
+            if n.removed {
+                pools += match &n.kind {
+                    Kind::BindReal(b) => b.pool.cap * 72,
+                    Kind::ChunkReal(k, _) => k.pool.cap * 72,
+                    Kind::BindSym(b) => b.codes.len() * 64,
+                    Kind::ChunkSym(k, _) => k.codes.len() * 64,
+                    _ => 0,
+                };
+                continue;
+            }
             match &n.kind {
                 Kind::BindReal(b) => pools += pool_b(&b.pool) + b.cache.len() * 48,
                 Kind::ChunkReal(k, _) => pools += pool_b(&k.pool) + k.cache.len() * 56,

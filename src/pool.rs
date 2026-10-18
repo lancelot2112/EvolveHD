@@ -143,6 +143,18 @@ impl Pool {
         self.free.insert(c as u32);
     }
 
+    /// Keep only what a frozen (removed) node is still read for: codes, generations and liveness.
+    pub fn freeze(&mut self) {
+        self.masks = Vec::new();
+        self.last = Vec::new();
+        self.born = Vec::new();
+        self.post = Vec::new();
+        self.lru = BTreeSet::new();
+        self.free = BTreeSet::new();
+        self.count = Vec::new();
+        self.touched = Vec::new();
+    }
+
     /// Give cell c a fresh output code and bump its generation (edges reset their masks for it).
     pub fn new_code(&mut self, c: usize, rng: &mut Rng) {
         self.codes[c] = bits::rand_code(rng);
