@@ -100,6 +100,15 @@ pub struct Cfg {
     pub recency: Vec<usize>,
     /// Install the recency edges as kept from the start (for measuring them), instead of trialling them.
     pub recency_kept: bool,
+    /// Story state: an edge whose rows are keyed by the `story` most salient recent content symbols
+    /// (salience decays with half-life `story_half` content symbols; symbols below `story_skip` and the
+    /// last symbol, "other", are not content). 0 = off. Installed as kept, for measuring it.
+    pub story: usize,
+    pub story_half: f64,
+    pub story_skip: usize,
+    /// Story rows age (halve) every this many writes (0 = never), and write one row per update.
+    pub story_age: u32,
+    pub story_write1: bool,
     /// The bias edge's own mask bits and aging (0 = the same as every edge), to set its memory apart.
     pub bias_mask_bits: usize,
     pub bias_age: Option<u32>,
@@ -179,6 +188,11 @@ impl Default for Cfg {
             vocab_halflife: 0,
             recency: vec![],
             recency_kept: false,
+            story: 0,
+            story_half: 200.0,
+            story_skip: 100,
+            story_age: 0,
+            story_write1: false,
             bias_mask_bits: 0,
             bias_age: None,
             hand_up_z: 0.0,
@@ -647,6 +661,10 @@ pub struct Brain {
     upper_retry: usize,
     /// Recency candidates: (window W, live node, offered again from this tick on).
     recency: Vec<(usize, Option<usize>, usize)>,
+    /// Story edge (slab index), salience per symbol (scaled by `story_g`), and the scale.
+    story_edge: Option<usize>,
+    story_sal: Vec<f64>,
+    story_g: f64,
     pub t: usize,
     pub tt: usize,
     pub cfg: Cfg,
@@ -796,6 +814,9 @@ impl Brain {
             upper: None,
             upper_retry: 0,
             recency: cfg.recency.iter().map(|&w| (w, None, 0)).collect(),
+            story_edge: None,
+            story_sal: vec![0.0; vocab],
+            story_g: 1.0,
             t: 0,
             tt,
             cfg: cfg.clone(),
@@ -857,6 +878,19 @@ impl Brain {
             b.slab.push(e);
             b.kept.push(b.slab.len() - 1);
             b.kept_since.insert("bias".into(), 0);
+        }
+        if cfg.story > 0 {
+            let code = bits::rand_code(&mut b.rng);
+            let nd = b.new_node("story".into(), Kind::Const(code), vec![], String::new());
+            let i = b.push_node(nd);
+            let mut e = b.mk_edge(i, 0.0);
+            e.multi = true;
+            e.age_every = cfg.story_age;
+            e.write_one = cfg.story_write1;
+            b.slab.push(e);
+            b.kept.push(b.slab.len() - 1);
+            b.kept_since.insert("story".into(), 0);
+            b.story_edge = Some(b.slab.len() - 1);
         }
         if cfg.recency_kept {
             for r in 0..b.recency.len() {
@@ -1502,6 +1536,9 @@ impl Brain {
         if novel {
             self.alive_dirty = true;
         }
+        if self.story_edge.is_some() {
+            self.story_update(byte as usize);
+        }
         if self.cfg.real && self.cfg.merge > 0 && t % 1000 == 999 && !self.frozen {
             let n = self.byte.pool.consolidate(self.cfg.merge);
             if n > 0 {
@@ -2077,7 +2114,16 @@ impl Brain {
                 && self.slab[e].n > 100
             {
                 let (m, z) = self.slab[e].stats();
-                if m < c.prune_gain || z < 1.0 {
+                if Some(e) == self.story_edge {
+                    // measured, not pruned: log its gain over the window
+                    self.events.push(Event {
+                        t,
+                        kind: "story".into(),
+                        a: "byte".into(),
+                        b: None,
+                        v: Some(m),
+                    });
+                } else if m < c.prune_gain || z < 1.0 {
                     self.kept.retain(|&x| x != e);
                     self.backoff.insert(k.clone(), (t + 10000, 10000));
                     self.events.push(Event {
@@ -2449,6 +2495,35 @@ impl Brain {
             let i = self.add(nd, format!("recency over the last {w} symbols"));
             self.recency[r].1 = Some(i);
         }
+    }
+
+    /// Add a content symbol to the story state and reselect the edge's rows: the `story` most salient
+    /// symbols, weighted by salience.
+    fn story_update(&mut self, sym: usize) {
+        if sym < self.cfg.story_skip || sym + 1 >= self.vocab {
+            return;
+        }
+        self.story_g *= 2f64.powf(1.0 / self.cfg.story_half);
+        if self.story_g > 1e100 {
+            self.story_sal.iter_mut().for_each(|v| *v /= 1e100);
+            self.story_g /= 1e100;
+        }
+        self.story_sal[sym] += self.story_g;
+        let mut top: Vec<(u32, f64)> = self
+            .story_sal
+            .iter()
+            .enumerate()
+            .filter(|x| *x.1 > 0.0)
+            .map(|(i, &v)| (i as u32, v))
+            .collect();
+        let k = self.cfg.story.min(top.len());
+        if k < top.len() {
+            top.select_nth_unstable_by(k, |a, b| b.1.partial_cmp(&a.1).unwrap());
+            top.truncate(k);
+        }
+        let g = self.story_g;
+        let e = self.story_edge.unwrap();
+        self.slab[e].set = top.iter().map(|&(i, v)| (i, (v / g) as f32)).collect();
     }
 
     /// The recency window of node n, if it is a recency candidate.

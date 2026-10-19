@@ -159,6 +159,12 @@ pub struct Edge {
     /// Each code bit reaches level k with probability base^-k on its own, instead of the whole write
     /// reaching the level or not: the fraction of a code's bits at each level becomes a smooth counter.
     pub bitwise: bool,
+    /// Story edges: the source is a weighted set of rows (row key, weight), scored as the weighted mean of
+    /// their scores and written all at once. Used when `multi` is on.
+    pub multi: bool,
+    pub set: Vec<(u32, f32)>,
+    /// Story edges: write only one row per update, drawn by weight, instead of all of them.
+    pub write_one: bool,
 }
 
 impl Edge {
@@ -190,6 +196,9 @@ impl Edge {
             kw: KW_DEFAULT,
             swaps: SWAPS_DEFAULT,
             bitwise: false,
+            multi: false,
+            set: Vec::new(),
+            write_one: false,
         }
     }
 
@@ -278,8 +287,25 @@ impl Edge {
         rng: &mut Rng,
     ) {
         self.cur = state;
-        if state < 0 {
+        if state < 0 || (self.multi && self.set.is_empty()) {
             self.sc = None;
+            return;
+        }
+        if self.multi {
+            let set = self.set.clone();
+            let wsum: f32 = set.iter().map(|x| x.1).sum();
+            let s = 1.0 / (tix.rk * LEVELS) as f64 / wsum as f64;
+            let mut v = vec![0.0; alive_idx.len()];
+            let mut lam = 0.0;
+            for &(k, w) in &set {
+                let r = self.row(k, gen, tix, tcodes, talive, rng);
+                lam += r.confidence() * w as f64;
+                for (o, &c) in v.iter_mut().zip(alive_idx) {
+                    *o += r.counts[c] as f64 * w as f64 * s;
+                }
+            }
+            self.sc = Some(v);
+            self.lam = lam / wsum as f64;
             return;
         }
         let r = self.row(state as u32, gen, tix, tcodes, talive, rng);
@@ -305,6 +331,42 @@ impl Edge {
         if self.cur < 0 {
             return;
         }
+        if self.multi {
+            let (cur, mut set) = (self.cur, self.set.clone());
+            if self.write_one {
+                let tot: f32 = set.iter().map(|x| x.1).sum();
+                let mut u = rng.f64() as f32 * tot;
+                let mut pick = set[set.len() - 1];
+                for &x in &set {
+                    if u < x.1 {
+                        pick = x;
+                        break;
+                    }
+                    u -= x.1;
+                }
+                set = vec![pick];
+            }
+            for &(k, _) in &set {
+                self.cur = k as i32;
+                self.learn_one(gen, ycode, tgt, tix, tcodes, talive, rng);
+            }
+            self.cur = cur;
+            return;
+        }
+        self.learn_one(gen, ycode, tgt, tix, tcodes, talive, rng);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn learn_one(
+        &mut self,
+        gen: u32,
+        ycode: &Code,
+        tgt: &Bits,
+        tix: &TargetIndex,
+        tcodes: &[Code],
+        talive: &[bool],
+        rng: &mut Rng,
+    ) {
         let prob = self.prob;
         let cur = self.cur as u32;
         // draw the levels first, so the row borrow below holds no rng

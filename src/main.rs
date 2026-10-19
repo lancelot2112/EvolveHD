@@ -79,6 +79,19 @@ fn cfg_from(args: &[String]) -> Cfg {
         c.w = x.parse().unwrap();
     }
     c.recency_kept = flag(args, "--recency-kept");
+    if let Some(x) = arg(args, "--story") {
+        c.story = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--story-half") {
+        c.story_half = x.parse().unwrap();
+    }
+    c.story_write1 = flag(args, "--story-write1");
+    if let Some(x) = arg(args, "--story-age") {
+        c.story_age = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--story-skip") {
+        c.story_skip = x.parse().unwrap();
+    }
     if let Some(x) = arg(args, "--bias-mask-bits") {
         c.bias_mask_bits = x.parse().unwrap();
     }
