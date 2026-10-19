@@ -52,15 +52,34 @@ The settings of [21](21-word-units.md) section 4, level 0 only, 80–100 minutes
 
 **No net gain.** The story edge carried a lot early (ablation gain 0.1–0.3 bits per word between 0.1M and 1.4M words, and its running bits per word were 0.026 below the baseline's at 1.5M), then faded to about zero after 2M words.
 
+## Keeping the surprising words
+
+Most of what carries across a story is in words outside the 512 (names, places, things), and those are all "other". What would keeping them be worth? `scripts/surprising_words.py` scores exact word identity in counts: an "other" word costs its slot plus its spelling, from unigram counts over other words. Whole corpus, beyond order-2 counts:
+
+| | Bits per word | Gain |
+|---|---|---|
+| Baseline (of which spelling "other" words: 3.99) | 8.905 | |
+| Story op over the 512 words | 8.828 | +0.077 |
+| **Keep recent "other" words** (a decaying cache, mixed into their spelling) | 8.723 | **+0.182** |
+| Both | 8.646 | +0.258 |
+| Both, with the kept words also as story keys | 8.629 | +0.276 |
+
+On Austen the same rows give +0.046, +0.026, +0.072 and +0.075.
+
+- **Spelling the words outside the vocabulary is 45% of all bits on the whole corpus,** and the engine's scores leave it out: they score the slot "other", not the word.
+- **Remembering recent out-of-vocabulary words is the largest gain,** more than twice the story op over the 512.
+- **Weighting kept words by surprise adds nothing.** With every kept word counted equally the gains are the same (+0.186, +0.263, +0.275). Every out-of-vocabulary word is already surprising; what matters is keeping them at all.
+
 ## Findings
 
 1. **The word level does not use the story state yet:** on the whole corpus, 4.705 bits per word with it against 4.702 without.
 2. **Its contribution fades.** It is large in the first half of the corpus and near zero by the end. A likely cause, untested: its rows are written on most words without ever aging, so their masks fill and stop discriminating. Austen rows aged every 256 writes didn't help there, but Austen's ceiling is too small to tell.
-3. **512 words hide most of it.** The long-range information is mostly in content words, and at 512 words most of them are "other": the counts ceiling drops from 0.38 to 0.11 bits per word, and the existing bias edge already covers some of the rest. The prize needs a word level that handles thousands of words, where the readout currently trails order-1 counts ([21](21-word-units.md)).
+3. **Keeping out-of-vocabulary words is worth more than the story op** (+0.18 against +0.08 bits per word in counts, +0.28 together), but the engine's scores don't yet count the words it can't name.
+4. **512 words hide most of it.** The long-range information is mostly in content words, and at 512 words most of them are "other": the counts ceiling drops from 0.38 to 0.11 bits per word, and the existing bias edge already covers some of the rest. The prize needs a word level that handles thousands of words, where the readout currently trails order-1 counts ([21](21-word-units.md)).
 
 ## Code
 
 - `edge.rs`: `Edge::multi`, `set`, `write_one` (a weighted set of rows per tick).
 - `brain.rs`: `Cfg::story`, `story_half`, `story_skip`, `story_age`, `story_write1`; `Brain::story_update`.
-- `scripts/story_proto.py` (the op in counts). Runs: `runs/exp24/`.
+- `scripts/story_proto.py` (the op in counts); `scripts/surprising_words.py` (keeping out-of-vocabulary words, scored on exact word identity). Runs: `runs/exp24/`.
 - Flags: `--story`, `--story-half`, `--story-skip`, `--story-age`, `--story-write1`.
