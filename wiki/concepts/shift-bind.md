@@ -22,6 +22,10 @@ Pair-code overlap with a pair sharing one part (unrelated pairs ≈ 1 bit), and 
 
 Binds of binds are how depth is reached ([08 · bootstrapping](../experiments/08-bootstrapping.md)). The cost grows multiplicatively, which is why [Compress](growth-operators.md#distill) exists.
 
+## Fusion
+
+Shift-bind generalises from two parts to n roles: rotate each part's code by its role's shift and OR the results ([22](../experiments/22-fusion.md)). On 2,048 bits about 8 role-bound parts superpose cleanly; thinning the result back to 32 bits loses most of the resolution, and XOR is not a binding on sparse codes (it is nearly OR). A matcher pool whose cells sample 24 bits of the fused input thins it the same way, so matching doesn't realise that resolution. If fused codes were fused again, rotations would alias (they commute), so nested roles need fixed random permutations instead.
+
 ## Related
 
 [Sparse codes](sparse-codes.md) · [Matcher pools](matcher-pools.md) · [Growth operators](growth-operators.md) · [Stepping stones](stepping-stones.md)
@@ -32,6 +36,6 @@ Binds of binds are how depth is reached ([08 · bootstrapping](../experiments/08
 
 ## Evidence in
 
-[04 · audit sims](../experiments/04-audit-sims.md) · [07 · graph growth](../experiments/07-graph-growth.md)
+[04 · audit sims](../experiments/04-audit-sims.md) · [07 · graph growth](../experiments/07-graph-growth.md) · [22 · fusion](../experiments/22-fusion.md)
 
 *[All concepts](README.md) · [Wiki home](../README.md)*

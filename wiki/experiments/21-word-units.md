@@ -1,6 +1,6 @@
 # 21 · Word-like units for the level above (2026-10-18)
 
-*[All experiments](README.md)* · [← 20](20-fair-screens.md)
+*[All experiments](README.md)* · [← 20](20-fair-screens.md) · [22 →](22-fusion.md)
 
 **Concepts:** [Stepping stones](../concepts/stepping-stones.md) · [Growth operators](../concepts/growth-operators.md#chunk) · [Screens](../concepts/screens.md)
 
