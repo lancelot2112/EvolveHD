@@ -14,6 +14,7 @@ use evolvehd::baseline::{witten_bell_bits, witten_bell_bits_syms, WbModel};
 use evolvehd::brain::{Brain, Cfg};
 use evolvehd::rng::Rng;
 use evolvehd::stack::Stack;
+use std::collections::HashMap;
 use std::time::Instant;
 
 fn arg_owned(k: &str) -> Option<String> {
@@ -414,6 +415,156 @@ fn main() {
             }
             std::fs::write(format!("{dir}/report.txt"), &rep).unwrap();
             println!("{rep}");
+        }
+        Some("wordslots") => {
+            // a word-level brain over full word ids (u32 LE, frequency ranks): the `--base` commonest words
+            // have their own symbols, `--slots` more are handed to recent words outside them (least recently
+            // used slot first), the rest are "other". Scored on exact word identity: an "other" word also
+            // pays its spelling, from unigram counts over the words outside the base.
+            let raw = std::fs::read(arg(&args, "--data").expect("--data")).unwrap();
+            let ids: Vec<u32> = raw
+                .chunks(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            let base: u32 = arg(&args, "--base").unwrap_or("512").parse().unwrap();
+            let ns: usize = arg(&args, "--slots").unwrap_or("0").parse().unwrap();
+            let other = base;
+            let vocab = base as usize + 1 + ns;
+            // --keep-half H: the story state also names "other" words: their spelling mixes unigram counts
+            // with a decaying memory of recent words outside the base (half-life H words), the mixing weight
+            // chosen online (the best of a grid so far). --slot-half H: evict the slot with the lowest
+            // decaying use count instead of the least recently used.
+            let keep_half: f64 = arg(&args, "--keep-half").unwrap_or("0").parse().unwrap();
+            let slot_half: f64 = arg(&args, "--slot-half").unwrap_or("0").parse().unwrap();
+            let lams = [0.0, 0.05, 0.1, 0.2, 0.3, 0.45, 0.6, 0.75];
+            let mut lam_loss = [0.0f64; 8];
+            let mut keep: HashMap<u32, f64> = HashMap::new();
+            let mut keep_tot = 0.0f64;
+            let mut kg = 1.0f64;
+            let mut use_v: Vec<f64> = vec![0.0; ns];
+            let n = ids.len();
+            // slots: owner word per slot, last use; word -> slot
+            let mut owner: Vec<Option<u32>> = vec![None; ns];
+            let mut last: Vec<usize> = vec![0; ns];
+            let mut slot_of: HashMap<u32, usize> = HashMap::new();
+            let mut mapped = vec![0u32; n];
+            let mut renew: Vec<Option<u32>> = vec![None; n];
+            let mut spell = vec![0.0f64; n];
+            let mut spell0 = vec![0.0f64; n];
+            let mut oc: HashMap<u32, u64> = HashMap::new();
+            let mut on = 0u64;
+            for t in 0..n {
+                let w = ids[t];
+                if w < base {
+                    mapped[t] = w;
+                    continue;
+                }
+                let decayed = |v: f64, tl: usize| v * 2f64.powf(-((t - tl) as f64) / slot_half.max(1.0));
+                match slot_of.get(&w) {
+                    Some(&s) => {
+                        mapped[t] = base + 1 + s as u32;
+                        use_v[s] = decayed(use_v[s], last[s]) + 1.0;
+                        last[s] = t;
+                    }
+                    None => {
+                        mapped[t] = other;
+                        let tq = oc.len() as f64;
+                        let q = if on > 0 {
+                            (*oc.get(&w).unwrap_or(&0) as f64 + tq * 1e-5) / (on as f64 + tq)
+                        } else {
+                            1e-5
+                        };
+                        spell[t] = -q.log2();
+                        spell0[t] = spell[t];
+                        if keep_half > 0.0 {
+                            let qc = if keep_tot > 0.0 { keep.get(&w).copied().unwrap_or(0.0) / keep_tot } else { 0.0 };
+                            let best = (0..8).min_by(|&a, &b| lam_loss[a].partial_cmp(&lam_loss[b]).unwrap()).unwrap();
+                            for k in 0..8 {
+                                let p = (1.0 - lams[k]) * q + lams[k] * qc;
+                                lam_loss[k] -= p.log2();
+                            }
+                            spell[t] = -((1.0 - lams[best]) * q + lams[best] * qc).log2();
+                        }
+                        if ns > 0 {
+                            let s = if slot_half > 0.0 {
+                                (0..ns)
+                                    .min_by(|&a, &b| {
+                                        let va = if owner[a].is_some() { decayed(use_v[a], last[a]) } else { -1.0 };
+                                        let vb = if owner[b].is_some() { decayed(use_v[b], last[b]) } else { -1.0 };
+                                        va.partial_cmp(&vb).unwrap()
+                                    })
+                                    .unwrap()
+                            } else {
+                                (0..ns).min_by_key(|&s| (owner[s].is_some(), last[s])).unwrap()
+                            };
+                            use_v[s] = 1.0;
+                            if let Some(o) = owner[s] {
+                                slot_of.remove(&o);
+                            }
+                            owner[s] = Some(w);
+                            slot_of.insert(w, s);
+                            last[s] = t;
+                            renew[t] = Some(base + 1 + s as u32);
+                        }
+                    }
+                }
+                *oc.entry(w).or_insert(0) += 1;
+                on += 1;
+                if keep_half > 0.0 {
+                    // remember w (all words outside the base; the cache is consulted only for "other" ticks)
+                    kg *= 2f64.powf(1.0 / keep_half);
+                    *keep.entry(w).or_insert(0.0) += kg;
+                    keep_tot += kg;
+                    if kg > 1e100 {
+                        keep.values_mut().for_each(|v| *v /= 1e100);
+                        keep_tot /= 1e100;
+                        kg /= 1e100;
+                    }
+                    if t % 1024 == 0 {
+                        keep.retain(|_, v| *v >= kg * 1e-4);
+                        keep_tot = keep.values().sum();
+                    }
+                }
+            }
+            let mut b = Brain::new_symbols(vocab, cfg_from(&args));
+            b.story_keys = Some(ids.clone());
+            let t0 = Instant::now();
+            let prog: usize = std::env::var("EVOLVEHD_PROGRESS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+            for t in 0..n {
+                b.push(mapped[t]);
+                if let Some(sym) = renew[t] {
+                    b.renew_sym(sym);
+                }
+                if prog > 0 && (t + 1) % prog == 0 {
+                    eprintln!("t={} secs={:.0} bits={:.3}", t + 1, t0.elapsed().as_secs_f64(), b.bpb(t + 1 - prog, t + 1));
+                }
+            }
+            let h = n / 2;
+            let sp = spell[h..].iter().sum::<f64>() / (n - h) as f64;
+            let sp0 = spell0[h..].iter().sum::<f64>() / (n - h) as f64;
+            let own = b.bpb(h, n);
+            let oth = mapped[h..].iter().filter(|&&m| m == other).count() as f64 / (n - h) as f64;
+            let slot = mapped[h..].iter().filter(|&&m| m > other).count() as f64 / (n - h) as f64;
+            let mut line = format!(
+                "{n} words, base {base}, slots {ns}, {:.0} s: other {oth:.3}, in slots {slot:.3} | second half: symbols {own:.3} + spelling {sp:.3} = exact words {:.3} bits",
+                t0.elapsed().as_secs_f64(),
+                own + sp
+            );
+            for o in 1..=2 {
+                let w = witten_bell_bits_syms(&mapped, o, vocab);
+                let m = w[h..n].iter().sum::<f64>() / (n - h) as f64;
+                line += &format!(" | WB{o} {:.3} (exact {:.3})", m, m + sp);
+            }
+            let kept: Vec<String> = b
+                .kept
+                .iter()
+                .skip(1)
+                .map(|&e| b.nodes[b.slab_src(e)].name.clone())
+                .collect();
+            println!("{line}\n  spelling without the kept-word memory: {sp0:.3} (exact words {:.3})\n  kept: {}", own + sp0, kept.join(" "));
+            if let Some(p) = arg(&args, "--out") {
+                std::fs::write(p, b.summary_json(1000, 0.0)).unwrap();
+            }
         }
         Some("syms") => {
             // a single brain over a saved symbol stream (u32 little-endian), for diagnosing upper levels

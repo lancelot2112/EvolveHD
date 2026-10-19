@@ -20,6 +20,10 @@ pub struct TargetIndex {
     pub version: u64,
     /// The readout uses only the first `rk` bits of each target code (sparser readout codes).
     pub rk: usize,
+    /// The version of the last full refresh, and the cells whose codes changed one at a time since then
+    /// (change k made version full + k + 1), so rows can update just those cells' counts.
+    pub full: u64,
+    pub log: Vec<u32>,
 }
 
 impl TargetIndex {
@@ -28,7 +32,21 @@ impl TargetIndex {
             owners: vec![Vec::new(); D],
             version: 0,
             rk: CK,
+            full: 0,
+            log: Vec::new(),
         }
+    }
+
+    /// One live cell's code changed from `old` to `new`: update the owner table and log the change.
+    pub fn change_cell(&mut self, c: usize, old: &Code, new: &Code) {
+        for &b in old[..self.rk].iter() {
+            self.owners[b as usize].retain(|&x| x != c as u32);
+        }
+        for &b in new[..self.rk].iter() {
+            self.owners[b as usize].push(c as u32);
+        }
+        self.version += 1;
+        self.log.push(c as u32);
     }
 
     pub fn refresh(&mut self, codes: &[Code], alive: &[bool]) {
@@ -43,6 +61,8 @@ impl TargetIndex {
             }
         }
         self.version += 1;
+        self.full = self.version;
+        self.log.clear();
     }
 }
 
@@ -71,6 +91,17 @@ fn level_base() -> f64 {
             .and_then(|v| v.parse().ok())
             .unwrap_or(2.0)
     })
+}
+
+/// Overlap count of a row's masks with one code.
+fn count_one(masks: &[Bits], code: &Code, rk: usize) -> i16 {
+    let mut n = 0;
+    for m in masks.iter() {
+        for &b in code[..rk].iter() {
+            n += bits::get(m, b as usize) as i16;
+        }
+    }
+    n
 }
 
 /// Overlap counts of a row's masks with every live target code.
@@ -268,7 +299,14 @@ impl Edge {
         }
         let r = self.rows.get_mut(&i).unwrap();
         if r.version != tix.version {
-            r.counts = count_rows(&r.masks, tcodes, talive, tix.rk);
+            if r.version >= tix.full && r.version < tix.version && r.counts.len() == tcodes.len() {
+                // only single-cell changes since this row's counts: recount those cells
+                for &c in &tix.log[(r.version - tix.full) as usize..] {
+                    r.counts[c as usize] = count_one(&r.masks, &tcodes[c as usize], tix.rk);
+                }
+            } else {
+                r.counts = count_rows(&r.masks, tcodes, talive, tix.rk);
+            }
             r.version = tix.version;
         }
         r

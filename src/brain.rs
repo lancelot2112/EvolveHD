@@ -663,8 +663,11 @@ pub struct Brain {
     recency: Vec<(usize, Option<usize>, usize)>,
     /// Story edge (slab index), salience per symbol (scaled by `story_g`), and the scale.
     story_edge: Option<usize>,
-    story_sal: Vec<f64>,
+    story_sal: HashMap<u32, f64>,
     story_g: f64,
+    /// Story keys per tick (e.g. full word ids, so words outside the vocabulary are keys too); content keys
+    /// are those >= `story_skip`. Without them the key is the symbol, and "other" is the last symbol.
+    pub story_keys: Option<Vec<u32>>,
     pub t: usize,
     pub tt: usize,
     pub cfg: Cfg,
@@ -815,8 +818,9 @@ impl Brain {
             upper_retry: 0,
             recency: cfg.recency.iter().map(|&w| (w, None, 0)).collect(),
             story_edge: None,
-            story_sal: vec![0.0; vocab],
+            story_sal: HashMap::new(),
             story_g: 1.0,
+            story_keys: None,
             t: 0,
             tt,
             cfg: cfg.clone(),
@@ -1537,7 +1541,7 @@ impl Brain {
             self.alive_dirty = true;
         }
         if self.story_edge.is_some() {
-            self.story_update(byte as usize);
+            self.story_update(byte as usize, t);
         }
         if self.cfg.real && self.cfg.merge > 0 && t % 1000 == 999 && !self.frozen {
             let n = self.byte.pool.consolidate(self.cfg.merge);
@@ -2499,31 +2503,53 @@ impl Brain {
 
     /// Add a content symbol to the story state and reselect the edge's rows: the `story` most salient
     /// symbols, weighted by salience.
-    fn story_update(&mut self, sym: usize) {
-        if sym < self.cfg.story_skip || sym + 1 >= self.vocab {
+    fn story_update(&mut self, sym: usize, t: usize) {
+        let key = match &self.story_keys {
+            Some(k) => k[t],
+            None => {
+                if sym + 1 >= self.vocab {
+                    return;
+                }
+                sym as u32
+            }
+        };
+        if (key as usize) < self.cfg.story_skip {
             return;
         }
         self.story_g *= 2f64.powf(1.0 / self.cfg.story_half);
         if self.story_g > 1e100 {
-            self.story_sal.iter_mut().for_each(|v| *v /= 1e100);
+            self.story_sal.values_mut().for_each(|v| *v /= 1e100);
             self.story_g /= 1e100;
         }
-        self.story_sal[sym] += self.story_g;
-        let mut top: Vec<(u32, f64)> = self
-            .story_sal
-            .iter()
-            .enumerate()
-            .filter(|x| *x.1 > 0.0)
-            .map(|(i, &v)| (i as u32, v))
-            .collect();
+        *self.story_sal.entry(key).or_insert(0.0) += self.story_g;
+        let g = self.story_g;
+        if t % 256 == 0 {
+            // forget keys that have faded below a thousandth of a fresh one
+            self.story_sal.retain(|_, v| *v >= g * 1e-3);
+        }
+        let mut top: Vec<(u32, f64)> = self.story_sal.iter().map(|(&i, &v)| (i, v)).collect();
         let k = self.cfg.story.min(top.len());
         if k < top.len() {
             top.select_nth_unstable_by(k, |a, b| b.1.partial_cmp(&a.1).unwrap());
             top.truncate(k);
         }
-        let g = self.story_g;
         let e = self.story_edge.unwrap();
         self.slab[e].set = top.iter().map(|&(i, v)| (i, (v / g) as f32)).collect();
+    }
+
+    /// Give symbol `sym`'s cell a fresh code and generation (a slot handed to a new word), updating the
+    /// target index for that one cell. Does nothing if the symbol has no cell yet.
+    pub fn renew_sym(&mut self, sym: u32) {
+        if let Some(&c) = self.byte.sym.get(&sym) {
+            let old = self.byte.pool.codes[c];
+            self.byte.pool.new_code(c, &mut self.rng);
+            let new = self.byte.pool.codes[c];
+            if self.alive_dirty {
+                self.refresh_alive();
+            } else {
+                self.tix.change_cell(c, &old, &new);
+            }
+        }
     }
 
     /// The recency window of node n, if it is a recency candidate.
