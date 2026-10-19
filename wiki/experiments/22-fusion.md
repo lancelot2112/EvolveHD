@@ -1,6 +1,6 @@
 # 22 · Fusing units into codes instead of slots (2026-10-18)
 
-*[All experiments](README.md)* · [← 21](21-word-units.md)
+*[All experiments](README.md)* · [← 21](21-word-units.md) · [23 →](23-factored-readout-gate.md)
 
 **Concepts:** [Shift-bind](../concepts/shift-bind.md) · [Sparse codes](../concepts/sparse-codes.md) · [Matcher pools](../concepts/matcher-pools.md) · [Stepping stones](../concepts/stepping-stones.md)
 
