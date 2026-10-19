@@ -1,6 +1,6 @@
 # 20 · Fair screens, an adaptive vocabulary and a recency move (2026-10-17)
 
-*[All experiments](README.md)* · [← 19](19-whole-corpus-stack.md)
+*[All experiments](README.md)* · [← 19](19-whole-corpus-stack.md) · [21 →](21-word-units.md)
 
 **Concepts:** [Screens](../concepts/screens.md#estimator-bias) · [Shadow trials](../concepts/shadow-trials.md) · [Stepping stones](../concepts/stepping-stones.md) · [Writer-mask readout](../concepts/writer-mask-readout.md)
 

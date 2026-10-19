@@ -329,7 +329,7 @@ fn main() {
                     let mut u: Vec<(&Vec<u8>, &u32)> = st.maps[l].chunk_counts.iter().collect();
                     u.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
                     let mut o = String::new();
-                    for (t, c) in u.iter().take(20000) {
+                    for (t, c) in u.iter() {
                         o += &format!("{c}\t{}\n", String::from_utf8_lossy(t).replace('\n', "\\n"));
                     }
                     std::fs::write(format!("{dir}/level{l}.units.txt"), o).unwrap();
