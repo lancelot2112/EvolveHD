@@ -83,6 +83,21 @@ fn cfg_from(args: &[String]) -> Cfg {
         c.bias_mask_bits = x.parse().unwrap();
     }
     c.vocab_fixed = flag(args, "--vocab-fixed");
+    c.fuse = flag(args, "--fuse");
+    c.fuse_rel = flag(args, "--fuse-rel");
+    if flag(args, "--real") {
+        c.force_real = true;
+        c.real = true;
+    }
+    if let Some(x) = arg(args, "--fuse-parts") {
+        c.fuse_parts = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--fuse-k") {
+        c.fuse_k = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--fuse-bar") {
+        c.fuse_bar = x.parse().unwrap();
+    }
     if let Some(x) = arg(args, "--hand-up-entropy") {
         c.hand_up_entropy = Some(x.parse().unwrap());
     }

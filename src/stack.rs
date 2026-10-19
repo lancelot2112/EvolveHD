@@ -155,6 +155,8 @@ pub struct Stack {
     pub log: Vec<(usize, usize, String)>,
     /// Texts of level 0's symbols when it reads a symbol stream instead of bytes.
     pub base_texts: Option<Vec<Vec<u8>>>,
+    /// For fused levels (index l+1): the last unit text that matched each input cell (for reports).
+    pub cell_texts: Vec<HashMap<u32, Vec<u8>>>,
 }
 
 impl Stack {
@@ -169,6 +171,7 @@ impl Stack {
             upper_cfg: None,
             log: vec![],
             base_texts: None,
+            cell_texts: vec![HashMap::new()],
         }
     }
 
@@ -190,6 +193,7 @@ impl Stack {
             upper_cfg: None,
             log: vec![],
             base_texts: Some(texts),
+            cell_texts: vec![HashMap::new()],
         }
     }
 
@@ -204,11 +208,48 @@ impl Stack {
                 None => vec![s as u8],
             };
         }
+        if let Some(t) = self.cell_texts.get(l).and_then(|m| m.get(&s)) {
+            return t.clone();
+        }
         let m = &self.maps[l - 1];
         m.texts
             .get(s as usize)
             .cloned()
             .unwrap_or_else(|| b"\xb7".to_vec())
+    }
+
+    /// The fused code of level l's unit over ticks [from, t): each part's input-cell code rotated by its
+    /// role (0 = the unit's last part), ORed; with relational roles, also the part before the unit and the
+    /// states of the level's kept holds. No thinning: the level above's matcher pool sparsifies.
+    fn fuse_unit(&self, l: usize, from: usize, t: usize) -> Vec<u16> {
+        let b = &self.levels[l];
+        let d = crate::bits::D;
+        let rot = |r: usize| (977 * (r + 1)) % d;
+        let mut out: Vec<u16> = vec![];
+        let mut put = |code: &crate::bits::Code, r: usize| {
+            for &x in code.iter() {
+                out.push(((x as usize + rot(r)) % d) as u16);
+            }
+        };
+        let r_max = self.cfg.fuse_parts;
+        for (r, tt) in (from..t).rev().take(r_max).enumerate() {
+            if let Some(c) = b.input_code(tt) {
+                put(&c, r);
+            }
+        }
+        if self.cfg.fuse_rel {
+            if from >= 1 {
+                if let Some(c) = b.input_code(from - 1) {
+                    put(&c, r_max);
+                }
+            }
+            for (i, c) in b.hold_codes().iter().enumerate() {
+                put(c, r_max + 1 + i);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     pub fn run(&mut self, progress: usize) {
@@ -250,12 +291,29 @@ impl Stack {
         if text.len() <= 200 {
             *self.maps[l].chunk_counts.entry(text.clone()).or_insert(0) += 1;
         }
-        let (sym, renamed) = self.maps[l].lookup((cell, gen), &text);
+        let fused = if self.cfg.fuse {
+            Some(self.fuse_unit(l, from, t))
+        } else {
+            None
+        };
+        let (sym, renamed) = if fused.is_some() {
+            (0, None)
+        } else {
+            self.maps[l].lookup((cell, gen), &text)
+        };
         if self.levels.len() > l + 1 {
             if let Some(r) = renamed {
                 self.levels[l + 1].reassign_symbol(r);
             }
-            self.levels[l + 1].push(sym);
+            match fused.clone() {
+                Some(f) => {
+                    self.levels[l + 1].push_code(f);
+                    let lt = self.levels[l + 1].t - 1;
+                    let c = self.levels[l + 1].syms[lt];
+                    self.cell_texts[l + 1].insert(c, text.clone());
+                }
+                None => self.levels[l + 1].push(sym),
+            }
             self.after_tick(l + 1, byte_t);
             let u = self.levels[l + 1].predict_cell();
             self.levels[l].upper_state = u;
@@ -264,14 +322,32 @@ impl Stack {
             let mut cfg = self.upper_cfg.clone().unwrap_or_else(|| self.cfg.clone());
             cfg.seed = self.cfg.seed + 1000 * (l as u64 + 1);
             cfg.oracle = 0;
-            self.levels.push(Brain::new_symbols(self.vocab + 1, cfg));
+            let fusing = fused.is_some();
+            if fusing {
+                cfg.real = true; // a fused level matches its inputs with a real pool
+            }
+            let v = if fusing {
+                self.vocab + 64
+            } else {
+                self.vocab + 1
+            };
+            self.levels.push(Brain::new_symbols(v, cfg));
             self.maps.push(VocabMap::with(self.vocab, &self.cfg));
+            self.cell_texts.push(HashMap::new());
             self.log.push((
                 l + 1,
                 byte_t,
                 format!("level {} spawned over level {l}'s chunks", l + 1),
             ));
-            self.levels[l + 1].push(sym);
+            match fused {
+                Some(f) => {
+                    self.levels[l + 1].push_code(f);
+                    let lt = self.levels[l + 1].t - 1;
+                    let c = self.levels[l + 1].syms[lt];
+                    self.cell_texts[l + 1].insert(c, text);
+                }
+                None => self.levels[l + 1].push(sym),
+            }
         }
     }
 }

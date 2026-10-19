@@ -111,6 +111,19 @@ pub struct Cfg {
     pub hand_up_entropy: Option<f64>,
     /// With `vocab_halflife` > 0: never reassign a slot once all are taken.
     pub vocab_fixed: bool,
+    /// In a stack, hand up each unit as a fusion of its parts (each part's input-cell code rotated by its
+    /// role, roles counted from the unit's end, ORed) into the level above's matcher pool, instead of a slot.
+    pub fuse: bool,
+    /// Most parts fused per unit (roles 0..fuse_parts-1 from the end).
+    pub fuse_parts: usize,
+    /// Also fuse relational roles: the part before the unit, and the states of the level's kept holds.
+    pub fuse_rel: bool,
+    /// Mask bits of a fused level's input cells, and the share of them an input must overlap to match a
+    /// cell instead of recruiting one (the similarity radius).
+    pub fuse_k: u32,
+    pub fuse_bar: f64,
+    /// Force real (matcher) input pools even when --symbolic is set (fused levels need them).
+    pub force_real: bool,
 }
 
 impl Default for Cfg {
@@ -171,6 +184,12 @@ impl Default for Cfg {
             hand_up_z: 0.0,
             hand_up_entropy: None,
             vocab_fixed: false,
+            fuse: false,
+            fuse_parts: 8,
+            fuse_rel: false,
+            fuse_k: 24,
+            fuse_bar: 10.0 / 24.0,
+            force_real: false,
         }
     }
 }
@@ -683,6 +702,8 @@ pub struct Brain {
     pub run_scr: Vec<RunScreen>,
     /// No learning or growth (generation mode).
     pub frozen: bool,
+    /// A fused input to observe on the next tick instead of a symbol's code.
+    pending: Option<Vec<u16>>,
 }
 
 fn log_softmax_at(logits: &[f64], yi: usize) -> (Vec<f64>, f64) {
@@ -741,7 +762,11 @@ impl Brain {
         let mut rng = Rng::new(cfg.seed);
         let mut pool = match (cfg.real, bytes) {
             (true, true) => Pool::new(192, 24, 10),
-            (true, false) => Pool::new(vocab + 64, 24, 10),
+            (true, false) => {
+                let k = cfg.fuse_k;
+                let bar = (cfg.fuse_bar * k as f64).round() as u32;
+                Pool::new(vocab + 64, k, bar.clamp(1, k))
+            }
             (false, _) => Pool::new(vocab, 0, 0),
         };
         pool.hebb = cfg.hebb;
@@ -816,6 +841,7 @@ impl Brain {
             extra_json: vec![],
             run_scr: vec![],
             frozen: false,
+            pending: None,
         };
         if cfg.bias_edge {
             let code = bits::rand_code(&mut b.rng);
@@ -1287,7 +1313,14 @@ impl Brain {
 
     fn observe(&mut self, byte: u32, t: usize) -> (i32, bool) {
         let r0 = self.byte.pool.recruits;
-        let s = if self.cfg.real {
+        let s = if let Some(fused) = self.pending.take() {
+            let inp = bits::from_positions(&fused);
+            let idx = bits::positions(&inp);
+            self.byte
+                .pool
+                .match_input(&idx, &inp, t as u64, &mut self.rng)
+                .cell as i32
+        } else if self.cfg.real {
             let code = self.byte.bytecode[byte as usize];
             let mut inp: Bits = bits::ZERO;
             for &b in code.iter() {
@@ -1342,7 +1375,8 @@ impl Brain {
         self.mu[t] = self.sm;
         self.sd[t] = self.sv.sqrt();
         let eps = self.cfg.eps;
-        let byte = self.syms[t];
+        let mut byte = self.syms[t];
+        let fused = self.pending.is_some();
         if self.alive_dirty {
             self.refresh_alive();
         }
@@ -1382,6 +1416,12 @@ impl Brain {
             self.ent_v = 0.999 * self.ent_v + 0.001 * d * d;
         }
         let (y, novel) = self.observe(byte, t);
+        if fused {
+            // a fused input has no symbol of its own: record the cell it matched as its symbol, and map
+            // every cell to one dummy symbol (so the cell-to-symbol cost is about zero)
+            self.syms[t] = y.max(0) as u32;
+            byte = 0;
+        }
         let yi: i64 = if novel { -1 } else { self.pos[y as usize] };
         let mut p = vec![];
         let q;
@@ -1580,6 +1620,37 @@ impl Brain {
     }
 
     /// Feed one more input symbol and run a tick.
+    /// Feed a fused input (set-bit positions) as the next tick's input.
+    pub fn push_code(&mut self, fused: Vec<u16>) {
+        self.extend(1);
+        self.pending = Some(fused);
+        let t = self.t;
+        self.syms[t] = 0;
+        self.tick();
+    }
+
+    /// The input cell's code at tick t (-1 cell: None).
+    pub fn input_code(&self, t: usize) -> Option<Code> {
+        let c = self.nodes[0].h[t];
+        if c < 0 {
+            None
+        } else {
+            Some(self.byte.pool.codes[c as usize])
+        }
+    }
+
+    /// Codes of the level's kept hold nodes' current states (for relational fusion roles).
+    pub fn hold_codes(&self) -> Vec<Code> {
+        let mut out = vec![];
+        for &e in self.kept.iter().skip(1) {
+            let n = self.slab[e].src;
+            if matches!(self.nodes[n].kind, Kind::Hold { .. }) && self.nodes[n].state >= 0 {
+                out.push(self.code_of(n, self.nodes[n].state));
+            }
+        }
+        out
+    }
+
     pub fn push(&mut self, sym: u32) {
         self.extend(1);
         let t = self.t;
