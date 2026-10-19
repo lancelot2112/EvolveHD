@@ -1,6 +1,6 @@
 # 23 · A factored phrase readout, tested with counts first (2026-10-19)
 
-*[All experiments](README.md)* · [← 22](22-fusion.md)
+*[All experiments](README.md)* · [← 22](22-fusion.md) · [24 →](24-story-state.md)
 
 **Concepts:** [Writer-mask readout](../concepts/writer-mask-readout.md) · [Screens](../concepts/screens.md#estimator-bias) · [Stepping stones](../concepts/stepping-stones.md)
 
