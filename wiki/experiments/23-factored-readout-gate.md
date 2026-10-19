@@ -32,12 +32,32 @@ At cut thresholds of 0, 1 and 1.5 sd on Austen (phrases averaging 3.4 to 12 word
 - **But nearly all of it is skip context.** What the previous phrase tells about the next word is, almost entirely, which words came a few positions back. Beyond those words, the factored heads add 0.003 bits per word on the whole corpus.
 - **So the gate fails.** Exact counts usually do better than writer masks, so an engine version would likely gain less than 0.003 bits per word, under a third of the 0.01 keep bar. It was not built.
 
+## What does carry across a story
+
+A story informs its later parts, so meaning should transfer somehow. If not through the previous phrase, then how? `scripts/meaning_transfer.py` measures long-range contexts the same way, beyond order-2 word counts (top 4,096 words; "content" words are those outside the 100 commonest). Prequential, single run:
+
+| Gain beyond order-2 word counts, bits per word | Austen | Whole corpus |
+|---|---|---|
+| Recency: the last 100 content words recur | +0.037 | +0.149 |
+| Recency, last 1,000 | +0.069 | +0.228 |
+| Recency, last 10,000 | +0.107 | +0.285 |
+| Association: words that shared 500-word passages with the last 500 content words, **excluding repetition** | +0.086 | +0.220 |
+| This book's word counts so far (uses known book boundaries) | +0.134 | +0.354 |
+| Recency 1,000 + association | +0.111 | +0.286 |
+| Recency 1,000 + book + association | +0.136 | **+0.378** |
+
+- **A great deal transfers: about 0.3–0.4 bits per word on the whole corpus,** a hundred times what phrase structure adds beyond nearby words.
+- **It transfers as state, not sequence:** who and what the story is about, built up over thousands of words. It keeps growing out to 10,000 words.
+- **It is meaning, not only repetition.** Association alone, which never predicts a word from itself, gets +0.22, and adds about +0.06 on top of recency.
+- Caveats: the baseline is order-2 counts, weaker than the engine's word level, so gains against the engine would be smaller; the book row is told where books start.
+
 ## Findings
 
 1. **At this scale, phrase structure adds almost nothing to word prediction beyond non-adjacent words.** A phrase level, factored or not, would mainly relay context the word level already reaches through delays and holds.
 2. **The useful non-adjacent context found so far is at the word level:** holds and binds over earlier words (which beat order-2 counts by 0.21 bits per word in [21](21-word-units.md)) and recency (0.13 bits per word in counts, [19](19-whole-corpus-stack.md)).
-3. **Test with counts before building.** A ten-minute prototype answered what an engine change would have taken hours to show.
+3. **But meaning does carry across a story, as accumulated state:** recency, association and the book's own vocabulary are worth about 0.38 bits per word together on the whole corpus. A level above words should probably hold a slowly built story state and offer it down as context, not predict the next phrase.
+4. **Test with counts before building.** A ten-minute prototype answered what an engine change would have taken hours to show.
 
 ## Code
 
-`scripts/factored_proto.py`. Results: `runs/exp22/proto_austen.txt`, `runs/exp22/proto_all.txt`.
+`scripts/factored_proto.py`, `scripts/meaning_transfer.py`. Results: `runs/exp22/proto_austen.txt`, `proto_all.txt`, `meaning_austen.txt`, `meaning_all.txt`.
