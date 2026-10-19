@@ -21,6 +21,8 @@ pub struct VocabMap {
     n: u64,
     /// Slots given a new text so far.
     pub swaps: u64,
+    /// Never give a slot a new text once all are taken (text-keyed, first come).
+    pub fixed: bool,
     ids: HashMap<(i32, u32), u32>,
     seen: HashMap<(i32, u32), u32>,
     /// The text of each symbol (as of when it was assigned), and of the "other" symbol.
@@ -40,12 +42,19 @@ impl VocabMap {
             weakest: None,
             n: 0,
             swaps: 0,
+            fixed: false,
             ids: HashMap::new(),
             seen: HashMap::new(),
             texts: vec![],
             chunk_counts: HashMap::new(),
             last_cut: 0,
         }
+    }
+
+    fn with(vocab: usize, cfg: &Cfg) -> Self {
+        let mut m = Self::new(vocab, cfg.vocab_halflife);
+        m.fixed = cfg.vocab_fixed;
+        m
     }
 
     /// The symbol for a completed chunk, and the slot that was just given a new text (if any).
@@ -78,6 +87,9 @@ impl VocabMap {
             self.by_text.insert(text.to_vec(), i);
             self.texts.push(text.to_vec());
             return (i, None);
+        }
+        if self.fixed {
+            return (self.vocab as u32, None);
         }
         if self.weakest.is_none() || self.n % 256 == 0 {
             let mut w = (f32::INFINITY, 0u32);
@@ -141,6 +153,8 @@ pub struct Stack {
     pub upper_cfg: Option<Cfg>,
     /// (level, byte tick, what happened)
     pub log: Vec<(usize, usize, String)>,
+    /// Texts of level 0's symbols when it reads a symbol stream instead of bytes.
+    pub base_texts: Option<Vec<Vec<u8>>>,
 }
 
 impl Stack {
@@ -148,19 +162,47 @@ impl Stack {
         let b = Brain::new(data, cfg.clone());
         Stack {
             levels: vec![b],
-            maps: vec![VocabMap::new(vocab, cfg.vocab_halflife)],
+            maps: vec![VocabMap::with(vocab, &cfg)],
             max_levels,
             vocab,
             cfg,
             upper_cfg: None,
             log: vec![],
+            base_texts: None,
+        }
+    }
+
+    /// A stack whose level 0 reads a symbol stream (e.g. whole words), with each symbol's text.
+    pub fn from_syms(
+        syms: Vec<u32>,
+        texts: Vec<Vec<u8>>,
+        cfg: Cfg,
+        max_levels: usize,
+        vocab: usize,
+    ) -> Self {
+        let b = Brain::from_syms(syms, texts.len() + 1, cfg.clone());
+        Stack {
+            levels: vec![b],
+            maps: vec![VocabMap::with(vocab, &cfg)],
+            max_levels,
+            vocab,
+            cfg,
+            upper_cfg: None,
+            log: vec![],
+            base_texts: Some(texts),
         }
     }
 
     /// Text of input symbol `s` of level `l`.
     fn sym_text(&self, l: usize, s: u32) -> Vec<u8> {
         if l == 0 {
-            return vec![s as u8];
+            return match &self.base_texts {
+                Some(t) => t
+                    .get(s as usize)
+                    .cloned()
+                    .unwrap_or_else(|| b"\xb7 ".to_vec()),
+                None => vec![s as u8],
+            };
         }
         let m = &self.maps[l - 1];
         m.texts
@@ -195,7 +237,8 @@ impl Stack {
     fn after_tick(&mut self, l: usize, byte_t: usize) {
         let t = self.levels[l].t - 1;
         let done = self.levels[l].completed_chunk(t);
-        let Some((cell, gen)) = done else { return };
+        let Some((cell, gen, cut)) = done else { return };
+        let t = cut;
         // the text of the completed chunk: this level's inputs since the last cut
         let from = self.maps[l].last_cut;
         let syms: Vec<u32> = self.levels[l].syms[from..t].to_vec();
@@ -222,8 +265,7 @@ impl Stack {
             cfg.seed = self.cfg.seed + 1000 * (l as u64 + 1);
             cfg.oracle = 0;
             self.levels.push(Brain::new_symbols(self.vocab + 1, cfg));
-            self.maps
-                .push(VocabMap::new(self.vocab, self.cfg.vocab_halflife));
+            self.maps.push(VocabMap::with(self.vocab, &self.cfg));
             self.log.push((
                 l + 1,
                 byte_t,

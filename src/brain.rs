@@ -103,6 +103,14 @@ pub struct Cfg {
     /// The bias edge's own mask bits and aging (0 = the same as every edge), to set its memory apart.
     pub bias_mask_bits: usize,
     pub bias_age: Option<u32>,
+    /// In a stack, the units handed up are cut where surprise exceeds this many sds (0 = the chunk node's
+    /// own cut): larger values hand up longer units than the chunk node uses as context.
+    pub hand_up_z: f64,
+    /// In a stack, cut handed-up units at local peaks of the prediction's entropy (branching entropy) that
+    /// stand this many sds above its running mean, instead of at surprising inputs.
+    pub hand_up_entropy: Option<f64>,
+    /// With `vocab_halflife` > 0: never reassign a slot once all are taken.
+    pub vocab_fixed: bool,
 }
 
 impl Default for Cfg {
@@ -160,6 +168,9 @@ impl Default for Cfg {
             recency_kept: false,
             bias_mask_bits: 0,
             bias_age: None,
+            hand_up_z: 0.0,
+            hand_up_entropy: None,
+            vocab_fixed: false,
         }
     }
 }
@@ -656,6 +667,11 @@ pub struct Brain {
     /// Running mean and sd of the byte's bits, as seen before tick t (the surprise statistic).
     pub mu: Vec<f64>,
     pub sd: Vec<f64>,
+    /// Entropy (bits) of the level's prediction at each tick, before the input is seen, and its running
+    /// mean and variance (for cutting units at uncertainty peaks).
+    pub ent: Vec<f32>,
+    ent_m: f64,
+    ent_v: f64,
     sm: f64,
     sv: f64,
     pub chunk: Option<usize>,
@@ -711,6 +727,11 @@ impl Brain {
     }
 
     /// A brain over a stream of symbols 0..vocab that will be fed one at a time (see `push`).
+    /// A brain over a whole symbol stream given up front (like `new` for bytes).
+    pub fn from_syms(syms: Vec<u32>, vocab: usize, cfg: Cfg) -> Self {
+        Self::build(vec![], syms, vocab, false, cfg)
+    }
+
     pub fn new_symbols(vocab: usize, cfg: Cfg) -> Self {
         Self::build(vec![], vec![], vocab, false, cfg)
     }
@@ -783,6 +804,9 @@ impl Brain {
             merged: 0,
             prof: [0.0; 5],
             mu: vec![0.0; tt],
+            ent: vec![0.0; tt],
+            ent_m: 0.0,
+            ent_v: 1.0,
             sd: vec![1.0; tt],
             sm: 4.0,
             sv: 1.0,
@@ -1338,6 +1362,25 @@ impl Brain {
                 tsc.push(e);
             }
         }
+        if na > 0 {
+            let m = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let z: f64 = logits.iter().map(|&x| (x - m).exp()).sum();
+            let h: f64 = logits
+                .iter()
+                .map(|&x| {
+                    let p = (x - m).exp() / z;
+                    if p > 0.0 {
+                        -p * p.log2()
+                    } else {
+                        0.0
+                    }
+                })
+                .sum();
+            self.ent[t] = h as f32;
+            let d = h - self.ent_m;
+            self.ent_m += 0.001 * d;
+            self.ent_v = 0.999 * self.ent_v + 0.001 * d * d;
+        }
         let (y, novel) = self.observe(byte, t);
         let yi: i64 = if novel { -1 } else { self.pos[y as usize] };
         let mut p = vec![];
@@ -1499,6 +1542,7 @@ impl Brain {
         self.hit.resize(self.tt, false);
         self.mu.resize(self.tt, 0.0);
         self.sd.resize(self.tt, 1.0);
+        self.ent.resize(self.tt, 0.0);
     }
 
     /// Freeze learning, read `prompt`, then sample `n` bytes, feeding each back in as input.
@@ -1593,13 +1637,31 @@ impl Brain {
     }
 
     /// If the chunk was cut at tick t: the chunk completed just before (its cell and generation).
-    pub fn completed_chunk(&self, t: usize) -> Option<(i32, u32)> {
+    /// A unit to hand up that ends just before tick `cut`: (chunk cell, generation, cut).
+    pub fn completed_chunk(&self, t: usize) -> Option<(i32, u32, usize)> {
         let c = self.chunk?;
-        let z = self.chunk_z(c);
+        if let Some(z) = self.cfg.hand_up_entropy {
+            // a local peak of predictive entropy at t-1: many continuations were possible there
+            if t >= 2 {
+                let (h0, h1, h2) = (self.ent[t - 2], self.ent[t - 1], self.ent[t]);
+                if h1 > h0 && h1 >= h2 && (h1 as f64) > self.ent_m + z * self.ent_v.sqrt() {
+                    let cell = self.nodes[c].h[t - 2];
+                    if cell >= 0 {
+                        return Some((cell, self.gen_of(c, cell), t - 1));
+                    }
+                }
+            }
+            return None;
+        }
+        let z = if self.cfg.hand_up_z > 0.0 {
+            self.cfg.hand_up_z
+        } else {
+            self.chunk_z(c)
+        };
         if t >= 1 && self.boundary(t, z) {
             let cell = self.nodes[c].h[t - 1];
             if cell >= 0 {
-                return Some((cell, self.gen_of(c, cell)));
+                return Some((cell, self.gen_of(c, cell), t));
             }
         }
         None

@@ -82,6 +82,13 @@ fn cfg_from(args: &[String]) -> Cfg {
     if let Some(x) = arg(args, "--bias-mask-bits") {
         c.bias_mask_bits = x.parse().unwrap();
     }
+    c.vocab_fixed = flag(args, "--vocab-fixed");
+    if let Some(x) = arg(args, "--hand-up-entropy") {
+        c.hand_up_entropy = Some(x.parse().unwrap());
+    }
+    if let Some(x) = arg(args, "--hand-up-z") {
+        c.hand_up_z = x.parse().unwrap();
+    }
     if let Some(x) = arg(args, "--bias-age") {
         c.bias_age = Some(x.parse().unwrap());
     }
@@ -266,7 +273,6 @@ fn main() {
             println!("{line}");
         }
         Some("stack") => {
-            let data = load(arg(&args, "--data").expect("--data"));
             let levels: usize = arg(&args, "--levels").unwrap_or("3").parse().unwrap();
             let vocab: usize = arg(&args, "--vocab").unwrap_or("512").parse().unwrap();
             let dir = arg(&args, "--out-dir").unwrap_or("runs/stack").to_string();
@@ -276,7 +282,28 @@ fn main() {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
             let t0 = Instant::now();
-            let mut st = Stack::new(data, cfg_from(&args), levels, vocab);
+            let mut st = if let Some(sp) = arg(&args, "--syms") {
+                // level 0 reads a symbol stream (u32 LE); --syms-vocab gives each symbol's text, one per line
+                let raw = std::fs::read(sp).unwrap();
+                let syms: Vec<u32> = raw
+                    .chunks(4)
+                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                let texts: Vec<Vec<u8>> =
+                    std::fs::read_to_string(arg(&args, "--syms-vocab").expect("--syms-vocab"))
+                        .unwrap()
+                        .lines()
+                        .map(|l| l.replace("\\n", "\n").into_bytes())
+                        .collect();
+                Stack::from_syms(syms, texts, cfg_from(&args), levels, vocab)
+            } else {
+                Stack::new(
+                    load(arg(&args, "--data").expect("--data")),
+                    cfg_from(&args),
+                    levels,
+                    vocab,
+                )
+            };
             if let Some(u) = arg(&args, "--upper") {
                 // the upper flags come first, so they win over the shared ones (the first occurrence counts)
                 let mut ua: Vec<String> = args[..2].to_vec();
@@ -298,12 +325,20 @@ fn main() {
                 if l + 1 < st.levels.len() {
                     // the vocabulary this level hands up
                     std::fs::write(format!("{dir}/level{l}.vocab.txt"), st.maps[l].dump()).unwrap();
+                    // the units this level handed up, commonest first: count, text
+                    let mut u: Vec<(&Vec<u8>, &u32)> = st.maps[l].chunk_counts.iter().collect();
+                    u.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+                    let mut o = String::new();
+                    for (t, c) in u.iter().take(20000) {
+                        o += &format!("{c}\t{}\n", String::from_utf8_lossy(t).replace('\n', "\\n"));
+                    }
+                    std::fs::write(format!("{dir}/level{l}.units.txt"), o).unwrap();
                 }
                 let n = b.t;
                 let half = n / 2;
                 let own = if n > half { b.bpb(half, n) } else { 0.0 };
                 rep += &format!("\nLevel {l}: {n} ticks, vocab {}; bits per symbol over the second half {own:.3}\n", b.vocab);
-                if l == 0 {
+                if l == 0 && b.bytes {
                     rep += &format!("  {}\n", columns(b));
                 } else {
                     for o in 0..=3 {
