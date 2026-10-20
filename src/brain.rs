@@ -12,7 +12,7 @@
 //! Trials are shadow trials scored by paired log-loss. Every bits-per-byte figure is prequential.
 use crate::bits::{self, Bits, Code, D};
 use crate::edge::{Edge, TargetIndex};
-use crate::info::{ent, ent_nested, heldout_gain, heldout_gain_mix, roll, CmiScreen};
+use crate::info::{ent, ent_nested, heldout_gain, heldout_gain_mix, par_map, roll, CmiScreen, MixBase};
 use crate::pool::{rotate, Pool};
 use crate::rng::Rng;
 use std::collections::{HashMap, HashSet};
@@ -749,6 +749,13 @@ pub struct Brain {
     pending: Option<Vec<u16>>,
 }
 
+/// Only the log-probability of `yi`, computed exactly as `log_softmax_at` does, without the probability vector.
+fn log_softmax_lp(logits: &[f64], yi: usize) -> f64 {
+    let m = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let s: f64 = logits.iter().map(|&x| (x - m).exp()).sum();
+    logits[yi] - m - s.ln()
+}
+
 fn log_softmax_at(logits: &[f64], yi: usize) -> (Vec<f64>, f64) {
     let m = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let z: Vec<f64> = logits.iter().map(|&x| (x - m).exp()).collect();
@@ -1461,8 +1468,7 @@ impl Brain {
         let trials = self.trials.clone();
         for &e in &kept {
             if self.score_edge(e) {
-                let c = self.slab[e].contribution().unwrap();
-                logits.iter_mut().zip(&c).for_each(|(l, s)| *l += s);
+                self.slab[e].add_contribution(&mut logits, false);
             }
         }
         let mut tsc = vec![];
@@ -1531,9 +1537,11 @@ impl Brain {
             let yi = yi as usize;
             let c_tr = std::time::Instant::now();
             let base_loss = -q.log2();
+            let mut lw: Vec<f64> = Vec::with_capacity(logits.len());
             for &e in &tsc {
-                let c = self.slab[e].contribution().unwrap();
-                let lw: Vec<f64> = logits.iter().zip(&c).map(|(l, s)| l + s).collect();
+                lw.clear();
+                lw.extend_from_slice(&logits);
+                self.slab[e].add_contribution(&mut lw, false);
                 let (pw, lpw) = log_softmax_at(&lw, yi);
                 let qw = (1.0 - eps) * lpw.exp() + eps / self.vocab as f64;
                 let d = base_loss + qw.log2();
@@ -1549,9 +1557,10 @@ impl Brain {
                 if self.slab[e].sc.is_none() {
                     continue;
                 }
-                let c = self.slab[e].contribution().unwrap();
-                let lo: Vec<f64> = logits.iter().zip(&c).map(|(l, s)| l - s).collect();
-                let (_, lpo) = log_softmax_at(&lo, yi);
+                lw.clear();
+                lw.extend_from_slice(&logits);
+                self.slab[e].add_contribution(&mut lw, true);
+                let lpo = log_softmax_lp(&lw, yi);
                 let qo = (1.0 - eps) * lpo.exp() + eps / self.vocab as f64;
                 let d = -qo.log2() - base_loss;
                 let ed = &mut self.slab[e];
@@ -2099,7 +2108,7 @@ impl Brain {
             .iter()
             .any(|&n| matches!(&self.nodes[n].kind, Kind::Distill(d) if d.edge == e));
         if !read {
-            self.slab[e].rows = HashMap::new();
+            self.slab[e].rows = HashMap::default();
             self.slab[e].sc = None;
         }
     }
@@ -2277,15 +2286,21 @@ impl Brain {
         let (yp, yn) = (&y[..w - 1], &y[1..]);
         let sc = CmiScreen::new(yp, yn);
         let mut out = vec![];
-        for n in self.derived.clone() {
-            let s = self.series(n, w);
-            let sh = self.rng.range(500, w - 500);
-            let v = if self.cfg.screen_mix {
-                heldout_gain_mix(&s[..w - 1], yp, yn)
-            } else {
-                sc.shift_screen(&s[..w - 1], sh)
-            };
-            out.push((self.nodes[n].name.clone(), v));
+        // the series and shift draws in order, then every candidate scored in parallel against one baseline
+        let jobs: Vec<(usize, Vec<i64>, usize)> = self
+            .derived
+            .clone()
+            .into_iter()
+            .map(|n| (n, self.series(n, w), self.rng.range(500, w - 500)))
+            .collect();
+        let vals: Vec<f64> = if self.cfg.screen_mix {
+            let base = MixBase::new(yp, yn);
+            par_map(&jobs, |(_, s, _)| base.gain(&s[..w - 1]))
+        } else {
+            jobs.iter().map(|(_, s, sh)| sc.shift_screen(&s[..w - 1], *sh)).collect()
+        };
+        for ((n, _, _), v) in jobs.iter().zip(vals) {
+            out.push((self.nodes[*n].name.clone(), v));
         }
         self.scr.extend(out);
     }
@@ -2360,6 +2375,8 @@ impl Brain {
         let thr = self.thr(self.cfg.tmp_thr);
         // (value, Some(d)) for a delay, (value, None, x, v) for a hold
         let mut best: Option<(f64, Option<usize>, usize, i32)> = None;
+        let base = if self.cfg.screen_mix { Some(MixBase::new(yp, yn)) } else { None };
+        let mut djobs: Vec<(usize, Vec<i64>, usize)> = vec![];
         for d in [2usize, 3, 4, 5, 6, 8, 12, 16] {
             if self.live(&format!("byte@{d}")).is_some() {
                 continue;
@@ -2371,13 +2388,15 @@ impl Brain {
                 .map(|&x| x as i64 + 1)
                 .collect();
             let sh = self.rng.range(500, w - 500);
-            let v = if self.cfg.screen_mix {
-                heldout_gain_mix(&s[..w - 1], yp, yn)
-            } else {
-                sc.shift_screen(&s[..w - 1], sh)
-            };
+            djobs.push((d, s, sh));
+        }
+        let dvals: Vec<f64> = match &base {
+            Some(b) => par_map(&djobs, |(_, s, _)| b.gain(&s[..w - 1])),
+            None => djobs.iter().map(|(_, s, sh)| sc.shift_screen(&s[..w - 1], *sh)).collect(),
+        };
+        for ((d, _, _), v) in djobs.iter().zip(dvals) {
             if v > thr && best.map_or(true, |b| v > b.0) {
-                best = Some((v, Some(d), 0, 0));
+                best = Some((v, Some(*d), 0, 0));
             }
         }
         // event-gated holds: latch the byte or a tap whenever the byte node shows a moderately frequent value
@@ -2403,6 +2422,9 @@ impl Brain {
                 .copied()
                 .filter(|&i| matches!(self.nodes[i].kind, Kind::Delay { .. })),
         );
+        // each source's history once; the hold series are built and scored in parallel, the shift draws in order
+        let mut xhs: HashMap<usize, Vec<i32>> = HashMap::new();
+        let mut hjobs: Vec<(usize, i32, usize)> = vec![];
         for &x in &xs {
             for &v in &evs {
                 let lab = self.label(v);
@@ -2412,26 +2434,32 @@ impl Brain {
                 {
                     continue;
                 }
-                let xh = self.nodes[x].h.range(t + 1 - w, t);
-                let mut hs = Vec::with_capacity(w);
-                let mut cur: i64 = 0;
-                let mut seen = false;
-                for j in 0..w {
-                    if y[j] - 1 == v as i64 {
-                        cur = xh[j] as i64 + 1;
-                        seen = true;
-                    }
-                    hs.push(if seen { cur } else { 0 });
-                }
+                xhs.entry(x).or_insert_with(|| self.nodes[x].h.range(t + 1 - w, t));
                 let sh = self.rng.range(500, w - 500);
-                let val = if self.cfg.screen_mix {
-                    heldout_gain_mix(&hs[..w - 1], yp, yn)
-                } else {
-                    sc.shift_screen(&hs[..w - 1], sh)
-                };
-                if val > thr && best.map_or(true, |b| val > b.0) {
-                    best = Some((val, None, x, v));
+                hjobs.push((x, v, sh));
+            }
+        }
+        let hold_series = |x: usize, v: i32| -> Vec<i64> {
+            let xh = &xhs[&x];
+            let mut hs = Vec::with_capacity(w);
+            let mut cur: i64 = 0;
+            let mut seen = false;
+            for j in 0..w {
+                if y[j] - 1 == v as i64 {
+                    cur = xh[j] as i64 + 1;
+                    seen = true;
                 }
+                hs.push(if seen { cur } else { 0 });
+            }
+            hs
+        };
+        let hvals: Vec<f64> = match &base {
+            Some(b) => par_map(&hjobs, |&(x, v, _)| b.gain(&hold_series(x, v)[..w - 1])),
+            None => hjobs.iter().map(|&(x, v, sh)| sc.shift_screen(&hold_series(x, v)[..w - 1], sh)).collect(),
+        };
+        for (&(x, v, _), val) in hjobs.iter().zip(hvals) {
+            if val > thr && best.map_or(true, |b| val > b.0) {
+                best = Some((val, None, x, v));
             }
         }
         if let Some((val, d, x, v)) = best {
@@ -2471,10 +2499,13 @@ impl Brain {
             let (hs, hj, d) = ent_nested(&[s, yn]);
             (hs + h_yn - hj, d)
         };
-        let single: HashMap<usize, f64> = ser
-            .iter()
-            .map(|(&n, s)| (n, mi_yn(s).0 - mi_yn(&roll(s, sh)).0))
-            .collect();
+        // (the single-source shift screen is only needed without mixture screens)
+        let single: HashMap<usize, f64> = if self.cfg.screen_mix {
+            HashMap::new()
+        } else {
+            ser.iter().map(|(&n, s)| (n, mi_yn(s).0 - mi_yn(&roll(s, sh)).0)).collect()
+        };
+        let mut mix_jobs: Vec<(usize, usize)> = vec![];
         let mut anchors = vec![0];
         for &e in self.kept[1..].iter().chain(self.trials.iter()) {
             let n = self.slab[e].src;
@@ -2509,11 +2540,8 @@ impl Brain {
                 let m = sb.iter().copied().max().unwrap_or(0) + 1;
                 let pair: Vec<i64> = sa.iter().zip(sb).map(|(x, z)| x * m + z).collect();
                 if self.cfg.screen_mix {
-                    // what b adds beyond the anchor a, as a held-out mixture gain (no data-per-context cutoff)
-                    let g = heldout_gain_mix(sb, sa, yn);
-                    if g > self.cfg.mix_thr && best.map_or(true, |bb| g > bb.0) {
-                        best = Some((g, a, b));
-                    }
+                    // what b adds beyond the anchor a, as a held-out mixture gain (scored below, in parallel)
+                    mix_jobs.push((a, b));
                     continue;
                 }
                 let (m0, nd) = mi_yn(&pair);
@@ -2531,6 +2559,18 @@ impl Brain {
                 let j = m0 - mi_yn(&roll(&pair, sh)).0;
                 let g = j - single[&a].max(single[&b]).max(0.0);
                 if g > self.cfg.syn_thr && best.map_or(true, |bb| g > bb.0) {
+                    best = Some((g, a, b));
+                }
+            }
+        }
+        if !mix_jobs.is_empty() {
+            let mut bases: HashMap<usize, MixBase> = HashMap::new();
+            for &(a, _) in &mix_jobs {
+                bases.entry(a).or_insert_with(|| MixBase::new(&ser[&a], yn));
+            }
+            let gs = par_map(&mix_jobs, |&(a, b)| bases[&a].gain(&ser[&b]));
+            for (&(a, b), g) in mix_jobs.iter().zip(gs) {
+                if g > self.cfg.mix_thr && best.map_or(true, |bb| g > bb.0) {
                     best = Some((g, a, b));
                 }
             }

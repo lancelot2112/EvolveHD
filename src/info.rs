@@ -138,66 +138,136 @@ pub fn heldout_gain(s: &[i64], yp: &[i64], yn: &[i64]) -> f64 {
 /// grid on the first fifth of the second half and the gain reported on the rest. A weight of 0 is among
 /// the choices, so a context with no information scores about zero instead of being charged for sparsity.
 pub fn heldout_gain_mix(s: &[i64], yp: &[i64], yn: &[i64]) -> f64 {
-    use std::collections::HashMap;
-    let n = s.len();
-    let h = n / 2;
-    if h == 0 || n == h {
-        return 0.0;
+    MixBase::new(yp, yn).gain(s)
+}
+
+/// A fast, deterministic hasher (FxHash) for the screens' count tables: the tables are never iterated, so
+/// the hasher changes only speed.
+#[derive(Default, Clone, Copy)]
+pub struct Fx(u64);
+impl std::hash::Hasher for Fx {
+    fn finish(&self) -> u64 {
+        self.0
     }
-    let v = yn.iter().copied().max().unwrap_or(0) as usize + 1;
-    let mut p0 = vec![1.0f64; v];
-    for &y in &yn[..h] {
-        p0[y as usize] += 1.0;
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(b as u64);
+        }
     }
-    let z: f64 = p0.iter().sum();
-    p0.iter_mut().for_each(|x| *x /= z);
-    #[derive(Default)]
-    struct C {
-        n: u32,
-        d: HashMap<i64, u32>,
+    fn write_u64(&mut self, x: u64) {
+        self.0 = (self.0.rotate_left(5) ^ x).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
     }
-    let wb = |c: Option<&C>, y: i64, lower: f64| match c {
+    fn write_i64(&mut self, x: i64) {
+        self.write_u64(x as u64);
+    }
+}
+pub type FxBuild = std::hash::BuildHasherDefault<Fx>;
+type FxMap<K, V> = std::collections::HashMap<K, V, FxBuild>;
+
+#[derive(Default)]
+struct Ctx {
+    n: u32,
+    d: FxMap<i64, u32>,
+}
+fn wb_of(c: Option<&Ctx>, y: i64, lower: f64) -> f64 {
+    match c {
         Some(c) => {
             let t = c.d.len() as f64;
             (*c.d.get(&y).unwrap_or(&0) as f64 + t * lower) / (c.n as f64 + t)
         }
         None => lower,
-    };
-    let mut cb: HashMap<i64, C> = HashMap::new();
-    let mut cs: HashMap<(i64, i64), C> = HashMap::new();
-    for i in 0..h {
-        let e = cb.entry(yp[i]).or_default();
-        e.n += 1;
-        *e.d.entry(yn[i]).or_insert(0) += 1;
-        let e = cs.entry((s[i], yp[i])).or_default();
-        e.n += 1;
-        *e.d.entry(yn[i]).or_insert(0) += 1;
     }
-    const LAMS: [f64; 9] = [0.0, 0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 0.9];
-    let cal = h + (n - h) / 5;
-    let mut acc = [[0.0f64; 9]; 2];
-    for i in h..n {
-        let y = yn[i];
-        let base = if (y as usize) < v {
-            p0[y as usize]
+}
+
+/// The baseline half of `heldout_gain_mix`, which depends only on the context and the target: built once and
+/// shared by every candidate screened against them (the arithmetic is the same as computing it each time).
+pub struct MixBase<'a> {
+    yp: &'a [i64],
+    yn: &'a [i64],
+    n: usize,
+    h: usize,
+    /// The baseline probability of the target at each scored tick i in h..n.
+    pb: Vec<f64>,
+}
+
+impl<'a> MixBase<'a> {
+    pub fn new(yp: &'a [i64], yn: &'a [i64]) -> Self {
+        let n = yp.len().min(yn.len());
+        let h = n / 2;
+        if h == 0 || n == h {
+            return MixBase { yp, yn, n, h, pb: vec![] };
+        }
+        let v = yn.iter().copied().max().unwrap_or(0) as usize + 1;
+        let mut p0 = vec![1.0f64; v];
+        for &y in &yn[..h] {
+            p0[y as usize] += 1.0;
+        }
+        let z: f64 = p0.iter().sum();
+        p0.iter_mut().for_each(|x| *x /= z);
+        let mut cb: FxMap<i64, Ctx> = FxMap::default();
+        for i in 0..h {
+            let e = cb.entry(yp[i]).or_default();
+            e.n += 1;
+            *e.d.entry(yn[i]).or_insert(0) += 1;
+        }
+        let pb = (h..n)
+            .map(|i| {
+                let y = yn[i];
+                let base = if (y as usize) < v { p0[y as usize] } else { 1e-9 };
+                wb_of(cb.get(&yp[i]), y, base)
+            })
+            .collect();
+        MixBase { yp, yn, n, h, pb }
+    }
+
+    /// How much candidate context s adds beyond the baseline: the held-out gain of the best mixture weight.
+    pub fn gain(&self, s: &[i64]) -> f64 {
+        let (n, h) = (self.n.min(s.len()), self.h);
+        if h == 0 || n == h || self.pb.is_empty() {
+            return 0.0;
+        }
+        let (yp, yn) = (self.yp, self.yn);
+        let mut cs: FxMap<(i64, i64), Ctx> = FxMap::default();
+        for i in 0..h {
+            let e = cs.entry((s[i], yp[i])).or_default();
+            e.n += 1;
+            *e.d.entry(yn[i]).or_insert(0) += 1;
+        }
+        const LAMS: [f64; 9] = [0.0, 0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 0.9];
+        let cal = h + (n - h) / 5;
+        let mut acc = [[0.0f64; 9]; 2];
+        for i in h..n {
+            let y = yn[i];
+            let pb = self.pb[i - h];
+            let ps = wb_of(cs.get(&(s[i], yp[i])), y, pb);
+            let k = if i < cal { 0 } else { 1 };
+            for (j, &l) in LAMS.iter().enumerate() {
+                acc[k][j] += ((1.0 - l) * pb + l * ps).log2() - pb.log2();
+            }
+        }
+        let best = (0..LAMS.len())
+            .max_by(|&a, &b| acc[0][a].partial_cmp(&acc[0][b]).unwrap())
+            .unwrap();
+        if n > cal {
+            acc[1][best] / (n - cal) as f64
         } else {
-            1e-9
-        };
-        let pb = wb(cb.get(&yp[i]), y, base);
-        let ps = wb(cs.get(&(s[i], yp[i])), y, pb);
-        let k = if i < cal { 0 } else { 1 };
-        for (j, &l) in LAMS.iter().enumerate() {
-            acc[k][j] += ((1.0 - l) * pb + l * ps).log2() - pb.log2();
+            0.0
         }
     }
-    let best = (0..LAMS.len())
-        .max_by(|&a, &b| acc[0][a].partial_cmp(&acc[0][b]).unwrap())
-        .unwrap();
-    if n > cal {
-        acc[1][best] / (n - cal) as f64
-    } else {
-        0.0
+}
+
+/// Map f over items on all cores (EVOLVEHD_THREADS to override), results in item order.
+pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let nt = crate::meaning::threads().min(items.len().max(1));
+    if nt <= 1 || items.len() < 2 {
+        return items.iter().map(&f).collect();
     }
+    let chunk = items.len().div_ceil(nt);
+    let f = &f;
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = items.chunks(chunk).map(|c| sc.spawn(move || c.iter().map(f).collect::<Vec<R>>())).collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    })
 }
 
 /// I(a; b).

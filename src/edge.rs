@@ -160,7 +160,8 @@ struct Template {
 pub struct Edge {
     /// Index of the source node in the brain.
     pub src: usize,
-    pub rows: HashMap<u32, Row>,
+    /// Keyed by source state; FxHash (the map is never iterated in an order that matters).
+    pub rows: HashMap<u32, Row, crate::info::FxBuild>,
     pub beta: f64,
     v: f64,
     pub cur: i32,
@@ -213,7 +214,7 @@ impl Edge {
         }
         Edge {
             src,
-            rows: HashMap::new(),
+            rows: HashMap::default(),
             beta,
             v: 0.01,
             cur: -1,
@@ -358,10 +359,12 @@ impl Edge {
             self.lam = lam / wsum as f64;
             return;
         }
+        let mut v = self.sc.take().unwrap_or_default();
         let r = self.row(state as u32, gen, tix, tcodes, talive, rng);
         let lam = r.confidence();
         let s = 1.0 / (tix.rk * LEVELS) as f64;
-        let v: Vec<f64> = alive_idx.iter().map(|&c| r.counts[c] as f64 * s).collect();
+        v.clear();
+        v.extend(alive_idx.iter().map(|&c| r.counts[c] as f64 * s));
         self.sc = Some(v);
         self.lam = lam;
     }
@@ -531,6 +534,22 @@ impl Edge {
     }
 
     /// This edge's addition to the logits: beta * s, plus beta_c * confidence * s when enabled.
+    /// Add (or with `neg`, subtract) this edge's contribution to `out` in place: the same arithmetic as adding
+    /// `contribution()`, without building it.
+    pub fn add_contribution(&self, out: &mut [f64], neg: bool) -> bool {
+        let sc = match self.sc.as_ref() {
+            Some(s) => s,
+            None => return false,
+        };
+        let w = self.beta + if self.confidence { self.beta_c * self.lam } else { 0.0 };
+        if neg {
+            out.iter_mut().zip(sc).for_each(|(o, s)| *o -= w * s);
+        } else {
+            out.iter_mut().zip(sc).for_each(|(o, s)| *o += w * s);
+        }
+        true
+    }
+
     pub fn contribution(&self) -> Option<Vec<f64>> {
         let sc = self.sc.as_ref()?;
         let w = self.beta
