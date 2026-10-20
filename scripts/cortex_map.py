@@ -26,10 +26,10 @@ ap.add_argument('--D', type=int, default=2048); ap.add_argument('--k', type=int,
 ap.add_argument('--eta-min', type=float, default=0.02); ap.add_argument('--senses', type=int, default=2)
 ap.add_argument('--place', default='context'); ap.add_argument('--move', type=int, default=1)
 ap.add_argument('--target', default='draw')   # draw: one context spot drawn by salience; median: the salience-weighted median of the lit spots
-ap.add_argument('--mutual', type=float, default=0.0)
-# assoc: the cortex keeps association links (counts of each content word with the 16 most lit words when it
-# occurs); a word moves toward the weighted median position of its 8 strongest links by PMI (2+ co-occurrences)
-ap.add_argument('--links', type=int, default=16)  # also move the drawn context spot toward the word, at this fraction of eta
+ap.add_argument('--mutual', type=float, default=0.0)  # also move the drawn context spot toward the word, at this fraction of eta
+# assoc ("links"): the cortex counts, for each content word, the content words among the --links before each of its
+# occurrences; a word moves toward the weighted median position of its 8 strongest links by PMI (2+ co-occurrences)
+ap.add_argument('--links', type=int, default=16)
 ap.add_argument('--report', type=int, default=1); ap.add_argument('--half', type=float, default=200.0)
 A = ap.parse_args()
 rng = random.Random(1); nrng = np.random.default_rng(1)
