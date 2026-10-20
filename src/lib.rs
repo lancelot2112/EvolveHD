@@ -11,6 +11,7 @@
 //! - [`baseline`]: online Witten-Bell n-gram model, the yardstick for text runs.
 //! - [`stack`]: levels of brains, each over the chunks of the level below.
 //! - [`meaning`]: meaning codes learned from co-occurrence, story state, fast mapping and working memory.
+pub mod assoc;
 pub mod baseline;
 pub mod bits;
 pub mod brain;

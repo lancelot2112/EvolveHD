@@ -22,6 +22,29 @@ fn arg_owned(k: &str) -> Option<String> {
     arg(&args, k).map(String::from)
 }
 
+/// The heteroassociative store's settings from --as-* flags (see src/assoc.rs).
+fn assoc_cfg(args: &[String]) -> evolvehd::assoc::AssocCfg {
+    let g = |k: &str, d: &str| arg(args, k).unwrap_or(d).to_string();
+    evolvehd::assoc::AssocCfg {
+        s: g("--as-s", "32").parse().unwrap(),
+        l: g("--as-l", "64").parse().unwrap(),
+        win: g("--as-win", "8").parse().unwrap(),
+        fade: g("--as-fade", "0.8").parse().unwrap(),
+        half: g("--as-half", "20").parse().unwrap(),
+        cue: g("--as-cue", "6").parse().unwrap(),
+        ctx: g("--as-ctx", "4").parse().unwrap(),
+        k: g("--as-k", "8").parse().unwrap(),
+        hops: g("--as-hops", "2").parse().unwrap(),
+        glr: g("--as-glr", "0.01").parse().unwrap(),
+        sharpen: g("--as-sharpen", "2").parse().unwrap(),
+        cue_pow: g("--as-cue-pow", "2").parse().unwrap(),
+        exclude: !flag(args, "--as-keep-cue"),
+        roles: flag(args, "--as-roles"),
+        cue_gate: flag(args, "--as-cue-gate"),
+        cue_lr: g("--as-cue-lr", "0.1").parse().unwrap(),
+    }
+}
+
 fn arg<'a>(args: &'a [String], k: &str) -> Option<&'a str> {
     args.iter()
         .position(|a| a == k)
@@ -506,6 +529,35 @@ fn main() {
                 wrows.as_ref().map(|r| r.saturated).unwrap_or(0)
             );
         }
+        Some("assoc") => {
+            // the heteroassociative store alone: for every word, the rank of the word among each hop's
+            // candidates (255 = not among them), as u8 per hop, to OUT.rank; and each hop's k candidates (u32,
+            // u32::MAX for none) to OUT.top
+            let raw = std::fs::read(arg(&args, "--data").expect("--data")).unwrap();
+            let ids: Vec<u32> = raw.chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            let cfg = assoc_cfg(&args);
+            let hops = cfg.hops;
+            let kk = cfg.k;
+            let mut a = evolvehd::assoc::Assoc::new(cfg, *ids.iter().max().unwrap() as usize + 1);
+            let t0 = Instant::now();
+            let mut out: Vec<u8> = Vec::with_capacity(ids.len() * hops);
+            let mut top: Vec<u32> = Vec::with_capacity(ids.len() * hops);
+            for &w in &ids {
+                let sets = a.recall();
+                for h in 0..hops {
+                    let r = sets.get(h).and_then(|s| s.iter().position(|x| x.0 == w)).map(|p| p as u8).unwrap_or(255);
+                    out.push(r);
+                    for i in 0..kk {
+                        top.push(sets.get(h).and_then(|s| s.get(i)).map(|x| x.0).unwrap_or(u32::MAX));
+                    }
+                }
+                a.observe(w);
+            }
+            eprintln!("{} words, {:.1} s, {} gate writes", ids.len(), t0.elapsed().as_secs_f64(), a.gate_writes);
+            let o = arg(&args, "--out").expect("--out");
+            std::fs::write(format!("{o}.rank"), out).unwrap();
+            std::fs::write(format!("{o}.top"), top.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+        }
         Some("wordslots") => {
             // a word-level brain over full word ids (u32 LE, frequency ranks): the `--base` commonest words
             // have their own symbols, `--slots` more are handed to recent words outside them (least recently
@@ -679,6 +731,12 @@ fn main() {
             } else {
                 None
             };
+            // the heteroassociative store (experiment 31b): --assoc, --as-* (see src/assoc.rs)
+            let mut asc = if flag(&args, "--assoc") {
+                Some(evolvehd::assoc::Assoc::new(assoc_cfg(&args), *ids.iter().max().unwrap() as usize + 1))
+            } else {
+                None
+            };
             b.copy_nocontext = flag(&args, "--copy-nocontext");
             if let Some(x) = arg(&args, "--copy-lr") {
                 b.copy_lr = x.parse().unwrap();
@@ -731,9 +789,17 @@ fn main() {
                     }
                     b.copy_ctx_ext = ep.ctx_key();
                 }
+                if let Some(a) = asc.as_mut() {
+                    for (j, set) in a.recall().into_iter().enumerate() {
+                        b.set_copy(j, set);
+                    }
+                }
                 b.push(mapped[t]);
                 if let Some(ep) = epi.as_mut() {
                     ep.observe(ids[t]);
+                }
+                if let Some(a) = asc.as_mut() {
+                    a.observe(ids[t]);
                 }
                 if let Some((_, _, qm)) = item {
                     if mean_spell && mapped[t] == other {

@@ -110,3 +110,9 @@ mod tests {
         assert_eq!(s.len(), 32);
     }
 }
+
+/// A fixed hash of two numbers (for codes computed on the fly instead of stored).
+pub fn hash2(a: u64, b: u64) -> u64 {
+    let mut x = a.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_add(0x632B_E59B_D9B4_E019);
+    splitmix(&mut x)
+}

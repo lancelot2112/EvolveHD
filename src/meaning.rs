@@ -174,6 +174,33 @@ impl Meaning {
         r
     }
 
+    /// A word's meaning as a block code: the d bits split into `s` blocks, and in each block the most
+    /// distinctive bit (row * inv), as its position within the block; None while the word has no counts.
+    /// Empty blocks take a fixed position from the word's id.
+    pub fn block_code(&mut self, w: u32, s: usize) -> Option<Vec<u16>> {
+        let d = self.cfg.d;
+        let row = &self.m[w as usize * d..(w as usize + 1) * d];
+        if !row.iter().any(|&x| x != 0.0) {
+            return None;
+        }
+        let inv = self.inv_busy();
+        let l = d / s;
+        Some(
+            (0..s)
+                .map(|b| {
+                    let mut best = (0.0f32, u16::MAX);
+                    for p in 0..l {
+                        let x = row[b * l + p] * inv[b * l + p];
+                        if x > best.0 {
+                            best = (x, p as u16);
+                        }
+                    }
+                    if best.1 == u16::MAX { (crate::rng::hash2(w as u64, b as u64) % l as u64) as u16 } else { best.1 }
+                })
+                .collect(),
+        )
+    }
+
     /// 1 / (how busy each bit is + the mean), the distinctiveness weights of every bit right now.
     fn inv_busy(&self) -> Vec<f32> {
         let d = self.cfg.d;
