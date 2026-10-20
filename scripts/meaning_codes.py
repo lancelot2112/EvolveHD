@@ -24,6 +24,7 @@ ap.add_argument('--snap', type=int, default=20000); ap.add_argument('--half', ty
 ap.add_argument('--report', type=int, default=1)
 ap.add_argument('--raw', action='store_true')   # choose meaning bits by raw count instead of by distinctiveness
 ap.add_argument('--D', type=int, default=2048)   # width of the space
+ap.add_argument('--memmap', default='')        # keep the meaning counters in this file (disk-backed) to fit wide codes
 # fast mapping (hippocampal): on each of a word's first --fast-n occurrences, add the story code lit at that moment
 # to its counters with this weight per bit, so a new word starts out meaning what the story is about
 ap.add_argument('--fast', type=float, default=0.0); ap.add_argument('--fast-n', type=int, default=8)
@@ -40,7 +41,8 @@ NW = int(ids.max()) + 1; SKIP = 100; D = A.D; CK = 32; BETA = 256.0
 ident = np.stack([rng.choice(D, CK, replace=False) for _ in range(NW)])   # identity codes
 # the control's codes: random, the same size as a meaning code (K bits), for content words only
 ident_k = np.stack([rng.choice(D, A.K, replace=False) for _ in range(NW)]) if A.identity else None
-M = np.zeros((NW, D), dtype=np.float32)
+M = (np.memmap(A.memmap, dtype=np.float32, mode='w+', shape=(NW, D)) if A.memmap
+     else np.zeros((NW, D), dtype=np.float32))
 fc = np.zeros(NW, dtype=np.int64); ctot = 0
 Mcol = np.zeros(D, dtype=np.float64)          # how much each bit is used across all words
 def mcode(w):
@@ -156,7 +158,7 @@ for name, qs in combos.items():
     m_ = lambda mask: float(d[sc][mask[sc]].mean())
     out[name] = {'gain': float(d[sc].mean()), 'rare': m_(rare), 'storynew': m_(storynew), 'weights': ls}
     print(f"  {name:<16} gain {d[sc].mean():+.4f}   on rare words {m_(rare):+.4f}   on words new to the story {m_(storynew):+.4f}   weights {ls}", flush=True)
-out['rows_saturated'] = int((rows == 65535).sum())
+out['rows_saturated'] = int(sum(int((rows[j:j + 256] == 65535).sum()) for j in range(0, D, 256)))
 print(f"  readout counts at the 16-bit cap: {out['rows_saturated']}")
 json.dump(out, open(A.out + '.json', 'w'), indent=1)
 if not A.report or A.identity: sys.exit()
