@@ -30,11 +30,14 @@ words = open(A.words, encoding='latin-1').read().split('\n')
 B = np.load(A.base); p_base, q_story, u_p = B['p_base'], B['q_story'], B['u_p']
 NW = int(ids.max()) + 1; SKIP = 100; D = 2048; CK = 32; BETA = 256.0
 ident = np.stack([rng.choice(D, CK, replace=False) for _ in range(NW)])   # identity codes
+# the control's codes: random, the same size as a meaning code (K bits), for content words only
+ident_k = np.stack([rng.choice(D, A.K, replace=False) for _ in range(NW)]) if A.identity else None
 M = np.zeros((NW, D), dtype=np.float32)
 fc = np.zeros(NW, dtype=np.int64); ctot = 0
 Mcol = np.zeros(D, dtype=np.float64)          # how much each bit is used across all words
 def mcode(w):
-    if A.identity: return ident[w]
+    if w < SKIP: return None                    # only content words have codes, in both versions
+    if A.identity: return ident_k[w]
     row = M[w]
     if not row.any(): return None
     kk = min(A.K, int(np.count_nonzero(row)))
@@ -60,6 +63,8 @@ def snapshot():
     snapu = fc.astype(np.float64).copy()
     snapU = np.asarray(snap.T @ snapu).ravel()
 # demo: record story codes at occurrences of a few words, for the attention demo
+# (the demo records the first 400 occurrences of each word; the story code at an occurrence already includes the
+# word's own meaning code)
 DEMO = [w for w in ('light', 'spring', 'bank', 'fire', 'court', 'heart', 'charge', 'state', 'ball', 'deck')
         if w in words]
 didx = {words.index(w): w for w in DEMO}; dcodes = {w: [] for w in DEMO}
@@ -154,7 +159,8 @@ for s in ['whale', 'sea', 'ship', 'king', 'god', 'love', 'heart', 'horse', 'swor
     if s in words:
         w = words.index(s)
         if cnt[w] >= 20:
-            lines.append(f"  {s}: " + " ".join(W(x) for x in neighbours(mcode(w), exclude=(w,))))
+            if mcode(w) is not None:
+                lines.append(f"  {s}: " + " ".join(W(x) for x in neighbours(mcode(w), exclude=(w,))))
 # locality on the same measure as experiment 26: share of each word's 10 strongest associates among its nearest 2%
 cw = ids[ids >= SKIP]; r_, c_ = [], []
 for d_ in range(1, 11): r_.append(cw[:-d_]); c_.append(cw[d_:])
