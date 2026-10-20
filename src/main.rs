@@ -672,6 +672,8 @@ fn main() {
                     learned: flag(&args, "--epi-learned"),
                     win: g("--epi-win", "8").parse().unwrap(),
                     cue: g("--epi-cue", "6").parse().unwrap(),
+                    role_cap: g("--epi-role-cap", "32").parse().unwrap(),
+                    gate_cap: g("--epi-gate-cap", "128").parse().unwrap(),
                 }).with_meaning(*ids.iter().max().unwrap() as usize + 1))
             } else {
                 None
@@ -763,6 +765,10 @@ fn main() {
             let vocab_txt: Vec<String> = arg(&args, "--epi-vocab")
                 .map(|p| std::fs::read_to_string(p).unwrap().lines().map(String::from).collect())
                 .unwrap_or_default();
+            if let Some(ep) = epi.as_ref() {
+                let (r, g, c) = ep.stats();
+                eprintln!("store: {r} role classes, {g} gate classes, {c} recall channels");
+            }
             let mut gl: Vec<(f64, String)> = vec![];
             for (j, (b0, w)) in b.copy_gains().into_iter().enumerate() {
                 let top: Vec<String> = w.iter().take(3).map(|(c, x)| format!("cell {c}: {x:+.2}")).collect();

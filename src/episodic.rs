@@ -41,6 +41,9 @@ pub struct EpiCfg {
     pub learned: bool,
     pub win: usize,
     pub cue: usize,
+    /// Most role classes and gate classes (when full, a context joins its nearest class).
+    pub role_cap: usize,
+    pub gate_cap: usize,
 }
 
 /// Online classes of codes: each prototype is the strongest bits of the counts of the codes it matched.
@@ -51,25 +54,37 @@ struct Classes {
     size: Vec<usize>,
     seen: Vec<u32>,
     bar: f64,
+    /// For each bit, the classes whose prototype holds it (for matching by overlap counts).
+    owners: Vec<Vec<u32>>,
+    cap: usize,
 }
 
 impl Classes {
     fn new(d: usize, bar: f64) -> Self {
-        Classes { d, counts: vec![], members: vec![], size: vec![], seen: vec![], bar }
+        Classes { d, counts: vec![], members: vec![], size: vec![], seen: vec![], bar, owners: vec![vec![]; d], cap: 1024 }
     }
     /// The class of a code (bit positions), learning from it.
     fn assign(&mut self, code: &[u32]) -> u32 {
         if code.is_empty() {
             return u32::MAX;
         }
-        let mut best = (0.0, usize::MAX);
-        for (j, m) in self.members.iter().enumerate() {
-            let ov = code.iter().filter(|&&b| m[b as usize]).count() as f64 / code.len().max(self.size[j]) as f64;
-            if ov > best.0 {
-                best = (ov, j);
+        let mut hits: HashMap<u32, u32> = HashMap::new();
+        for &b in code {
+            for &j in &self.owners[b as usize] {
+                *hits.entry(j).or_insert(0) += 1;
             }
         }
-        let j = if best.1 != usize::MAX && best.0 >= self.bar {
+        let mut best = (0.0, usize::MAX);
+        let mut hv: Vec<(u32, u32)> = hits.into_iter().collect();
+        hv.sort_unstable();
+        for (j, h) in hv {
+            let ov = h as f64 / code.len().max(self.size[j as usize]) as f64;
+            if ov > best.0 {
+                best = (ov, j as usize);
+            }
+        }
+        let full = self.counts.len() >= self.cap;
+        let j = if best.1 != usize::MAX && (best.0 >= self.bar || full) {
             best.1
         } else {
             self.counts.push(vec![0.0; self.d]);
@@ -95,9 +110,15 @@ impl Classes {
             idx.truncate(k);
         }
         let m = &mut self.members[j];
-        m.iter_mut().for_each(|x| *x = false);
+        for b in 0..self.d {
+            if m[b] {
+                m[b] = false;
+                self.owners[b].retain(|&x| x != j as u32);
+            }
+        }
         for &b in &idx {
             m[b as usize] = true;
+            self.owners[b as usize].push(j as u32);
         }
         self.size[j] = idx.len();
         j as u32
@@ -131,6 +152,7 @@ pub struct Episodic {
     recent: Vec<(u32, u32, u64)>,
     uw: Vec<f64>,
     last_q: HashMap<u32, f64>,
+    code_cache: HashMap<u32, (u64, Vec<u32>)>,
 }
 
 impl Episodic {
@@ -159,7 +181,20 @@ impl Episodic {
             recent: vec![],
             uw: vec![],
             last_q: HashMap::new(),
+            code_cache: HashMap::new(),
         }
+    }
+
+    /// A word's meaning code (or identity code), cached and refreshed every 256 words.
+    fn cached_code(&mut self, w: u32) -> Vec<u32> {
+        if let Some((t0, c)) = self.code_cache.get(&w) {
+            if self.t - t0 < 256 {
+                return c.clone();
+            }
+        }
+        let c = self.mn.as_mut().unwrap().code_or_ident(w);
+        self.code_cache.insert(w, (self.t, c.clone()));
+        c
     }
 
     /// Turn on meaning classes (needs the vocabulary size).
@@ -172,8 +207,12 @@ impl Episodic {
             mc.seed = 7;
             self.wild_code = crate::rng::Rng::new(11).choose_distinct(mc.d, mc.k_word).into_iter().map(|x| x as u32).collect();
             self.mn = Some(Meaning::new(mc, nw));
-            self.role_cls = Some(Classes::new(self.cfg.mdim, self.cfg.mbar));
-            self.gate_cls = Some(Classes::new(self.cfg.mdim, self.cfg.mbar));
+            let mut rc = Classes::new(self.cfg.mdim, self.cfg.mbar);
+            rc.cap = self.cfg.role_cap;
+            let mut gc = Classes::new(self.cfg.mdim, self.cfg.mbar);
+            gc.cap = self.cfg.gate_cap;
+            self.role_cls = Some(rc);
+            self.gate_cls = Some(gc);
         }
         self
     }
@@ -189,7 +228,7 @@ impl Episodic {
             } else if w >= u32::MAX - 1 {
                 continue
             } else {
-                self.mn.as_mut().unwrap().code_or_ident(w)
+                self.cached_code(w)
             };
             let rot = (back * 7919) % d;
             out.extend(c.iter().map(|&b| ((b as usize + rot) % d) as u32));
@@ -513,7 +552,7 @@ impl Episodic {
                         Some(m) => m.iter().map(|(&k, &t)| (k, t)).collect(),
                         None => continue,
                     };
-                    for ((c, _pr2), tc) in links {
+                    for ((c, pr2), tc) in links {
                         if !cue.contains(&c) && c != b {
                             let ch = self.intern_chan((2, pr1, pr2));
                             *chans.entry(ch).or_default().entry(c).or_insert(0.0) += wb * self.strength(tc);
@@ -534,6 +573,15 @@ impl Episodic {
             out[ch as usize] = v;
         }
         out
+    }
+
+    /// Counts for reports: (role classes, gate classes, recall channels).
+    pub fn stats(&self) -> (usize, usize, usize) {
+        (
+            self.role_cls.as_ref().map(|c| c.counts.len()).unwrap_or(0),
+            self.gate_cls.as_ref().map(|c| c.counts.len()).unwrap_or(0),
+            self.chan_ids.len(),
+        )
     }
 
     /// A readable name for channel j, given the vocabulary.
