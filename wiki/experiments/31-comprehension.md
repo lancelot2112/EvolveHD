@@ -51,10 +51,10 @@ What each part contributes (engine + store):
 
 - **The second hop is what answers "where is the object?"** (73.6% against 11.0%): the object is bound to its holder, the holder to a place. For "where is the person?" the second hop only adds noise.
 - **The context-dependent gain is essential.** Without it, accuracy falls to 73.7% and answers cost 2.00 bits. With it, the gain learned the switch by itself: its largest term is on the question mark (+10 to +41, against a base of +2 to +8).
-- **Short-lived bindings work best.** Stories run about 60 words; with a 20-word half-life old stories' bindings fade before they interfere. At 1,000 words they interfere badly.
+- **Short-lived bindings work best.** Stories run about 80 words; with a 20-word half-life old stories' bindings fade before they interfere. At 1,000 words they interfere badly.
 - **Error-modulated writes make little difference here** (90.8% without, 89.0% with, at a 200-word half-life).
 
-What still fails: about 8% of "where is the object?" answers. When an object is dropped and its holder then moves, the second hop follows the holder to the new place. That needs the binding to know the object was let go: a role, which the store doesn't have.
+What still fails: about 8% of "where is the object?" answers. A likely cause, not checked case by case: when an object is dropped and its holder then moves, the second hop follows the holder to the new place. That needs the binding to know the object was let go: a role, which the store doesn't have.
 
 ## Findings
 
