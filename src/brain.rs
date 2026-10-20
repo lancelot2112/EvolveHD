@@ -667,7 +667,7 @@ pub struct Brain {
     recency: Vec<(usize, Option<usize>, usize)>,
     /// Story edge (slab index), salience per symbol (scaled by `story_g`), and the scale.
     story_edge: Option<usize>,
-    story_sal: HashMap<u32, f64>,
+    story_sal: std::collections::BTreeMap<u32, f64>,   // ordered, so runs are reproducible
     story_g: f64,
     /// Story keys per tick (e.g. full word ids, so words outside the vocabulary are keys too); content keys
     /// are those >= `story_skip`. Without them the key is the symbol, and "other" is the last symbol.
@@ -824,7 +824,7 @@ impl Brain {
             upper_retry: 0,
             recency: cfg.recency.iter().map(|&w| (w, None, 0)).collect(),
             story_edge: None,
-            story_sal: HashMap::new(),
+            story_sal: std::collections::BTreeMap::new(),
             story_g: 1.0,
             story_keys: None,
             ext: vec![],
