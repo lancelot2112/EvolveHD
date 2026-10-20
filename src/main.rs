@@ -416,6 +416,83 @@ fn main() {
             std::fs::write(format!("{dir}/report.txt"), &rep).unwrap();
             println!("{rep}");
         }
+        Some("meaning") => {
+            // the meaning-code prototype (scripts/meaning_codes.py) in Rust: reads full word ids and the
+            // prequential unigram probability of each word (--up, f64 LE), writes each readout's probability of
+            // the exact word per tick (OUT.q_bits / .q_mean / .q_wm, f64 LE) for scripts/score_meaning.py
+            use evolvehd::meaning::{BitRows, Meaning, MeaningCfg, Snapshot};
+            let rd = |p: &str| std::fs::read(p).unwrap();
+            let ids: Vec<u32> = rd(arg(&args, "--data").expect("--data"))
+                .chunks(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            let up: Vec<f64> = rd(arg(&args, "--up").expect("--up"))
+                .chunks(8)
+                .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            let out = arg(&args, "--out").expect("--out").to_string();
+            let g = |k: &str, d: &str| arg(&args, k).unwrap_or(d).to_string();
+            let mut cfg = MeaningCfg::default();
+            cfg.d = g("--D", "2048").parse().unwrap();
+            cfg.k_word = g("--K", "64").parse().unwrap();
+            cfg.k_story = g("--k", "64").parse().unwrap();
+            cfg.win = g("--win", "16").parse().unwrap();
+            cfg.fast = g("--fast", "0").parse().unwrap();
+            cfg.fast_n = g("--fast-n", "8").parse().unwrap();
+            cfg.wm_half = g("--wm-half", "0").parse().unwrap();
+            cfg.wm_k = g("--wm-k", "64").parse().unwrap();
+            cfg.wm_rot = g("--wm-rot", "1") != "0";
+            cfg.identity = flag(&args, "--identity");
+            let snap_every: usize = g("--snap", "20000").parse().unwrap();
+            let beta = 256.0;
+            let n = ids.len();
+            let nw = *ids.iter().max().unwrap() as usize + 1;
+            let wm_on = cfg.wm_half > 0.0;
+            let d = cfg.d;
+            let mut mn = Meaning::new(cfg, nw);
+            let small = flag(&args, "--rows16");
+            let mut rows = BitRows::new(d, nw, small);
+            let mut wrows = if wm_on { Some(BitRows::new(d, nw, small)) } else { None };
+            let mut snap: Option<Snapshot> = None;
+            let (mut qb, mut qm, mut qw) = (vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]);
+            let t0 = Instant::now();
+            for i in 0..n {
+                let w = ids[i];
+                if let Some(wr) = wrows.as_mut() {
+                    qw[i] = wr.prob(&mn.wm_code, w, up[i], beta);
+                    let c = mn.wm_code.clone();
+                    wr.learn(&c, w);
+                }
+                qb[i] = rows.prob(&mn.code, w, up[i], beta);
+                if let Some(s) = &snap {
+                    qm[i] = s.prob(w, &mn.incode, mn.code.len());
+                }
+                let c = mn.code.clone();
+                rows.learn(&c, w);
+                mn.observe(w);
+                if i % snap_every == snap_every - 1 {
+                    snap = Some(Snapshot::take(&mut mn));
+                }
+                if i % 250000 == 0 {
+                    eprintln!("t={i} secs={:.0}", t0.elapsed().as_secs_f64());
+                }
+            }
+            let wr = |name: &str, v: &[f64]| {
+                let b: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+                std::fs::write(format!("{out}.{name}"), b).unwrap();
+            };
+            wr("q_bits", &qb);
+            wr("q_mean", &qm);
+            if wm_on {
+                wr("q_wm", &qw);
+            }
+            println!(
+                "{n} words, {nw} distinct, {:.0} s; increments refused at the 16-bit cap: {} (code rows), {} (working memory)",
+                t0.elapsed().as_secs_f64(),
+                rows.saturated,
+                wrows.as_ref().map(|r| r.saturated).unwrap_or(0)
+            );
+        }
         Some("wordslots") => {
             // a word-level brain over full word ids (u32 LE, frequency ranks): the `--base` commonest words
             // have their own symbols, `--slots` more are handed to recent words outside them (least recently
@@ -451,6 +528,8 @@ fn main() {
             let mut renew: Vec<Option<u32>> = vec![None; n];
             let mut spell = vec![0.0f64; n];
             let mut spell0 = vec![0.0f64; n];
+            let mut q_uni = vec![0.0f64; n];
+            let mut q_keep = vec![0.0f64; n];
             let mut oc: HashMap<u32, u64> = HashMap::new();
             let mut on = 0u64;
             for t in 0..n {
@@ -476,8 +555,10 @@ fn main() {
                         };
                         spell[t] = -q.log2();
                         spell0[t] = spell[t];
+                        q_uni[t] = q;
                         if keep_half > 0.0 {
                             let qc = if keep_tot > 0.0 { keep.get(&w).copied().unwrap_or(0.0) / keep_tot } else { 0.0 };
+                            q_keep[t] = qc;
                             let best = (0..8).min_by(|&a, &b| lam_loss[a].partial_cmp(&lam_loss[b]).unwrap()).unwrap();
                             for k in 0..8 {
                                 let p = (1.0 - lams[k]) * q + lams[k] * qc;
@@ -526,12 +607,79 @@ fn main() {
                     }
                 }
             }
-            let mut b = Brain::new_symbols(vocab, cfg_from(&args));
+            // meaning codes in the word level (experiment 29): --mcode-edge and --wm-edge add kept edges keyed by
+            // the bits of the meaning story code and of the working memory; --mean-spell lets the lit meaning name
+            // "other" words, mixed into their spelling with the unigram counts and the kept-word memory
+            use evolvehd::meaning::{Meaning, MeaningCfg, Snapshot};
+            let mcode_edge = flag(&args, "--mcode-edge");
+            let wm_edge = flag(&args, "--wm-edge");
+            let mean_spell = flag(&args, "--mean-spell");
+            let mut bcfg = cfg_from(&args);
+            if mcode_edge {
+                bcfg.ext_edges.push("mcode".into());
+            }
+            if wm_edge {
+                bcfg.ext_edges.push("wm".into());
+            }
+            let mut mn = if mcode_edge || wm_edge || mean_spell {
+                let g = |k: &str, d: &str| arg(&args, k).unwrap_or(d).to_string();
+                let mut mc = MeaningCfg::default();
+                mc.d = g("--m-D", "2048").parse().unwrap();
+                mc.k_word = g("--m-K", "64").parse().unwrap();
+                mc.k_story = g("--m-k", "64").parse().unwrap();
+                mc.fast = g("--m-fast", "0").parse().unwrap();
+                mc.fast_n = g("--m-fast-n", "8").parse().unwrap();
+                mc.wm_half = if wm_edge { g("--m-wm-half", "4").parse().unwrap() } else { 0.0 };
+                mc.identity = flag(&args, "--m-identity");
+                Some(Meaning::new(mc, *ids.iter().max().unwrap() as usize + 1))
+            } else {
+                None
+            };
+            let mut msnap: Option<Snapshot> = None;
+            let mlk = [0.0, 0.05, 0.1, 0.2, 0.3, 0.45, 0.6, 0.75];
+            let mlm = [0.0, 0.02, 0.05, 0.1, 0.2, 0.3, 0.45];
+            let mut mloss = vec![0.0f64; mlk.len() * mlm.len()];
+            let mut b = Brain::new_symbols(vocab, bcfg);
             b.story_keys = Some(ids.clone());
             let t0 = Instant::now();
             let prog: usize = std::env::var("EVOLVEHD_PROGRESS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
             for t in 0..n {
+                if let Some(m) = mn.as_ref() {
+                    let mut j = 0;
+                    if mcode_edge {
+                        b.set_ext(j, m.code.iter().map(|&x| (x, 1.0)).collect());
+                        j += 1;
+                    }
+                    if wm_edge {
+                        b.set_ext(j, m.wm_code.iter().map(|&x| (x, 1.0)).collect());
+                    }
+                }
                 b.push(mapped[t]);
+                if let Some(m) = mn.as_mut() {
+                    if mean_spell && mapped[t] == other {
+                        let qm = msnap.as_ref().map(|s| s.prob_oov(ids[t], &m.code, &m.incode)).unwrap_or(0.0);
+                        let (q, qc) = (q_uni[t], q_keep[t]);
+                        let mut best = 0;
+                        for (i, l) in mloss.iter().enumerate() {
+                            if *l < mloss[best] {
+                                best = i;
+                            }
+                        }
+                        let p_at = |i: usize| {
+                            let (lk, lm) = (mlk[i / mlm.len()], mlm[i % mlm.len()]);
+                            if lk + lm >= 0.95 { f64::NAN } else { (1.0 - lk - lm) * q + lk * qc + lm * qm }
+                        };
+                        spell[t] = -p_at(best).log2();
+                        for i in 0..mloss.len() {
+                            let p = p_at(i);
+                            mloss[i] += if p.is_nan() { f64::INFINITY } else { -p.log2() };
+                        }
+                    }
+                    m.observe(ids[t]);
+                    if mean_spell && t % 20000 == 19999 {
+                        msnap = Some(Snapshot::take_oov(m, base));
+                    }
+                }
                 if let Some(sym) = renew[t] {
                     b.renew_sym(sym);
                 }

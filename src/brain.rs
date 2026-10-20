@@ -109,6 +109,9 @@ pub struct Cfg {
     /// Story rows age (halve) every this many writes (0 = never), and write one row per update.
     pub story_age: u32,
     pub story_write1: bool,
+    /// Kept multi-row edges whose rows are chosen from outside each tick (`Brain::set_ext`), e.g. the bits of a
+    /// meaning story code or a working-memory code; never pruned, their gains logged. Written one row per tick.
+    pub ext_edges: Vec<String>,
     /// The bias edge's own mask bits and aging (0 = the same as every edge), to set its memory apart.
     pub bias_mask_bits: usize,
     pub bias_age: Option<u32>,
@@ -193,6 +196,7 @@ impl Default for Cfg {
             story_skip: 100,
             story_age: 0,
             story_write1: false,
+            ext_edges: vec![],
             bias_mask_bits: 0,
             bias_age: None,
             hand_up_z: 0.0,
@@ -668,6 +672,8 @@ pub struct Brain {
     /// Story keys per tick (e.g. full word ids, so words outside the vocabulary are keys too); content keys
     /// are those >= `story_skip`. Without them the key is the symbol, and "other" is the last symbol.
     pub story_keys: Option<Vec<u32>>,
+    /// Slab indices of the external multi-row edges, in `Cfg::ext_edges` order.
+    pub ext: Vec<usize>,
     pub t: usize,
     pub tt: usize,
     pub cfg: Cfg,
@@ -821,6 +827,7 @@ impl Brain {
             story_sal: HashMap::new(),
             story_g: 1.0,
             story_keys: None,
+            ext: vec![],
             t: 0,
             tt,
             cfg: cfg.clone(),
@@ -895,6 +902,19 @@ impl Brain {
             b.kept.push(b.slab.len() - 1);
             b.kept_since.insert("story".into(), 0);
             b.story_edge = Some(b.slab.len() - 1);
+        }
+        for name in cfg.ext_edges.clone() {
+            let code = bits::rand_code(&mut b.rng);
+            let nd = b.new_node(name.clone(), Kind::Const(code), vec![], String::new());
+            let i = b.push_node(nd);
+            let mut e = b.mk_edge(i, 0.0);
+            e.multi = true;
+            e.age_every = cfg.story_age;
+            e.write_one = true;
+            b.slab.push(e);
+            b.kept.push(b.slab.len() - 1);
+            b.kept_since.insert(name, 0);
+            b.ext.push(b.slab.len() - 1);
         }
         if cfg.recency_kept {
             for r in 0..b.recency.len() {
@@ -2118,11 +2138,11 @@ impl Brain {
                 && self.slab[e].n > 100
             {
                 let (m, z) = self.slab[e].stats();
-                if Some(e) == self.story_edge {
+                if Some(e) == self.story_edge || self.ext.contains(&e) {
                     // measured, not pruned: log its gain over the window
                     self.events.push(Event {
                         t,
-                        kind: "story".into(),
+                        kind: if Some(e) == self.story_edge { "story".into() } else { k.clone() },
                         a: "byte".into(),
                         b: None,
                         v: Some(m),
@@ -2535,6 +2555,12 @@ impl Brain {
         }
         let e = self.story_edge.unwrap();
         self.slab[e].set = top.iter().map(|&(i, v)| (i, (v / g) as f32)).collect();
+    }
+
+    /// Set the rows external edge j reads and writes this tick (row key, weight).
+    pub fn set_ext(&mut self, j: usize, set: Vec<(u32, f32)>) {
+        let e = self.ext[j];
+        self.slab[e].set = set;
     }
 
     /// Give symbol `sym`'s cell a fresh code and generation (a slot handed to a new word), updating the
