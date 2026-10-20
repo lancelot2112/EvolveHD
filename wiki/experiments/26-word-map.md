@@ -1,6 +1,6 @@
 # 26 · A growing word map and a compressed story code (2026-10-19)
 
-*[All experiments](README.md)* · [← 25](25-kept-words.md)
+*[All experiments](README.md)* · [← 25](25-kept-words.md) · [27 →](27-meaning-codes.md)
 
 **Concepts:** [Sparse codes](../concepts/sparse-codes.md) · [Growth operators](../concepts/growth-operators.md#story-state) · [Stepping stones](../concepts/stepping-stones.md)
 
@@ -80,7 +80,7 @@ On Austen (D 2,048 only): the story edge gains +0.055; code rows +0.049 to +0.05
 2. **Low-dimensional maps can't hold much meaning anyway.** Offline orderings keep about 7% of strongest associates nearby on a line, 10% on a sheet, 15% in nine dimensions and 22% in 32.
 3. **The meaning that predicts lives in the links, not in position.** The story edge keyed by word id, a localist association memory, beats every compressed code, and nothing compressed adds to it beyond noise.
 4. **A compressed code needs no organisation, but it loses detail.** A compression of the lit words keeps +0.088 of the story edge's +0.130 overall, organised or not, but only 40% of its gain on rare words. An index built this way would address stories coarsely; the cortex's links still have to supply the specifics.
-5. **What it suggests (untested):** if similar words should share structure, the place for it is a high-dimensional distributed code built from the links (each word's code a bundle of its associates' codes), not a low-dimensional arrangement. The 2,048-bit space is such a space.
+5. **What it suggests (untested):** if similar words should share structure, the place for it is a high-dimensional distributed code built from the links (each word's code a bundle of its associates' codes), not a low-dimensional arrangement. The 2,048-bit space is such a space. Tested in [27](27-meaning-codes.md): words group there, ten times above chance.
 
 ## Code
 
