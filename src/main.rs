@@ -615,6 +615,7 @@ fn main() {
             let wm_edge = flag(&args, "--wm-edge");
             let mean_spell = flag(&args, "--mean-spell");
             let mut bcfg = cfg_from(&args);
+            bcfg.ext_write_all = flag(&args, "--ext-write-all");
             if mcode_edge {
                 bcfg.ext_edges.push("mcode".into());
             }
@@ -635,7 +636,6 @@ fn main() {
             } else {
                 None
             };
-            let mut msnap: Option<Snapshot> = None;
             let mlk = [0.0, 0.05, 0.1, 0.2, 0.3, 0.45, 0.6, 0.75];
             let mlm = [0.0, 0.02, 0.05, 0.1, 0.2, 0.3, 0.45];
             let mut mloss = vec![0.0f64; mlk.len() * mlm.len()];
@@ -643,21 +643,48 @@ fn main() {
             b.story_keys = Some(ids.clone());
             let t0 = Instant::now();
             let prog: usize = std::env::var("EVOLVEHD_PROGRESS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+            // the meaning state depends only on the word stream, so it runs on its own thread, a step ahead,
+            // handing each tick's story code, working-memory code and naming probability to the word level
+            let has_m = mn.is_some();
+            let (tx, rx) = std::sync::mpsc::sync_channel::<(Vec<u32>, Vec<u32>, f64)>(4096);
+            std::thread::scope(|sc| {
+            if let Some(mut m) = mn.take() {
+                let (ids_r, mapped_r) = (&ids, &mapped);
+                sc.spawn(move || {
+                    let mut msnap: Option<Snapshot> = None;
+                    for t in 0..n {
+                        let qm = if mean_spell && mapped_r[t] == other {
+                            msnap.as_ref().map(|s| s.prob_oov(ids_r[t], &m.code, &m.incode)).unwrap_or(0.0)
+                        } else {
+                            0.0
+                        };
+                        if tx.send((m.code.clone(), m.wm_code.clone(), qm)).is_err() {
+                            return;
+                        }
+                        m.observe(ids_r[t]);
+                        if mean_spell && t % 20000 == 19999 {
+                            msnap = Some(Snapshot::take_oov(&mut m, base));
+                        }
+                    }
+                });
+            } else {
+                drop(tx);
+            }
             for t in 0..n {
-                if let Some(m) = mn.as_ref() {
+                let item = if has_m { Some(rx.recv().unwrap()) } else { None };
+                if let Some((code, wmc, _)) = item.as_ref() {
                     let mut j = 0;
                     if mcode_edge {
-                        b.set_ext(j, m.code.iter().map(|&x| (x, 1.0)).collect());
+                        b.set_ext(j, code.iter().map(|&x| (x, 1.0)).collect());
                         j += 1;
                     }
                     if wm_edge {
-                        b.set_ext(j, m.wm_code.iter().map(|&x| (x, 1.0)).collect());
+                        b.set_ext(j, wmc.iter().map(|&x| (x, 1.0)).collect());
                     }
                 }
                 b.push(mapped[t]);
-                if let Some(m) = mn.as_mut() {
+                if let Some((_, _, qm)) = item {
                     if mean_spell && mapped[t] == other {
-                        let qm = msnap.as_ref().map(|s| s.prob_oov(ids[t], &m.code, &m.incode)).unwrap_or(0.0);
                         let (q, qc) = (q_uni[t], q_keep[t]);
                         let mut best = 0;
                         for (i, l) in mloss.iter().enumerate() {
@@ -675,10 +702,6 @@ fn main() {
                             mloss[i] += if p.is_nan() { f64::INFINITY } else { -p.log2() };
                         }
                     }
-                    m.observe(ids[t]);
-                    if mean_spell && t % 20000 == 19999 {
-                        msnap = Some(Snapshot::take_oov(m, base));
-                    }
                 }
                 if let Some(sym) = renew[t] {
                     b.renew_sym(sym);
@@ -687,6 +710,7 @@ fn main() {
                     eprintln!("t={} secs={:.0} bits={:.3}", t + 1, t0.elapsed().as_secs_f64(), b.bpb(t + 1 - prog, t + 1));
                 }
             }
+            });
             let h = n / 2;
             let sp = spell[h..].iter().sum::<f64>() / (n - h) as f64;
             let sp0 = spell0[h..].iter().sum::<f64>() / (n - h) as f64;

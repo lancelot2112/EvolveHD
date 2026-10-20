@@ -70,10 +70,37 @@ pub struct Meaning {
     /// The story code (bit positions) and a membership mask.
     pub code: Vec<u32>,
     pub incode: Vec<bool>,
+    /// Working memory: physical array, rotation offset and scale (logical value of bit i =
+    /// wm[(i - wm_off) mod d] * wm_scale).
     wm: Vec<f32>,
+    wm_off: usize,
+    wm_scale: f64,
     wm_fade: f32,
     pub wm_code: Vec<u32>,
     scratch: Vec<f32>,
+}
+
+/// The meaning code of one counter row: its k most distinctive bits (row * inv), or None for an empty row.
+/// Written as plain slice loops so they vectorize.
+fn code_of_row(row: &[f32], inv: &[f32], k: usize, scratch: &mut Vec<f32>) -> Option<Vec<u32>> {
+    if !row.iter().any(|&x| x != 0.0) {
+        return None;
+    }
+    scratch.resize(row.len(), 0.0);
+    for ((o, &r), &v) in scratch.iter_mut().zip(row).zip(inv) {
+        *o = r * v;
+    }
+    let mut idx = Vec::with_capacity(row.len());
+    Some(top_k(scratch, k, &mut idx))
+}
+
+/// Threads to use: EVOLVEHD_THREADS, or every core.
+pub fn threads() -> usize {
+    std::env::var("EVOLVEHD_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1))
+        .max(1)
 }
 
 /// Indices of the k largest values (only strictly positive ones), in no particular order.
@@ -117,6 +144,8 @@ impl Meaning {
             code: vec![],
             incode: vec![false; d],
             wm: vec![0.0; if cfg.wm_half > 0.0 { d } else { 0 }],
+            wm_off: 0,
+            wm_scale: 1.0,
             wm_fade,
             wm_code: vec![],
             scratch: vec![0.0; d],
@@ -132,20 +161,19 @@ impl Meaning {
         if self.cfg.identity {
             return Some(self.ident_k[w as usize].clone());
         }
+        let inv = self.inv_busy();
         let d = self.cfg.d;
-        let row = &self.m[w as usize * d..(w as usize + 1) * d];
-        if !row.iter().any(|&x| x != 0.0) {
-            return None;
-        }
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let r = code_of_row(&self.m[w as usize * d..(w as usize + 1) * d], &inv, self.cfg.k_word, &mut scratch);
+        self.scratch = scratch;
+        r
+    }
+
+    /// 1 / (how busy each bit is + the mean), the distinctiveness weights of every bit right now.
+    fn inv_busy(&self) -> Vec<f32> {
+        let d = self.cfg.d;
         let mean = self.mcol.iter().sum::<f64>() / d as f64;
-        for i in 0..d {
-            self.scratch[i] = (row[i] as f64 / (self.mcol[i] + mean + 1e-9)) as f32;
-        }
-        let mut idx = Vec::with_capacity(d);
-        let s = std::mem::take(&mut self.scratch);
-        let r = top_k(&s, self.cfg.k_word, &mut idx);
-        self.scratch = s;
-        Some(r)
+        self.mcol.iter().map(|&c| (1.0 / (c + mean + 1e-9)) as f32).collect()
     }
 
     /// Learn from word `w` (call after predicting it): occurrence counts, links, fast mapping, story state and
@@ -187,40 +215,65 @@ impl Meaning {
             }
             let mc = self.mcode(w);
             self.g *= 2f64.powf(1.0 / self.cfg.half);
-            if let Some(mc) = mc {
-                for b in mc {
-                    self.act[b as usize] += self.g;
-                }
-            }
             if self.g > 1e100 {
                 self.act.iter_mut().for_each(|x| *x /= 1e100);
                 self.g /= 1e100;
             }
-            let a32: Vec<f32> = self.act.iter().map(|&x| (x / self.g) as f32).collect();
-            let mut idx = Vec::with_capacity(d);
-            for &b in &self.code {
+            // decay is the same for every bit (folded into g), so only the word's own bits move up: the new
+            // top k is the top k of the old top k and those bits
+            let mut cands = std::mem::take(&mut self.code);
+            if let Some(mc) = mc {
+                for &b in &mc {
+                    self.act[b as usize] += self.g;
+                }
+                cands.extend(mc);
+            }
+            for &b in &cands {
                 self.incode[b as usize] = false;
             }
-            self.code = top_k(&a32, self.cfg.k_story, &mut idx);
+            let act = &self.act;
+            self.code = top_of(cands, |b| act[b as usize], self.cfg.k_story);
             for &b in &self.code {
                 self.incode[b as usize] = true;
             }
         }
         if self.cfg.wm_half > 0.0 {
+            // rotation and fading move every bit alike, so they are an index offset and a scale; only the 32
+            // identity bits of the word change, and the new top k comes from the old top k (rotated) and those
             if self.cfg.wm_rot {
-                self.wm.rotate_right(1);
+                self.wm_off = (self.wm_off + 1) % d;
             }
-            let f = self.wm_fade;
-            self.wm.iter_mut().for_each(|x| *x *= f);
+            self.wm_scale *= self.wm_fade as f64;
+            if self.wm_scale < 1e-20 {
+                let sc = self.wm_scale as f32;
+                self.wm.iter_mut().for_each(|x| *x *= sc);
+                self.wm_scale = 1.0;
+            }
+            let off = self.wm_off;
+            let add = (1.0 / self.wm_scale) as f32;
             for &b in &self.ident[wi] {
-                self.wm[b as usize] += 1.0;
+                self.wm[(b as usize + d - off) % d] += add;
             }
-            let mut idx = Vec::with_capacity(d);
-            let wm = std::mem::take(&mut self.wm);
-            self.wm_code = top_k(&wm, self.cfg.wm_k, &mut idx);
-            self.wm = wm;
+            let mut cands: Vec<u32> = if self.cfg.wm_rot {
+                self.wm_code.iter().map(|&c| ((c as usize + 1) % d) as u32).collect()
+            } else {
+                std::mem::take(&mut self.wm_code)
+            };
+            cands.extend(self.ident[wi].iter().copied());
+            let wm = &self.wm;
+            self.wm_code = top_of(cands, |b| wm[(b as usize + d - off) % d] as f64, self.cfg.wm_k);
         }
     }
+}
+
+/// The k candidates with the largest positive values (duplicates removed; ties broken by bit index).
+fn top_of(mut cands: Vec<u32>, val: impl Fn(u32) -> f64, k: usize) -> Vec<u32> {
+    cands.sort_unstable();
+    cands.dedup();
+    let mut v: Vec<(f64, u32)> = cands.into_iter().map(|b| (val(b), b)).filter(|x| x.0 > 0.0).collect();
+    v.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(a.1.cmp(&b.1)));
+    v.truncate(k);
+    v.into_iter().map(|x| x.1).collect()
 }
 
 /// Rows keyed by code bits, each counting the next word: a counts readout over a code (as in the prototype).
@@ -293,20 +346,45 @@ impl Snapshot {
     }
     pub fn take_oov(mn: &mut Meaning, oov_from: u32) -> Self {
         let nw = mn.nw;
-        let mut codes = vec![vec![]; nw];
-        let mut big_u = vec![0.0; mn.cfg.d];
-        let mut big_u_oov = vec![0.0; mn.cfg.d];
+        let d = mn.cfg.d;
         let u: Vec<f64> = mn.fc.iter().map(|&c| c as f64).collect();
-        for w in 0..nw {
-            if mn.fc[w] >= 1 {
-                if let Some(c) = mn.mcode(w as u32) {
-                    for &b in &c {
-                        big_u[b as usize] += u[w];
-                        if w as u32 >= oov_from {
-                            big_u_oov[b as usize] += u[w];
+        // every seen word's code, computed in parallel over word ranges
+        let mut codes: Vec<Vec<u32>> = vec![vec![]; nw];
+        if mn.cfg.identity {
+            for w in 0..nw {
+                if mn.fc[w] >= 1 && w as u32 >= mn.cfg.skip {
+                    codes[w] = mn.ident_k[w].clone();
+                }
+            }
+        } else {
+            let inv = mn.inv_busy();
+            let (m, fc, k, skip) = (&mn.m, &mn.fc, mn.cfg.k_word, mn.cfg.skip);
+            let nt = threads();
+            let chunk = nw.div_ceil(nt);
+            std::thread::scope(|sc| {
+                for (j, part) in codes.chunks_mut(chunk).enumerate() {
+                    let inv = &inv;
+                    sc.spawn(move || {
+                        let mut scratch = Vec::new();
+                        for (i, slot) in part.iter_mut().enumerate() {
+                            let w = j * chunk + i;
+                            if fc[w] >= 1 && w as u32 >= skip {
+                                if let Some(c) = code_of_row(&m[w * d..(w + 1) * d], inv, k, &mut scratch) {
+                                    *slot = c;
+                                }
+                            }
                         }
-                    }
-                    codes[w] = c;
+                    });
+                }
+            });
+        }
+        let mut big_u = vec![0.0; d];
+        let mut big_u_oov = vec![0.0; d];
+        for w in 0..nw {
+            for &b in &codes[w] {
+                big_u[b as usize] += u[w];
+                if w as u32 >= oov_from {
+                    big_u_oov[b as usize] += u[w];
                 }
             }
         }

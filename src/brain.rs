@@ -112,6 +112,8 @@ pub struct Cfg {
     /// Kept multi-row edges whose rows are chosen from outside each tick (`Brain::set_ext`), e.g. the bits of a
     /// meaning story code or a working-memory code; never pruned, their gains logged. Written one row per tick.
     pub ext_edges: Vec<String>,
+    /// External edges write every row of their set each tick instead of one drawn by weight.
+    pub ext_write_all: bool,
     /// The bias edge's own mask bits and aging (0 = the same as every edge), to set its memory apart.
     pub bias_mask_bits: usize,
     pub bias_age: Option<u32>,
@@ -197,6 +199,7 @@ impl Default for Cfg {
             story_age: 0,
             story_write1: false,
             ext_edges: vec![],
+            ext_write_all: false,
             bias_mask_bits: 0,
             bias_age: None,
             hand_up_z: 0.0,
@@ -910,7 +913,7 @@ impl Brain {
             let mut e = b.mk_edge(i, 0.0);
             e.multi = true;
             e.age_every = cfg.story_age;
-            e.write_one = true;
+            e.write_one = !cfg.ext_write_all;
             b.slab.push(e);
             b.kept.push(b.slab.len() - 1);
             b.kept_since.insert(name, 0);

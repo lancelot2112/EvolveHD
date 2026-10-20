@@ -333,15 +333,17 @@ impl Edge {
             let set = self.set.clone();
             let wsum: f32 = set.iter().map(|x| x.1).sum();
             let s = 1.0 / (tix.rk * LEVELS) as f64 / wsum as f64;
-            let mut v = vec![0.0; alive_idx.len()];
+            // sum the rows densely over all cells (contiguous, so it vectorizes), then pick the live ones
+            let mut acc = vec![0.0f32; tcodes.len()];
             let mut lam = 0.0;
             for &(k, w) in &set {
                 let r = self.row(k, gen, tix, tcodes, talive, rng);
                 lam += r.confidence() * w as f64;
-                for (o, &c) in v.iter_mut().zip(alive_idx) {
-                    *o += r.counts[c] as f64 * w as f64 * s;
+                for (a, &c) in acc.iter_mut().zip(&r.counts) {
+                    *a += c as f32 * w;
                 }
             }
+            let v: Vec<f64> = alive_idx.iter().map(|&c| acc[c] as f64 * s).collect();
             self.sc = Some(v);
             self.lam = lam / wsum as f64;
             return;

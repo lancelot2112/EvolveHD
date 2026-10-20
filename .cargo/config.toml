@@ -1,0 +1,4 @@
+# Build for the machine compiling it, so loops vectorize with its widest instructions (AVX2 / AVX-512 / FMA).
+# Binaries built this way may not run on older CPUs; remove this to build a portable binary.
+[build]
+rustflags = ["-C", "target-cpu=native"]
