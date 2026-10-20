@@ -54,12 +54,12 @@ def mcode(w):
     return np.argpartition(-row, kk - 1)[:kk]
 recent = []                                    # last --win content words
 g = 1.0; act = np.zeros(D); code = np.zeros(0, dtype=np.int64); incode = np.zeros(D, dtype=bool)
-rows = np.zeros((D, NW), dtype=np.int32); nb = np.zeros(D, dtype=np.int64)
+rows = np.zeros((D, NW), dtype=np.uint16); nb = np.zeros(D, dtype=np.int64)   # 16-bit counts, saturating
 q_bits = np.zeros(n); q_mean = np.zeros(n); prior = np.zeros(n, dtype=np.int64)
 q_wm = np.zeros(n)
 if A.wm_half > 0:
     wm = np.zeros(D); wm_fade = 2 ** (-1 / A.wm_half); wm_code = np.zeros(0, dtype=np.int64)
-    wrows = np.zeros((D, NW), dtype=np.int32); wnb = np.zeros(D, dtype=np.int64)
+    wrows = np.zeros((D, NW), dtype=np.uint16); wnb = np.zeros(D, dtype=np.int64)
 snap = None; snapU = None; snapu = None
 def snapshot():
     """Meaning codes of every word seen so far, as a sparse word x bit matrix, with frequency weights."""
@@ -85,7 +85,7 @@ for i in range(n):
     if A.wm_half > 0:
         if len(wm_code):
             r = wrows[wm_code, w].astype(np.float64); q_wm[i] = ((r + BETA * u_p[i]) / (wnb[wm_code] + BETA)).mean()
-            wrows[wm_code, w] += 1; wnb[wm_code] += 1
+            wrows[wm_code, w] = np.minimum(wrows[wm_code, w].astype(np.int64) + 1, 65535); wnb[wm_code] += 1
         else:
             q_wm[i] = u_p[i]
         wm = wm_fade * (np.roll(wm, A.wm_rot) if A.wm_rot else wm); wm[ident[w]] += 1.0
@@ -102,7 +102,7 @@ for i in range(n):
     else:
         q_bits[i] = u_p[i]
     if len(code):
-        rows[code, w] += 1; nb[code] += 1
+        rows[code, w] = np.minimum(rows[code, w].astype(np.int64) + 1, 65535); nb[code] += 1
     fc[w] += 1
     if w >= SKIP:
         ctot += 1
@@ -156,6 +156,8 @@ for name, qs in combos.items():
     m_ = lambda mask: float(d[sc][mask[sc]].mean())
     out[name] = {'gain': float(d[sc].mean()), 'rare': m_(rare), 'storynew': m_(storynew), 'weights': ls}
     print(f"  {name:<16} gain {d[sc].mean():+.4f}   on rare words {m_(rare):+.4f}   on words new to the story {m_(storynew):+.4f}   weights {ls}", flush=True)
+out['rows_saturated'] = int((rows == 65535).sum())
+print(f"  readout counts at the 16-bit cap: {out['rows_saturated']}")
 json.dump(out, open(A.out + '.json', 'w'), indent=1)
 if not A.report or A.identity: sys.exit()
 del rows                                      # free the readout tables before building the report
