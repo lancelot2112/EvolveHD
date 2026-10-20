@@ -19,7 +19,7 @@ pmi = np.log(M.data * tot / (rs[M.row] * rs[M.col])); keep = (pmi > 0) & (M.data
 P = spm.coo_matrix((pmi[keep], (M.row[keep], M.col[keep])), shape=M.shape).tocsr()
 dg = np.asarray(P.sum(1)).ravel() + 1e-9; Dm = spm.diags(1 / np.sqrt(dg))
 L = Dm @ P @ Dm
-vals, vecs = eigsh(L, k=4, which='LA')
+vals, vecs = eigsh(L, k=33, which='LA')
 o = np.argsort(-vals); vecs = vecs[:, o] * (1 / np.sqrt(dg))[:, None]
 nwd = len(words); rng = random.Random(1)
 Mfull = (M.tocsr())
@@ -47,3 +47,12 @@ def near2(i, j):
     if i not in nbr: nbr[i] = set(tree.query(X[i], k=kn)[1])
     return j in nbr[i]
 print("2-D spectral sheet (nearest 2%):", "locality %.3f (random %.3f; %d words)" % locality(None, near2))
+
+# d-dimensional sheets: the first d nontrivial spectral coordinates, neighbourhood = the nearest 2% of words
+for d in [1, 2, 3, 5, 9, 16, 32]:
+    X = vecs[:, 1:1 + d]; X = (X - X.mean(0)) / (X.std(0) + 1e-12)
+    tree = cKDTree(X); nbr = {}
+    def neard(i, j):
+        if i not in nbr: nbr[i] = set(tree.query(X[i], k=kn)[1])
+        return j in nbr[i]
+    print(f"{d}-D spectral space (nearest 2%):", "locality %.3f (random %.3f; %d words)" % locality(None, neard), flush=True)

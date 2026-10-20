@@ -1,6 +1,6 @@
 # 25 · Keeping the words outside the vocabulary (2026-10-19)
 
-*[All experiments](README.md)* · [← 24](24-story-state.md)
+*[All experiments](README.md)* · [← 24](24-story-state.md) · [26 →](26-word-map.md)
 
 **Concepts:** [Writer-mask readout](../concepts/writer-mask-readout.md) · [Growth operators](../concepts/growth-operators.md#recency) · [Stepping stones](../concepts/stepping-stones.md)
 
