@@ -62,6 +62,7 @@ Gains in bits per exact word beyond the counts system of 25 (scored part: the la
 | Code rows, links map | +0.072 | −0.007 | +0.139 |
 | Code rows, draw map, D 256 / D 4,096 with k 64 | +0.071 / +0.079 | | |
 | Region readout, draw map, D 256 | +0.057 | +0.041 | +0.192 |
+| Region readout, links map, D 256 | +0.032 | +0.034 | +0.092 |
 | Region readout, random placement, D 256 | +0.028 | +0.022 | +0.065 |
 | Story edge + code rows, every map | +0.130 | +0.171 | +0.270 |
 | Story edge + code rows + region readout, worst (random placement) | +0.123 | +0.134 | +0.217 |
@@ -71,7 +72,7 @@ On Austen (D 2,048 only): the story edge gains +0.055; code rows +0.049 to +0.05
 - **The compressed code adds essentially nothing to the story edge.** On the whole corpus, with code rows the mixture gives the story edge exactly its own gain; adding the region readout gives slightly less overall and up to a fifth less on rare and new words, as the weights chosen on the calibration fifth fit the later part worse. On Austen the best combination is +0.002 above the story edge, and worse on rare and new words.
 - **Organising the map doesn't help the code.** Random placement gives the highest code rows in both corpora, by small margins (0.002 on Austen, 0.006 on the whole corpus, single runs). The code carries which words were lit, compressed; the arrangement adds no meaning to it.
 - **Code size changes little:** with the draw map, +0.071 at D 256, +0.082 at 2,048, +0.079 at 4,096 (with k 64, so size and sparsity both change).
-- **The region readout is where an organised map shows at all:** with coarse regions (D 256), the draw map's lit regions name words new to the story about three times as well as random placement (+0.192 against +0.065). Only the draw and random maps were run at D 256. It is still less than the story edge, and adds nothing beyond it.
+- **The region readout is where an organised map shows at all:** with coarse regions (D 256), the draw map's lit regions name words new to the story about three times as well as random placement (+0.192 against +0.065), the links map's 1.4 times (+0.092). The median map was not run at D 256. It is still less than the story edge, and adds nothing beyond it.
 
 ## Findings
 
