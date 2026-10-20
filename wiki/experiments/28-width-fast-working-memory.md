@@ -1,6 +1,6 @@
 # 28 · Wider codes, fast mapping and a working memory (2026-10-20)
 
-*[All experiments](README.md)* · [← 27](27-meaning-codes.md)
+*[All experiments](README.md)* · [← 27](27-meaning-codes.md) · [31 →](31-comprehension.md)
 
 **Concepts:** [Sparse codes](../concepts/sparse-codes.md) · [Shift-bind](../concepts/shift-bind.md) · [Growth operators](../concepts/growth-operators.md#story-state)
 
