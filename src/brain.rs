@@ -699,6 +699,8 @@ pub struct Brain {
     pub copy_lr: f64,
     /// Copy channels use one gain for every context (no context-dependent term).
     pub copy_nocontext: bool,
+    /// A context key for the copy gains supplied from outside (instead of the previous input cell).
+    pub copy_ctx_ext: Option<i32>,
     pub t: usize,
     pub tt: usize,
     pub cfg: Cfg,
@@ -871,6 +873,7 @@ impl Brain {
             copy_prev: -1,
             copy_lr: 0.01,
             copy_nocontext: false,
+            copy_ctx_ext: None,
             t: 0,
             tt,
             cfg: cfg.clone(),
@@ -1490,6 +1493,9 @@ impl Brain {
             if self.score_edge(e) {
                 self.slab[e].add_contribution(&mut logits, false);
             }
+        }
+        if let Some(k) = self.copy_ctx_ext {
+            self.copy_prev = k;
         }
         for j in 0..self.copy_sets.len() {
             let gain = self.copy_b0[j] + self.copy_w[j].get(&self.copy_prev).copied().unwrap_or(0.0);

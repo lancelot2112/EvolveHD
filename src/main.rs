@@ -663,6 +663,9 @@ fn main() {
                     half: g("--epi-half", "200").parse().unwrap(),
                     k: g("--epi-k", "8").parse().unwrap(),
                     hops: g("--epi-hops", "2").parse().unwrap(),
+                    roles: flag(&args, "--epi-roles") || flag(&args, "--epi-both"),
+                    both: flag(&args, "--epi-both"),
+                    ctx_words: g("--epi-ctx", "0").parse().unwrap(),
                 }))
             } else {
                 None
@@ -712,10 +715,12 @@ fn main() {
                         b.set_ext(j, wmc.iter().map(|&x| (x, 1.0)).collect());
                     }
                 }
-                if let Some(ep) = epi.as_ref() {
-                    for (j, set) in ep.recall().into_iter().enumerate() {
+                if let Some(ep) = epi.as_mut() {
+                    let sets = if ep.cfg.both { ep.recall_both() } else if ep.cfg.roles { ep.recall_roles() } else { ep.recall() };
+                    for (j, set) in sets.into_iter().enumerate() {
                         b.set_copy(j, set);
                     }
+                    b.copy_ctx_ext = ep.ctx_key();
                 }
                 b.push(mapped[t]);
                 if let Some(ep) = epi.as_mut() {
@@ -749,9 +754,22 @@ fn main() {
                 }
             }
             });
+            let vocab_txt: Vec<String> = arg(&args, "--epi-vocab")
+                .map(|p| std::fs::read_to_string(p).unwrap().lines().map(String::from).collect())
+                .unwrap_or_default();
+            let mut gl: Vec<(f64, String)> = vec![];
             for (j, (b0, w)) in b.copy_gains().into_iter().enumerate() {
-                let top: Vec<String> = w.iter().take(4).map(|(c, x)| format!("cell {c}: {x:+.2}")).collect();
-                eprintln!("copy channel {j}: base gain {b0:+.2}; strongest context gains {}", top.join(", "));
+                let top: Vec<String> = w.iter().take(3).map(|(c, x)| format!("cell {c}: {x:+.2}")).collect();
+                let lab = match epi.as_ref() {
+                    Some(ep) if ep.cfg.roles && j < ep.chan_names.len() + if ep.cfg.both { ep.cfg.hops } else { 0 } => ep.chan_label(j, &vocab_txt),
+                    _ => format!("channel {j}"),
+                };
+                let best = w.first().map(|x| x.1).unwrap_or(0.0);
+                gl.push((best, format!("{lab}: base {b0:+.2}; context {}", top.join(", "))));
+            }
+            gl.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            for (_, l) in gl.iter().take(12) {
+                eprintln!("copy {l}");
             }
             if let Some(p) = arg(&args, "--dump-bits") {
                 // per word: the bits paid (f64 LE) and whether the top prediction was right (u8)

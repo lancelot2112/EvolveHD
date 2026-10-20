@@ -56,20 +56,53 @@ What each part contributes (engine + store; the first four rows at a 200-word ha
 
 What still fails: about 8% of "where is the object?" answers. A likely cause, not checked case by case: when an object is dropped and its holder then moves, the second hop follows the holder to the new place. That needs the binding to know the object was let go: a role, which the store doesn't have.
 
+## Learned roles
+
+The store above binds everything in a clause to everything else, with no relations. A version that learns them (`--epi-roles`):
+- **Roles from context:** each content word's role is its two preceding words, with content words replaced by a wildcard. So "went / moved / journeyed to the X" all give X the role *[to the]*, while "got the X", "picked up the X" and "dropped the X" give X different roles. Nobody names the roles; they are the slots the text has.
+- **One channel per relation:** bindings are kept per pair of roles (the cue's role, the partner's role), and each pair is its own recall channel; the second hop chains two pairs.
+- **The question chooses the relation:** the copy gains can be keyed on the question's form, the last four words with content words wildcarded (`--epi-ctx 4`), instead of the previous word alone. Each channel's gain per form is learned by the same local rule.
+
+Accuracy (half-life 20, gain learning rate 0.03 except the first row):
+
+| Store | Gate on | Person | Object | Who has | All | Bits |
+|---|---|---|---|---|---|---|
+| Plain (above) | previous word | 99.5% | 92.4% | 98.8% | 98.4% | 0.14 |
+| Plain | question form | 99.9% | 94.8% | 98.5% | 99.0% | 0.09 |
+| Learned roles only | previous word | 71.5% | 62.5% | 79.1% | 71.3% | 0.98 |
+| Learned roles only | question form | 76.9% | 63.7% | 78.6% | 75.3% | 0.86 |
+| Plain + learned roles | previous word | 99.5% | 93.1% | 98.9% | 98.5% | 0.10 |
+| **Plain + learned roles** | **question form** | **99.9%** | **94.9%** | **100.0%** | **99.2%** | **0.06** |
+
+What the gates learned (roles only, gated on question form; *[\* .]* is a sentence's first word):
+
+| Question form | Channel opened most | Gain |
+|---|---|---|
+| where is X ? | hop 1 *[\* .]* → *[to the]*: the person's place | +7.9 |
+| who has the X ? | hop 1 *[got the]* → *[\* .]*: who got it | +7.6 |
+| who has the X ? | hop 1 *[up the]* → *[\* .]*: who picked it up | +7.4 |
+| who has the X ? | hop 1 *[gave the]* → *[\* to]*: who it was given to | +3.1 |
+| where is the X ? | hop 2 *[got the]* → *[\* .]*, then *[\* .]* → *[to the]*: the getter's place | +4.8 |
+| where is the X ? | hop 2, the same via *[up the]* | +4.5 |
+
+- **The network finds the relations and which question needs which,** from next-word prediction alone: every strong gate is the right relation for its question form.
+- **But learned roles alone answer less well (75%)** than the plain store (99%). The evidence is spread over dozens of channels, each learning from a fraction of the data, and roles fragment: the first sentence of a story gives its subject the role *[story .]*, separate from *[\* .]*.
+- **Plain and role channels together are best** (99.2%, 0.06 bits per answer): the plain store carries the bulk and the roles sharpen it, mostly on "who has it?" (100%). The differences between the top rows are within what one run can resolve.
+
 ## Findings
 
 1. **A fast one-shot store of clause-level bindings, recalled by cue, lets the network answer questions** about templated stories it has read: 98.4% on three bAbI-style question types, against 38.7% without it and 10.6% for order-2 counts.
 2. **Recall needs a gain that depends on context:** the network learned to open the store's output at the question mark, a thalamus-like gate, with the same local learning rule as everything else.
 3. **Chaining recall (two hops) solves two-fact questions,** and **forgetting fast** keeps old episodes from interfering.
-4. **The remaining errors need roles:** the store binds who and what was in a clause, not in what relation.
+4. **Relations can be learned:** with roles taken from each word's wildcarded left context and the gate keyed on the question's form, the network learned which relation answers which question (where is X → the person's *to the* partner; who has the X → the getter or recipient; where is the X → the getter's place). Alone the learned roles answer 75%; with the plain store, 99.2%.
 
 Caveats: one run per configuration, with no seed variation, on a synthetic, templated task with a 42-word vocabulary; the store is given the content-word split and the clause boundaries.
 
 ## What next
 
-- **Roles:** bind role ⊛ filler (shift-bind) so "dropped" and "gave … to" are told apart from "picked up", first with roles given by word position, then learned.
+- **Roles shared through meaning:** define roles by meaning-code classes rather than exact words, so synonyms ("walked into the") share a role, and test on phrasings held out of training.
 - **Real text:** the same store on Austen, measured on the bits spent on names and places, where knowing who is with whom should pay.
 
 ## Code
 
-`src/episodic.rs` (the store); `brain.rs`: copy channels (`Brain::set_copy`, `copy_gains`); `main.rs`: `wordslots --epi --epi-skip N --epi-bounds ids --epi-half H --epi-k K --epi-hops 1|2`, `--copy-lr`, `--copy-nocontext`, `--dump-bits PREFIX`; `scripts/babi_gen.py`, `scripts/babi_score.py`. Runs: `runs/exp30b/`.
+`src/episodic.rs` (the store; `--epi-roles`, `--epi-both`, `--epi-ctx N`); `brain.rs`: copy channels (`Brain::set_copy`, `copy_gains`); `main.rs`: `wordslots --epi --epi-skip N --epi-bounds ids --epi-half H --epi-k K --epi-hops 1|2`, `--copy-lr`, `--copy-nocontext`, `--dump-bits PREFIX`; `scripts/babi_gen.py`, `scripts/babi_score.py`. Runs: `runs/exp30b/`.
