@@ -687,6 +687,18 @@ pub struct Brain {
     pub story_keys: Option<Vec<u32>>,
     /// Slab indices of the external multi-row edges, in `Cfg::ext_edges` order.
     pub ext: Vec<usize>,
+    /// Copy channels (experiment 30): sets of (symbol, score) supplied from outside each tick (e.g. a
+    /// hippocampal store's recall), added to the logits with a gain that depends on the previous input cell
+    /// (base gain + a learned term per previous cell: a thalamus-like, context-dependent gain).
+    copy_sets: Vec<Vec<(u32, f64)>>,
+    copy_b0: Vec<f64>,
+    copy_w: Vec<HashMap<i32, f64>>,
+    copy_v: Vec<f64>,
+    copy_pos: Vec<Vec<(usize, f64)>>,
+    copy_prev: i32,
+    pub copy_lr: f64,
+    /// Copy channels use one gain for every context (no context-dependent term).
+    pub copy_nocontext: bool,
     pub t: usize,
     pub tt: usize,
     pub cfg: Cfg,
@@ -851,6 +863,14 @@ impl Brain {
             story_g: 1.0,
             story_keys: None,
             ext: vec![],
+            copy_sets: vec![],
+            copy_b0: vec![],
+            copy_w: vec![],
+            copy_v: vec![],
+            copy_pos: vec![],
+            copy_prev: -1,
+            copy_lr: 0.01,
+            copy_nocontext: false,
             t: 0,
             tt,
             cfg: cfg.clone(),
@@ -1471,6 +1491,21 @@ impl Brain {
                 self.slab[e].add_contribution(&mut logits, false);
             }
         }
+        for j in 0..self.copy_sets.len() {
+            let gain = self.copy_b0[j] + self.copy_w[j].get(&self.copy_prev).copied().unwrap_or(0.0);
+            let mut v = std::mem::take(&mut self.copy_pos[j]);
+            v.clear();
+            for &(sym, sc) in &self.copy_sets[j] {
+                if let Some(&c) = self.byte.sym.get(&sym) {
+                    if c < self.pos.len() && self.pos[c] >= 0 {
+                        let pos = self.pos[c] as usize;
+                        logits[pos] += gain * sc;
+                        v.push((pos, sc));
+                    }
+                }
+            }
+            self.copy_pos[j] = v;
+        }
         let mut tsc = vec![];
         for &e in &trials {
             if self.score_edge(e) {
@@ -1567,6 +1602,21 @@ impl Brain {
                 ed.sum += d;
                 ed.sq += d * d;
                 ed.n += 1;
+            }
+            for j in 0..self.copy_pos.len() {
+                // the gain's gradient: the channel's score for the true word minus its expected score
+                let sy: f64 = self.copy_pos[j].iter().filter(|x| x.0 == yi).map(|x| x.1).sum();
+                let e: f64 = self.copy_pos[j].iter().map(|x| p[x.0] * x.1).sum();
+                let g = sy - e;
+                if g == 0.0 {
+                    continue;
+                }
+                self.copy_v[j] = 0.999 * self.copy_v[j] + 0.001 * g * g;
+                let step = self.copy_lr * g / (self.copy_v[j].sqrt() + 1e-4);
+                self.copy_b0[j] += step;
+                if !self.copy_nocontext {
+                    *self.copy_w[j].entry(self.copy_prev).or_insert(0.0) += step;
+                }
             }
             for &e in &kept {
                 self.slab[e].learn_beta(&p, yi, 0.003);
@@ -1672,6 +1722,7 @@ impl Brain {
         self.sm += a * d;
         self.sv = (1.0 - a) * self.sv + a * d * d;
         self.prof[11] += tick0.elapsed().as_secs_f64();
+        self.copy_prev = self.nodes[0].state;
         self.t += 1;
     }
 
@@ -2659,6 +2710,29 @@ impl Brain {
         }
         let e = self.story_edge.unwrap();
         self.slab[e].set = top.iter().map(|&(i, v)| (i, (v / g) as f32)).collect();
+    }
+
+    /// Set copy channel j's (symbol, score) set for this tick, creating the channel if needed.
+    pub fn set_copy(&mut self, j: usize, set: Vec<(u32, f64)>) {
+        while self.copy_sets.len() <= j {
+            self.copy_sets.push(vec![]);
+            self.copy_b0.push(0.0);
+            self.copy_w.push(HashMap::new());
+            self.copy_v.push(0.01);
+            self.copy_pos.push(vec![]);
+        }
+        self.copy_sets[j] = set;
+    }
+
+    /// The copy channels' gains: (base, per previous cell), for reports.
+    pub fn copy_gains(&self) -> Vec<(f64, Vec<(i32, f64)>)> {
+        (0..self.copy_b0.len())
+            .map(|j| {
+                let mut v: Vec<(i32, f64)> = self.copy_w[j].iter().map(|(&k, &x)| (k, x)).collect();
+                v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                (self.copy_b0[j], v)
+            })
+            .collect()
     }
 
     /// Set the rows external edge j reads and writes this tick (row key, weight).

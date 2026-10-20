@@ -653,6 +653,24 @@ fn main() {
             let mut mloss = vec![0.0f64; mlk.len() * mlm.len()];
             let mut b = Brain::new_symbols(vocab, bcfg);
             b.story_keys = Some(ids.clone());
+            // the hippocampal store (experiment 30): --epi, --epi-skip, --epi-bounds ids, --epi-half, --epi-k, --epi-hops
+            let mut epi = if flag(&args, "--epi") {
+                use evolvehd::episodic::{EpiCfg, Episodic};
+                let g = |k: &str, d: &str| arg(&args, k).unwrap_or(d).to_string();
+                Some(Episodic::new(EpiCfg {
+                    skip: g("--epi-skip", "100").parse().unwrap(),
+                    bounds: g("--epi-bounds", "").split(',').filter(|x| !x.is_empty()).map(|x| x.parse().unwrap()).collect(),
+                    half: g("--epi-half", "200").parse().unwrap(),
+                    k: g("--epi-k", "8").parse().unwrap(),
+                    hops: g("--epi-hops", "2").parse().unwrap(),
+                }))
+            } else {
+                None
+            };
+            b.copy_nocontext = flag(&args, "--copy-nocontext");
+            if let Some(x) = arg(&args, "--copy-lr") {
+                b.copy_lr = x.parse().unwrap();
+            }
             let t0 = Instant::now();
             let prog: usize = std::env::var("EVOLVEHD_PROGRESS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
             // the meaning state depends only on the word stream, so it runs on its own thread, a step ahead,
@@ -694,7 +712,15 @@ fn main() {
                         b.set_ext(j, wmc.iter().map(|&x| (x, 1.0)).collect());
                     }
                 }
+                if let Some(ep) = epi.as_ref() {
+                    for (j, set) in ep.recall().into_iter().enumerate() {
+                        b.set_copy(j, set);
+                    }
+                }
                 b.push(mapped[t]);
+                if let Some(ep) = epi.as_mut() {
+                    ep.observe(ids[t]);
+                }
                 if let Some((_, _, qm)) = item {
                     if mean_spell && mapped[t] == other {
                         let (q, qc) = (q_uni[t], q_keep[t]);
@@ -723,6 +749,17 @@ fn main() {
                 }
             }
             });
+            for (j, (b0, w)) in b.copy_gains().into_iter().enumerate() {
+                let top: Vec<String> = w.iter().take(4).map(|(c, x)| format!("cell {c}: {x:+.2}")).collect();
+                eprintln!("copy channel {j}: base gain {b0:+.2}; strongest context gains {}", top.join(", "));
+            }
+            if let Some(p) = arg(&args, "--dump-bits") {
+                // per word: the bits paid (f64 LE) and whether the top prediction was right (u8)
+                let raw: Vec<u8> = b.bits[..n].iter().flat_map(|x| x.to_le_bytes()).collect();
+                std::fs::write(format!("{p}.bits"), raw).unwrap();
+                let hits: Vec<u8> = b.hit[..n].iter().map(|&h| h as u8).collect();
+                std::fs::write(format!("{p}.hits"), hits).unwrap();
+            }
             {
                 let p = &b.prof;
                 let names = ["", "temporal", "synergy", "screen", "check", "scoring", "gains", "writes", "nodes", "run-screens", "matching", "tick"];

@@ -15,6 +15,7 @@ pub mod baseline;
 pub mod bits;
 pub mod brain;
 pub mod edge;
+pub mod episodic;
 pub mod info;
 pub mod meaning;
 pub mod pool;
