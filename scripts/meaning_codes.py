@@ -14,7 +14,7 @@ code is the --k most lit bits. Readouts, both predicting the exact next word:
 --identity: build the story state from identity codes instead of meaning codes (the control: same compression,
 no meaning). Scored as cortex_map.py, beyond the experiment-25 counts system (cortex_base.py).
 usage: meaning_codes.py IDS WORDS.txt BASE.npz OUT [--K 64] [--k 64] [--win 16] [--identity] [--snap 20000]"""
-import sys, math, argparse, json, itertools
+import sys, math, argparse, json, itertools, ctypes
 import numpy as np, scipy.sparse as spm
 ap = argparse.ArgumentParser()
 ap.add_argument('ids'); ap.add_argument('words'); ap.add_argument('base'); ap.add_argument('out')
@@ -53,7 +53,7 @@ def mcode(w):
     kk = min(A.K, int(np.count_nonzero(row)))
     if not A.raw:
         row = row / (Mcol + Mcol.mean() + 1e-9)   # distinctiveness: a bit busy for every word says little
-    return np.argpartition(-row, kk - 1)[:kk]
+    return np.argpartition(-row, kk - 1)[:kk].copy()   # copy: a slice would keep the whole D-wide array alive
 recent = []                                    # last --win content words
 g = 1.0; act = np.zeros(D); code = np.zeros(0, dtype=np.int64); incode = np.zeros(D, dtype=bool)
 rows = np.zeros((D, NW), dtype=np.uint16); nb = np.zeros(D, dtype=np.int64)   # 16-bit counts, saturating
@@ -62,7 +62,7 @@ q_wm = np.zeros(n)
 if A.wm_half > 0:
     wm = np.zeros(D); wm_fade = 2 ** (-1 / A.wm_half); wm_code = np.zeros(0, dtype=np.int64)
     wrows = np.zeros((D, NW), dtype=np.uint16); wnb = np.zeros(D, dtype=np.int64)
-snap = None; snapU = None; snapu = None
+snap = None; snapU = None; snapu = None; snap_ix = snap_ptr = None
 def snapshot():
     """Meaning codes of every word seen so far, as a sparse word x bit matrix, with frequency weights."""
     global snap, snapU, snapu
@@ -76,6 +76,12 @@ def snapshot():
     snap = spm.csr_matrix((np.ones(len(r), dtype=np.float32), (r, c)), shape=(NW, D))
     snapu = fc.astype(np.float64).copy()
     snapU = np.asarray(snap.T @ snapu).ravel()
+    global snap_ix, snap_ptr
+    snap_ix, snap_ptr = snap.indices, snap.indptr
+    try:
+        ctypes.CDLL('libc.so.6').malloc_trim(0)   # hand freed memory back (fragmentation otherwise grows)
+    except OSError:
+        pass
 # demo: record story codes at occurrences of a few words, for the attention demo
 # (the demo records the first 400 occurrences of each word; the story code at an occurrence already includes the
 # word's own meaning code)
@@ -96,9 +102,9 @@ for i in range(n):
     if len(code):
         r = rows[code, w].astype(np.float64); q_bits[i] = ((r + BETA * u_p[i]) / (nb[code] + BETA)).mean()
         if snap is not None and w < snap.shape[0]:
-            row = snap.getrow(w)
-            if row.nnz and snapu[w] > 0:
-                bb = row.indices[incode[row.indices]]
+            ix_ = snap_ix[snap_ptr[w]:snap_ptr[w + 1]]
+            if len(ix_) and snapu[w] > 0:
+                bb = ix_[incode[ix_]]
                 bb = bb[snapU[bb] > 0]
                 q_mean[i] = (snapu[w] / snapU[bb]).sum() / len(code)
     else:
