@@ -14,12 +14,23 @@ ids = np.fromfile(sys.argv[1], dtype=np.uint32).astype(np.int64); n = len(ids)
 info = json.load(open(sys.argv[2])); ans = [(p, k) for p, k in info['answers'] if p >= n // 2]
 kinds = ['where-person', 'where-object', 'who-has']
 kind_of = dict(ans)
+newq = set(info.get('newq', [])); newf = set(info.get('newfact', []))
 def report(name, bits_at, hit_at):
     row = [f"{name:<34}"]
     for k in kinds + ['all']:
         ps = [p for p, kk in ans if k == 'all' or kk == k]
         acc = np.mean([hit_at(p) for p in ps]); b = np.mean([bits_at(p) for p in ps])
         row.append(f"{k} {acc:5.1%} {b:5.2f}b")
+    if newq or newf:
+        for lab, sel in (("new question form", newq), ("new verb in the fact", newf),
+                         ("old phrasing only", None)):
+            ps = [p for p, _ in ans if (p in sel if sel is not None else (p not in newq and p not in newf))]
+            if ps:
+                row.append(f"{lab} {np.mean([hit_at(p) for p in ps]):5.1%} ({len(ps)})")
+        # how soon a new phrasing is handled: its first 20 / 100 / 500 occurrences (in stream order)
+        for lab, sel in (("new form, first", newq), ("new verb, first", newf)):
+            ps = sorted(p for p, _ in ans if p in sel)
+            row.append(f"{lab} " + "/".join(f"{np.mean([hit_at(p) for p in ps[:m]]):.0%}" for m in (20, 100, 500)))
     print("  ".join(row), flush=True)
 print(f"{len(ans)} questions scored (second half); accuracy and bits per answer")
 if len(sys.argv) > 3:

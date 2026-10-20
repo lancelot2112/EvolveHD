@@ -666,7 +666,13 @@ fn main() {
                     roles: flag(&args, "--epi-roles") || flag(&args, "--epi-both"),
                     both: flag(&args, "--epi-both"),
                     ctx_words: g("--epi-ctx", "0").parse().unwrap(),
-                }))
+                    mclass: flag(&args, "--epi-mclass"),
+                    mdim: g("--epi-mdim", "14336").parse().unwrap(),
+                    mbar: g("--epi-mbar", "0.5").parse().unwrap(),
+                    learned: flag(&args, "--epi-learned"),
+                    win: g("--epi-win", "8").parse().unwrap(),
+                    cue: g("--epi-cue", "6").parse().unwrap(),
+                }).with_meaning(*ids.iter().max().unwrap() as usize + 1))
             } else {
                 None
             };
@@ -716,7 +722,7 @@ fn main() {
                     }
                 }
                 if let Some(ep) = epi.as_mut() {
-                    let sets = if ep.cfg.both { ep.recall_both() } else if ep.cfg.roles { ep.recall_roles() } else { ep.recall() };
+                    let sets = if ep.cfg.learned { ep.recall_learned() } else if ep.cfg.both { ep.recall_both() } else if ep.cfg.roles { ep.recall_roles() } else { ep.recall() };
                     for (j, set) in sets.into_iter().enumerate() {
                         b.set_copy(j, set);
                     }
@@ -761,7 +767,7 @@ fn main() {
             for (j, (b0, w)) in b.copy_gains().into_iter().enumerate() {
                 let top: Vec<String> = w.iter().take(3).map(|(c, x)| format!("cell {c}: {x:+.2}")).collect();
                 let lab = match epi.as_ref() {
-                    Some(ep) if ep.cfg.roles && j < ep.chan_names.len() + if ep.cfg.both { ep.cfg.hops } else { 0 } => ep.chan_label(j, &vocab_txt),
+                    Some(ep) if (ep.cfg.roles || ep.cfg.learned) && j < ep.chan_names.len() + if ep.cfg.both || ep.cfg.learned { ep.cfg.hops } else { 0 } => ep.chan_label(j, &vocab_txt),
                     _ => format!("channel {j}"),
                 };
                 let best = w.first().map(|x| x.1).unwrap_or(0.0);

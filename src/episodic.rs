@@ -7,6 +7,7 @@
 //! binding (summed over cue words), cue words themselves excluded. A second hop follows the strongest partners
 //! one step further (apple -> john -> office). Each hop's k strongest partners, normalised to sum to 1, are
 //! offered to the word level as a copy channel (`Brain::set_copy`).
+use crate::meaning::{Meaning, MeaningCfg};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
@@ -27,6 +28,80 @@ pub struct EpiCfg {
     pub both: bool,
     /// Words of (wildcarded) context in the copy gains' context key; 0 = the brain's previous cell.
     pub ctx_words: usize,
+    /// Roles and gate contexts as meaning classes: the context's words' meaning codes (learned online, every
+    /// word, in `mdim` bits), rotated by position and ORed, matched to prototypes (overlap >= `mbar`, else a
+    /// new class is recruited); instead of exact word contexts.
+    pub mclass: bool,
+    pub mdim: usize,
+    pub mbar: f64,
+    /// Fully learned mode: no content-word split, no clause boundaries, no wildcards. Each word is bound to the
+    /// words of a fading window before it (`win` words), the cue is the last `cue` words, roles and gates are
+    /// meaning classes over all words, and each word's recall weight is learned from whether recalling it
+    /// predicted the next word.
+    pub learned: bool,
+    pub win: usize,
+    pub cue: usize,
+}
+
+/// Online classes of codes: each prototype is the strongest bits of the counts of the codes it matched.
+struct Classes {
+    d: usize,
+    counts: Vec<Vec<f32>>,
+    members: Vec<Vec<bool>>,
+    size: Vec<usize>,
+    seen: Vec<u32>,
+    bar: f64,
+}
+
+impl Classes {
+    fn new(d: usize, bar: f64) -> Self {
+        Classes { d, counts: vec![], members: vec![], size: vec![], seen: vec![], bar }
+    }
+    /// The class of a code (bit positions), learning from it.
+    fn assign(&mut self, code: &[u32]) -> u32 {
+        if code.is_empty() {
+            return u32::MAX;
+        }
+        let mut best = (0.0, usize::MAX);
+        for (j, m) in self.members.iter().enumerate() {
+            let ov = code.iter().filter(|&&b| m[b as usize]).count() as f64 / code.len().max(self.size[j]) as f64;
+            if ov > best.0 {
+                best = (ov, j);
+            }
+        }
+        let j = if best.1 != usize::MAX && best.0 >= self.bar {
+            best.1
+        } else {
+            self.counts.push(vec![0.0; self.d]);
+            self.members.push(vec![false; self.d]);
+            self.size.push(0);
+            self.seen.push(0);
+            self.counts.len() - 1
+        };
+        for &b in code {
+            self.counts[j][b as usize] += 1.0;
+        }
+        // the prototype is re-read from its counts every 32 assignments (and at first)
+        self.seen[j] += 1;
+        if self.seen[j] > 1 && self.seen[j] % 32 != 0 {
+            return j as u32;
+        }
+        // the prototype: the code-sized set of its most counted bits
+        let k = code.len();
+        let c = &self.counts[j];
+        let mut idx: Vec<u32> = (0..self.d as u32).filter(|&i| c[i as usize] > 0.0).collect();
+        if idx.len() > k {
+            idx.select_nth_unstable_by(k - 1, |&a, &b| c[b as usize].total_cmp(&c[a as usize]));
+            idx.truncate(k);
+        }
+        let m = &mut self.members[j];
+        m.iter_mut().for_each(|x| *x = false);
+        for &b in &idx {
+            m[b as usize] = true;
+        }
+        self.size[j] = idx.len();
+        j as u32
+    }
 }
 
 pub struct Episodic {
@@ -47,6 +122,15 @@ pub struct Episodic {
     pair_ids: HashMap<(u32, u32), u32>,
     pub pair_names: Vec<(u32, u32)>,
     hist: Vec<u32>,
+    mn: Option<Meaning>,
+    role_cls: Option<Classes>,
+    gate_cls: Option<Classes>,
+    wild_code: Vec<u32>,
+    gate_now: Option<i32>,
+    // learned mode
+    recent: Vec<(u32, u32, u64)>,
+    uw: Vec<f64>,
+    last_q: HashMap<u32, f64>,
 }
 
 impl Episodic {
@@ -67,13 +151,61 @@ impl Episodic {
             pair_ids: HashMap::new(),
             pair_names: vec![],
             hist: vec![],
+            mn: None,
+            role_cls: None,
+            gate_cls: None,
+            wild_code: vec![],
+            gate_now: None,
+            recent: vec![],
+            uw: vec![],
+            last_q: HashMap::new(),
         }
+    }
+
+    /// Turn on meaning classes (needs the vocabulary size).
+    pub fn with_meaning(mut self, nw: usize) -> Self {
+        self.uw = vec![1.0; nw];
+        if self.cfg.mclass || self.cfg.learned {
+            let mut mc = MeaningCfg::default();
+            mc.d = self.cfg.mdim;
+            mc.skip = 0;
+            mc.seed = 7;
+            self.wild_code = crate::rng::Rng::new(11).choose_distinct(mc.d, mc.k_word).into_iter().map(|x| x as u32).collect();
+            self.mn = Some(Meaning::new(mc, nw));
+            self.role_cls = Some(Classes::new(self.cfg.mdim, self.cfg.mbar));
+            self.gate_cls = Some(Classes::new(self.cfg.mdim, self.cfg.mbar));
+        }
+        self
+    }
+
+    /// The code of a context: each word's meaning code (content words: the wildcard's), rotated by its distance
+    /// back, ORed.
+    fn ctx_code(&mut self, words: &[u32]) -> Vec<u32> {
+        let d = self.cfg.mdim;
+        let mut out: Vec<u32> = vec![];
+        for (back, &w) in words.iter().rev().enumerate() {
+            let c = if !self.cfg.learned && w >= self.cfg.skip && w < u32::MAX - 1 {
+                self.wild_code.clone()
+            } else if w >= u32::MAX - 1 {
+                continue
+            } else {
+                self.mn.as_mut().unwrap().code_or_ident(w)
+            };
+            let rot = (back * 7919) % d;
+            out.extend(c.iter().map(|&b| ((b as usize + rot) % d) as u32));
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// The copy gains' context: the last `ctx_words` words, content words wildcarded, as one key.
     pub fn ctx_key(&self) -> Option<i32> {
         if self.cfg.ctx_words == 0 {
             return None;
+        }
+        if self.cfg.mclass || self.cfg.learned {
+            return self.gate_now;
         }
         let mut h: u64 = 1469598103934665603;
         for &w in self.hist.iter().rev().take(self.cfg.ctx_words) {
@@ -115,6 +247,19 @@ impl Episodic {
         if self.hist.len() > 16 {
             self.hist.remove(0);
         }
+        if self.cfg.learned {
+            self.observe_learned(w);
+            return;
+        }
+        if self.cfg.mclass {
+            self.mn.as_mut().unwrap().observe(w);
+            if self.cfg.ctx_words > 0 {
+                let n = self.hist.len();
+                let last: Vec<u32> = self.hist[n.saturating_sub(self.cfg.ctx_words)..].to_vec();
+                let code = self.ctx_code(&last);
+                self.gate_now = Some(self.gate_cls.as_mut().unwrap().assign(&code) as i32);
+            }
+        }
         if self.cfg.roles {
             self.observe_roles(w);
             return;
@@ -136,9 +281,129 @@ impl Episodic {
         }
     }
 
+    fn observe_learned(&mut self, w: u32) {
+        // learn each recalled word's weight: up if it was the word that came, down otherwise
+        let q = std::mem::take(&mut self.last_q);
+        for (b, qb) in q {
+            let target = if b == w { 1.0 } else { 0.0 };
+            let u = &mut self.uw[b as usize];
+            *u = (*u * (0.05 * (target - qb)).exp()).clamp(1e-3, 10.0);
+        }
+        self.mn.as_mut().unwrap().observe(w);
+        // the word's role: the meaning class of the two words before it
+        let n = self.hist.len();
+        let ctx: Vec<u32> = self.hist[n.saturating_sub(3)..n - 1].to_vec();
+        let code = self.ctx_code(&ctx);
+        let c = self.role_cls.as_mut().unwrap().assign(&code);
+        let r = self.intern_role((c, u32::MAX - 2));
+        // bind it to the words of the window before it, both ways
+        let t = self.t;
+        let recent = self.recent.clone();
+        for &(b, rb, _) in recent.iter().rev().take(self.cfg.win) {
+            if b != w {
+                let p1 = self.intern_pair((rb, r));
+                self.rlinks.entry(b).or_default().insert((w, p1), t);
+                let p2 = self.intern_pair((r, rb));
+                self.rlinks.entry(w).or_default().insert((b, p2), t);
+            }
+        }
+        self.recent.push((w, r, t));
+        if self.recent.len() > 64 {
+            self.recent.remove(0);
+        }
+        // the gate's context class: the last `ctx_words` words
+        if self.cfg.ctx_words > 0 {
+            let last: Vec<u32> = self.hist[n.saturating_sub(self.cfg.ctx_words)..].to_vec();
+            let code = self.ctx_code(&last);
+            self.gate_now = Some(self.gate_cls.as_mut().unwrap().assign(&code) as i32);
+        }
+    }
+
+    /// Learned-mode recall: cue = the last `cue` words; partners weighted by binding strength and their learned
+    /// recall weight; a plain channel per hop plus one channel per role pair (and chain).
+    pub fn recall_learned(&mut self) -> Vec<Vec<(u32, f64)>> {
+        let mut cue: Vec<u32> = self.recent.iter().rev().take(self.cfg.cue).map(|x| x.0).collect();
+        cue.sort_unstable();
+        cue.dedup();
+        let mut plain: Vec<HashMap<u32, f64>> = vec![HashMap::new(); self.cfg.hops];
+        let mut chans: HashMap<u32, HashMap<u32, f64>> = HashMap::new();
+        let mut hop1: Vec<(u32, u32, f64)> = vec![];
+        for &a in &cue {
+            if let Some(m) = self.rlinks.get(&a) {
+                for (&(b, pr), &tb) in m {
+                    let st = self.strength(tb) * self.uw[b as usize];
+                    if !cue.contains(&b) && st > 1e-12 {
+                        hop1.push((b, pr, st));
+                    }
+                }
+            }
+        }
+        for &(b, pr, st) in &hop1 {
+            let e = plain[0].entry(b).or_insert(0.0);
+            *e = e.max(st);
+            let c = self.intern_chan((1, pr, u32::MAX));
+            *chans.entry(c).or_default().entry(b).or_insert(0.0) += st;
+        }
+        if self.cfg.hops >= 2 {
+            let mut v: Vec<(u32, f64)> = plain[0].iter().map(|(&b, &x)| (b, x)).collect();
+            v.sort_unstable_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
+            v.truncate(self.cfg.k);
+            let s: f64 = v.iter().map(|x| x.1).sum();
+            for (b, wb) in v {
+                if s <= 0.0 {
+                    break;
+                }
+                let links: Vec<((u32, u32), u64)> = match self.rlinks.get(&b) {
+                    Some(m) => m.iter().map(|(&k, &t)| (k, t)).collect(),
+                    None => continue,
+                };
+                for ((c, _pr2), tc) in links {
+                    if !cue.contains(&c) && c != b {
+                        let st = wb / s * self.strength(tc) * self.uw[c as usize];
+                        *plain[1].entry(c).or_insert(0.0) += st;
+                    }
+                }
+            }
+        }
+        let norm = |m: HashMap<u32, f64>, k: usize| -> Vec<(u32, f64)> {
+            let mut v: Vec<(u32, f64)> = m.into_iter().filter(|x| x.1 > 1e-12).collect();
+            v.sort_unstable_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));
+            v.truncate(k);
+            let s: f64 = v.iter().map(|x| x.1).sum();
+            if s > 0.0 {
+                v.iter_mut().for_each(|x| x.1 /= s);
+            }
+            v
+        };
+        let mut out: Vec<Vec<(u32, f64)>> = vec![];
+        let k = self.cfg.k;
+        for m in plain {
+            out.push(norm(m, k));
+        }
+        // what was recalled (summed over the plain channels), for learning the recall weights
+        self.last_q.clear();
+        for v in &out {
+            for &(b, x) in v {
+                *self.last_q.entry(b).or_insert(0.0) += x / out.len() as f64;
+            }
+        }
+        let mut roles = vec![vec![]; self.chan_ids.len()];
+        for (ch, m) in chans {
+            roles[ch as usize] = norm(m, k);
+        }
+        out.extend(roles);
+        out
+    }
+
     fn observe_roles(&mut self, w: u32) {
         if w >= self.cfg.skip {
-            let r = self.intern_role((self.wild(self.ctx.0), self.wild(self.ctx.1)));
+            let r = if self.cfg.mclass {
+                let code = self.ctx_code(&[self.ctx.0, self.ctx.1]);
+                let c = self.role_cls.as_mut().unwrap().assign(&code);
+                self.intern_role((c, u32::MAX - 2))
+            } else {
+                self.intern_role((self.wild(self.ctx.0), self.wild(self.ctx.1)))
+            };
             self.rcur.push((w, r));
         }
         self.ctx = (self.ctx.1, w);
@@ -248,7 +513,7 @@ impl Episodic {
                         Some(m) => m.iter().map(|(&k, &t)| (k, t)).collect(),
                         None => continue,
                     };
-                    for ((c, pr2), tc) in links {
+                    for ((c, _pr2), tc) in links {
                         if !cue.contains(&c) && c != b {
                             let ch = self.intern_chan((2, pr1, pr2));
                             *chans.entry(ch).or_default().entry(c).or_insert(0.0) += wb * self.strength(tc);
@@ -273,7 +538,7 @@ impl Episodic {
 
     /// A readable name for channel j, given the vocabulary.
     pub fn chan_label(&self, j: usize, vocab: &[String]) -> String {
-        let j = if self.cfg.both {
+        let j = if self.cfg.both || self.cfg.learned {
             if j < self.cfg.hops {
                 return format!("plain hop{}", j + 1);
             }
@@ -282,7 +547,10 @@ impl Episodic {
             j
         };
         let w = |x: u32| if x == u32::MAX { "*".to_string() } else { vocab.get(x as usize).cloned().unwrap_or_else(|| x.to_string()) };
-        let role = |r: u32| { let (a, b) = self.role_names[r as usize]; format!("[{} {}]", w(a), w(b)) };
+        let role = |r: u32| {
+            let (a, b) = self.role_names[r as usize];
+            if b == u32::MAX - 2 { format!("[class {a}]") } else { format!("[{} {}]", w(a), w(b)) }
+        };
         let pair = |p: u32| { let (a, b) = self.pair_names[p as usize]; format!("{}->{}", role(a), role(b)) };
         let (h, p1, p2) = self.chan_names[j];
         if h == 1 { format!("hop1 {}", pair(p1)) } else { format!("hop2 {} then {}", pair(p1), pair(p2)) }

@@ -153,6 +153,11 @@ impl Meaning {
         }
     }
 
+    /// A word's meaning code, or its random identity code while it has none.
+    pub fn code_or_ident(&mut self, w: u32) -> Vec<u32> {
+        self.mcode(w).unwrap_or_else(|| self.ident[w as usize].clone())
+    }
+
     /// A word's meaning code: its `k_word` most distinctive bits, or None if it has none yet.
     pub fn mcode(&mut self, w: u32) -> Option<Vec<u32>> {
         if w < self.cfg.skip {
