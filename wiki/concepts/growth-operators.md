@@ -70,3 +70,7 @@ A candidate edge from a constant source whose one writer-mask row holds about th
 [06 · growth interfaces](../experiments/06-growth-interfaces.md) · [07 · graph growth](../experiments/07-graph-growth.md) · [08 · bootstrapping](../experiments/08-bootstrapping.md) · [10 · full primitives](../experiments/10-full-primitives.md) · [11 · real text](../experiments/11-real-text.md) · [12 · words](../experiments/12-words.md) · [13 · word pairs](../experiments/13-word-pairs.md) · [20 · fair screens](../experiments/20-fair-screens.md)
 
 *[All concepts](README.md) · [Wiki home](../README.md)*
+
+## Story state
+
+A kept edge whose rows are keyed by the most salient recent content words, salience decaying with a half-life (`--story K`); it scores the salience-weighted mean of its rows and writes one row per word (`--story-write1`). The same memory of recent words names the words outside the vocabulary when the word level predicts "other" (`--keep-half`). Keyed by the 512 vocabulary words only it gained nothing ([24](../experiments/24-story-state.md)); keyed by word id, with the words outside the vocabulary as keys and naming them, it gains 0.30 bits per exact word on the whole corpus ([25](../experiments/25-kept-words.md)).

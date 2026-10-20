@@ -28,6 +28,7 @@ Every simulation so far, oldest first. Each page gives the question, setup, the 
 | 22 | [Fusing units into codes instead of slots](22-fusion.md) | Oct 18 | Fusion is a superposition of role-rotated parts (no thinning, no XOR; 2,048 bits hold about 8 parts). A phrase level fed fused codes still learns no sequence: what looked like learning is matched by a unigram that forgets. Single-winner cells are slots in disguise; using the overlap likely needs a readout over the code's parts |
 | 23 | [A factored phrase readout, tested with counts first](23-factored-readout-gate.md) | Oct 19 | With exact counts, a readout over the previous phrase's parts adds only 0.003 bits per word beyond the words 2 and 3 back, which the word level already reaches; not built |
 | 24 | [A story state for the word level](24-story-state.md) | Oct 19 | An edge keyed by salient recent content words: no net gain on the whole corpus (4.705 against 4.702); its contribution fades, and 512 words hide most of what carries |
+| 25 | [Keeping the words outside the vocabulary](25-kept-words.md) | Oct 19 | Scored on the exact word, the word level gains 0.30 bits per word on the whole corpus (8.395 → 8.098): a memory of recent words names "other" words, and as story keys they make the story edge work; temporary slots make things worse |
 
 The rules these results forced are collected in [lessons](../lessons.md); the ideas behind them are in [concepts](../concepts/README.md); terms are in the [glossary](../glossary.md).
 

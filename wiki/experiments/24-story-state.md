@@ -1,6 +1,6 @@
 # 24 · A story state for the word level (2026-10-19)
 
-*[All experiments](README.md)* · [← 23](23-factored-readout-gate.md)
+*[All experiments](README.md)* · [← 23](23-factored-readout-gate.md) · [25 →](25-kept-words.md)
 
 **Concepts:** [Writer-mask readout](../concepts/writer-mask-readout.md) · [Growth operators](../concepts/growth-operators.md#recency) · [Stepping stones](../concepts/stepping-stones.md)
 
