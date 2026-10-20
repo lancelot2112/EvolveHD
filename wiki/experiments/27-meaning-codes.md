@@ -1,6 +1,6 @@
 # 27 · Meaning codes in 2,048 bits (2026-10-20)
 
-*[All experiments](README.md)* · [← 26](26-word-map.md)
+*[All experiments](README.md)* · [← 26](26-word-map.md) · [28 →](28-width-fast-working-memory.md)
 
 **Concepts:** [Sparse codes](../concepts/sparse-codes.md) · [Shift-bind](../concepts/shift-bind.md) · [Growth operators](../concepts/growth-operators.md#story-state)
 

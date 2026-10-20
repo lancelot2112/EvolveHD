@@ -21,12 +21,12 @@ Meaning codes keep 64 bits per word at every width, so wider spaces are sparser.
 | 2,048 | 0.297 (0.031) | +0.101 | +0.117 | +0.226 | +0.127 |
 | 4,096 | 0.293 (0.028) | +0.112 | +0.158 | +0.252 | +0.129 |
 | 8,192 | 0.285 (0.028) | +0.123 | +0.203 | +0.277 | +0.132 |
-| 14,336 | | | | | |
+| **14,336** | not measured | **+0.147** | **+0.277** | **+0.365** | +0.134 |
 | *Random codes, 2,048 / 8,192 / 14,336* | | *+0.080 / +0.095 / +0.103* | *+0.038 / +0.076 / +0.090* | *+0.165 / +0.189 / +0.195* | |
 | *Story edge ([25](25-kept-words.md))* | | *+0.130* | *+0.171* | *+0.270* | |
 
-- **Wider is better for the compressed readout,** steadily: each doubling adds about 0.01 bits per word, and at 8,192 bits the code rows come within 0.007 of the story edge and beat it on rare words.
-- **Meaning's margin over random codes grows with width** (+0.021 at 2,048, +0.028 at 8,192).
+- **Wider is better for the compressed readout, and the trend steepens:** each doubling from 1,024 to 8,192 bits adds about 0.01 bits per word; going to 14,336 adds 0.024. At 14,336 bits the code rows alone beat the story edge (+0.147 against +0.130), on rare words by 0.11. With the story edge and the meaning readout they reach +0.150.
+- **Meaning's margin over random codes grows with width** (+0.021 at 2,048, +0.028 at 8,192, +0.044 at 14,336).
 - **Grouping doesn't change with width:** locality stays at 0.29 to 0.30. At 8,192 bits the neighbour lists are more specific ("church": jesus, paul, grace, saints, gospel; "emma": emma's, elton, weston, palmer, cole, hartfield, perry, knightley).
 
 ## 2. Fast mapping
@@ -73,11 +73,11 @@ Width 8,192, fast mapping 20, working memory half-life 4, whole corpus:
 
 **Together they add +0.040 bits per word beyond the story edge** (8.672 → 8.502 bits per exact word, against 8.542 with the story edge alone). At this width the working memory alone matches the story edge (+0.129). The pieces now complement each other: the story edge for what the story keeps saying, fast-mapped meaning for rare words, working memory for words new to the story.
 
-Caveats: one run per configuration; mixture weights are chosen on a coarse grid on the first fifth of the second half. Readout counts are 16-bit, saturating, in the 8,192-bit combined run and the 14,336-bit runs (32-bit elsewhere); saturation could only lower the probability given to the commonest words, so it can only understate those readouts. The combined run was not rerun at 2,048 bits, so how much of its gain is width and how much the combination is not separated.
+Caveats: one run per configuration; mixture weights are chosen on a coarse grid on the first fifth of the second half. Readout counts are 16-bit, saturating, in the 8,192-bit combined run and the 14,336-bit runs (32-bit elsewhere); in the 14,336-bit meaning run 8 entries hit the cap. Saturation could only lower the probability given to the commonest words, so it can only understate those readouts. The 14,336-bit runs did not measure locality (no report). The combined run was not rerun at 2,048 bits, so how much of its gain is width and how much the combination is not separated.
 
 ## Findings
 
-1. **Wider codes help the compressed readout,** about +0.01 bits per word per doubling from 1,024 to 8,192 bits, and widen meaning's lead over random codes. Grouping quality stays the same.
+1. **Wider codes help the compressed readout, increasingly:** about +0.01 bits per word per doubling up to 8,192 bits, then +0.024 to 14,336, where the code rows alone beat the story edge (+0.147 against +0.130). Meaning's lead over random codes widens with width; grouping quality stays the same. Where it levels off is not yet known.
 2. **Fast mapping works:** binding a new word to the story it appeared in more than doubles the gain on rare words, at a small cost in grouping.
 3. **A short working memory helps, but as a bag, not a sequence,** through this readout.
 4. **Combined, at 8,192 bits, they add 0.040 bits per word beyond the story edge,** the first clear gain beyond it.
