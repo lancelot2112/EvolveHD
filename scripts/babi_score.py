@@ -4,8 +4,8 @@ run's per-word dump (wordslots --dump-bits PREFIX, or any PREFIX.bits f64 + PREF
 reference models:
   chance among the 8 candidates of the right kind (places or names)
   order-2 Witten-Bell counts (prequential)
-  recency rule (hand-written, for reference): the place in the latest sentence naming the person (where-person),
-           the last-mentioned holder or the place of the object's last mention (where-object, who-has)
+  tracking rule (hand-written, for reference): follows each person's place and each object's holder and place
+           through the story, and answers from that state
 usage: babi_score.py IDS INFO.json [PREFIX ...]"""
 import sys, json, math
 import numpy as np
@@ -13,6 +13,7 @@ from collections import Counter, defaultdict
 ids = np.fromfile(sys.argv[1], dtype=np.uint32).astype(np.int64); n = len(ids)
 info = json.load(open(sys.argv[2])); ans = [(p, k) for p, k in info['answers'] if p >= n // 2]
 kinds = ['where-person', 'where-object', 'who-has']
+kind_of = dict(ans)
 def report(name, bits_at, hit_at):
     row = [f"{name:<34}"]
     for k in kinds + ['all']:
@@ -26,7 +27,7 @@ if len(sys.argv) > 3:
         bits = np.fromfile(pre + ".bits", dtype='<f8'); hits = np.fromfile(pre + ".hits", dtype=np.uint8)
         report(pre.split('/')[-1], lambda p: bits[p], lambda p: hits[p])
     sys.exit()
-report("chance among the 8 candidates", lambda p: 3.0, lambda p: 1 / 8)
+report("chance (8 places; 4 people per story)", lambda p: 2.0 if kind_of[p] == "who-has" else 3.0, lambda p: 0.25 if kind_of[p] == "who-has" else 1 / 8)
 # order-2 WB, prequential
 V = int(ids.max()) + 1
 def wb(c, tot, y, base):
@@ -77,4 +78,4 @@ for i in range(n):
         if ns and ps:
             for o, h in holder.items():
                 if h == ns[0]: obj_place[o] = ps[0]
-report("recency rule (hand-written)", lambda p: 0.0, lambda p: rhit[p])
+report("tracking rule (hand-written)", lambda p: 0.0, lambda p: rhit[p])

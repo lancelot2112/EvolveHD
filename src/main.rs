@@ -653,7 +653,7 @@ fn main() {
             let mut mloss = vec![0.0f64; mlk.len() * mlm.len()];
             let mut b = Brain::new_symbols(vocab, bcfg);
             b.story_keys = Some(ids.clone());
-            // the hippocampal store (experiment 30): --epi, --epi-skip, --epi-bounds ids, --epi-half, --epi-k, --epi-hops
+            // the hippocampal store (experiment 31): --epi, --epi-skip, --epi-bounds ids, --epi-half, --epi-k, --epi-hops
             let mut epi = if flag(&args, "--epi") {
                 use evolvehd::episodic::{EpiCfg, Episodic};
                 let g = |k: &str, d: &str| arg(&args, k).unwrap_or(d).to_string();

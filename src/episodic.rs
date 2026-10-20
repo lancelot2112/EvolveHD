@@ -1,4 +1,4 @@
-//! A hippocampal store (experiment 30): fast, one-shot bindings between the content words of each clause,
+//! A hippocampal store (experiment 31): fast, one-shot bindings between the content words of each clause,
 //! recalled by cue.
 //!
 //! At every clause boundary, each pair of content words in the clause is bound (both directions), stamped with

@@ -687,7 +687,7 @@ pub struct Brain {
     pub story_keys: Option<Vec<u32>>,
     /// Slab indices of the external multi-row edges, in `Cfg::ext_edges` order.
     pub ext: Vec<usize>,
-    /// Copy channels (experiment 30): sets of (symbol, score) supplied from outside each tick (e.g. a
+    /// Copy channels (experiment 31): sets of (symbol, score) supplied from outside each tick (e.g. a
     /// hippocampal store's recall), added to the logits with a gain that depends on the previous input cell
     /// (base gain + a learned term per previous cell: a thalamus-like, context-dependent gain).
     copy_sets: Vec<Vec<(u32, f64)>>,

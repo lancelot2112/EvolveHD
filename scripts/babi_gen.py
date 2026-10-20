@@ -1,4 +1,4 @@
-"""Synthetic reading-comprehension stories (bAbI-style) as a word stream, for experiment 30.
+"""Synthetic reading-comprehension stories (bAbI-style) as a word stream, for experiment 31.
 
 People move between places and pick up, drop and hand over objects; questions are asked along the way and the
 answer is the word right after the question mark, so a next-word predictor answers by predicting it.
