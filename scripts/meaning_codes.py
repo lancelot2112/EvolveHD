@@ -23,12 +23,16 @@ ap.add_argument('--win', type=int, default=16); ap.add_argument('--identity', ac
 ap.add_argument('--snap', type=int, default=20000); ap.add_argument('--half', type=float, default=200.0)
 ap.add_argument('--report', type=int, default=1)
 ap.add_argument('--raw', action='store_true')   # choose meaning bits by raw count instead of by distinctiveness
+ap.add_argument('--D', type=int, default=2048)   # width of the space
+# fast mapping (hippocampal): on each of a word's first --fast-n occurrences, add the story code lit at that moment
+# to its counters with this weight per bit, so a new word starts out meaning what the story is about
+ap.add_argument('--fast', type=float, default=0.0); ap.add_argument('--fast-n', type=int, default=8)
 A = ap.parse_args()
 rng = np.random.default_rng(1)
 ids = np.fromfile(A.ids, dtype=np.uint32).astype(np.int64); n = len(ids)
 words = open(A.words, encoding='latin-1').read().split('\n')
 B = np.load(A.base); p_base, q_story, u_p = B['p_base'], B['q_story'], B['u_p']
-NW = int(ids.max()) + 1; SKIP = 100; D = 2048; CK = 32; BETA = 256.0
+NW = int(ids.max()) + 1; SKIP = 100; D = A.D; CK = 32; BETA = 256.0
 ident = np.stack([rng.choice(D, CK, replace=False) for _ in range(NW)])   # identity codes
 # the control's codes: random, the same size as a meaning code (K bits), for content words only
 ident_k = np.stack([rng.choice(D, A.K, replace=False) for _ in range(NW)]) if A.identity else None
@@ -92,6 +96,8 @@ for i in range(n):
                 wc = math.log(ctot / fc[c_]) + 1e-3
                 M[w, ident[c_]] += wc; M[c_, ident[w]] += wt_w
                 Mcol[ident[c_]] += wc; Mcol[ident[w]] += wt_w
+        if A.fast > 0 and not A.identity and fc[w] <= A.fast_n and len(code):
+            M[w, code] += A.fast; Mcol[code] += A.fast
         recent.append(w)
         if len(recent) > A.win: recent.pop(0)
         m = mcode(w)
@@ -152,7 +158,7 @@ def neighbours(vec_bits, k=12, exclude=()):
         res.append(int(pool[j]))
         if len(res) == k: break
     return res
-lines.append(f"Meaning codes: {A.K} bits of 2,048 per word ({'raw counts' if A.raw else 'distinctive bits'}); {len(pool)} content words seen 20+ times.")
+lines.append(f"Meaning codes: {A.K} bits of {D} per word ({'raw counts' if A.raw else 'distinctive bits'}); {len(pool)} content words seen 20+ times.")
 lines.append("\nNearest words by shared meaning bits:")
 for s in ['whale', 'sea', 'ship', 'king', 'god', 'love', 'heart', 'horse', 'sword', 'gold', 'rabbit', 'emma', 'brutus',
           'dinner', 'money', 'tree', 'river', 'night', 'war', 'church', 'letter', 'jump', 'light', 'spring', 'fire']:
