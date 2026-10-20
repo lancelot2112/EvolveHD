@@ -386,6 +386,9 @@ impl Edge {
         }
         if self.multi {
             let (cur, mut set) = (self.cur, self.set.clone());
+            if set.is_empty() {
+                return;
+            }
             if self.write_one {
                 let tot: f32 = set.iter().map(|x| x.1).sum();
                 let mut u = rng.f64() as f32 * tot;

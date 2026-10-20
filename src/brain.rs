@@ -106,6 +106,10 @@ pub struct Cfg {
     pub story: usize,
     pub story_half: f64,
     pub story_skip: usize,
+    /// Learned content: select story keys by burstiness, salience over the salience a key would have at its
+    /// long-run rate, keeping those above 1 (so frequent words such as "." or "the" fall out without a
+    /// hand-set cutoff), and weight rows by that ratio.
+    pub story_burst: bool,
     /// Story rows age (halve) every this many writes (0 = never), and write one row per update.
     pub story_age: u32,
     pub story_write1: bool,
@@ -202,6 +206,7 @@ impl Default for Cfg {
             story: 0,
             story_half: 200.0,
             story_skip: 100,
+            story_burst: false,
             story_age: 0,
             story_write1: false,
             ext_edges: vec![],
@@ -682,6 +687,8 @@ pub struct Brain {
     story_edge: Option<usize>,
     story_sal: std::collections::BTreeMap<u32, f64>,   // ordered, so runs are reproducible
     story_g: f64,
+    story_cnt: HashMap<u32, f64, crate::info::FxBuild>,
+    story_tot: f64,
     /// Story keys per tick (e.g. full word ids, so words outside the vocabulary are keys too); content keys
     /// are those >= `story_skip`. Without them the key is the symbol, and "other" is the last symbol.
     pub story_keys: Option<Vec<u32>>,
@@ -863,6 +870,8 @@ impl Brain {
             story_edge: None,
             story_sal: std::collections::BTreeMap::new(),
             story_g: 1.0,
+            story_cnt: HashMap::default(),
+            story_tot: 0.0,
             story_keys: None,
             ext: vec![],
             copy_sets: vec![],
@@ -2708,7 +2717,21 @@ impl Brain {
             // forget keys that have faded below a thousandth of a fresh one
             self.story_sal.retain(|_, v| *v >= g * 1e-3);
         }
-        let mut top: Vec<(u32, f64)> = self.story_sal.iter().map(|(&i, &v)| (i, v)).collect();
+        let mut top: Vec<(u32, f64)> = if self.cfg.story_burst {
+            // expected salience of a key at its long-run rate r: r * sum_k 2^(-k/half) = r / (1 - 2^(-1/half))
+            *self.story_cnt.entry(key).or_insert(0.0) += 1.0;
+            self.story_tot += 1.0;
+            let h = 1.0 / (1.0 - 2f64.powf(-1.0 / self.cfg.story_half));
+            let tot = self.story_tot;
+            let cnt = &self.story_cnt;
+            self.story_sal
+                .iter()
+                .map(|(&i, &v)| (i, (v / g) / (cnt.get(&i).copied().unwrap_or(1.0) / tot * h) * g))
+                .filter(|&(_, r)| r > g)
+                .collect()
+        } else {
+            self.story_sal.iter().map(|(&i, &v)| (i, v)).collect()
+        };
         let k = self.cfg.story.min(top.len());
         if k < top.len() {
             top.select_nth_unstable_by(k, |a, b| b.1.partial_cmp(&a.1).unwrap());

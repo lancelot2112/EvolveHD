@@ -99,6 +99,7 @@ fn cfg_from(args: &[String]) -> Cfg {
         c.story_half = x.parse().unwrap();
     }
     c.story_write1 = flag(args, "--story-write1");
+    c.story_burst = flag(args, "--story-burst");
     if let Some(x) = arg(args, "--story-age") {
         c.story_age = x.parse().unwrap();
     }
