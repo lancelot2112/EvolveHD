@@ -722,7 +722,10 @@ pub struct Brain {
     alive_dirty: bool,
     pub merged: usize,
     /// Seconds spent in: [tick body, temporal, synergy, screen, other controller work].
-    pub prof: [f64; 5],
+    /// Seconds spent per stage: 1 temporal, 2 synergy, 3 screen, 4 check, 5 scoring edges, 6 trial and
+    /// kept-edge gain accounting, 7 row writes, 8 derived-node updates, 9 running screens, 10 input matching,
+    /// 11 the whole tick.
+    pub prof: [f64; 12],
     /// Running mean and sd of the byte's bits, as seen before tick t (the surprise statistic).
     pub mu: Vec<f64>,
     pub sd: Vec<f64>,
@@ -872,7 +875,7 @@ impl Brain {
             pos: vec![-1; cap],
             alive_dirty: true,
             merged: 0,
-            prof: [0.0; 5],
+            prof: [0.0; 12],
             mu: vec![0.0; tt],
             ent: vec![0.0; tt],
             ent_m: 0.0,
@@ -1451,6 +1454,7 @@ impl Brain {
         if self.alive_dirty {
             self.refresh_alive();
         }
+        let tick0 = std::time::Instant::now();
         let na = self.alive_idx.len();
         let mut logits = vec![0.0; na];
         let kept = self.kept.clone();
@@ -1467,6 +1471,7 @@ impl Brain {
                 tsc.push(e);
             }
         }
+        self.prof[5] += tick0.elapsed().as_secs_f64();
         if na > 0 {
             let m = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let z: f64 = logits.iter().map(|&x| (x - m).exp()).sum();
@@ -1486,7 +1491,9 @@ impl Brain {
             self.ent_m += 0.001 * d;
             self.ent_v = 0.999 * self.ent_v + 0.001 * d * d;
         }
+        let c_obs = std::time::Instant::now();
         let (y, novel) = self.observe(byte, t);
+        self.prof[10] += c_obs.elapsed().as_secs_f64();
         if fused {
             // a fused input has no symbol of its own: record the cell it matched as its symbol, and map
             // every cell to one dummy symbol (so the cell-to-symbol cost is about zero)
@@ -1522,6 +1529,7 @@ impl Brain {
         self.novel[t] = novel;
         if yi >= 0 && na > 0 && !self.frozen {
             let yi = yi as usize;
+            let c_tr = std::time::Instant::now();
             let base_loss = -q.log2();
             for &e in &tsc {
                 let c = self.slab[e].contribution().unwrap();
@@ -1554,6 +1562,8 @@ impl Brain {
             for &e in &kept {
                 self.slab[e].learn_beta(&p, yi, 0.003);
             }
+            self.prof[6] += c_tr.elapsed().as_secs_f64();
+            let c_wr = std::time::Instant::now();
             let ycode = self.byte.pool.codes[yu];
             let tgt = bits::from_positions(&ycode[..self.tix.rk]);
             if self.cfg.err_write > 0 {
@@ -1604,6 +1614,7 @@ impl Brain {
                     &mut self.rng,
                 );
             }
+            self.prof[7] += c_wr.elapsed().as_secs_f64();
         }
         if novel {
             self.alive_dirty = true;
@@ -1618,9 +1629,11 @@ impl Brain {
                 self.alive_dirty = true;
             }
         }
+        let c_up = std::time::Instant::now();
         for i in self.derived.clone() {
             self.update_node(i, t);
         }
+        self.prof[8] += c_up.elapsed().as_secs_f64();
         if self.cfg.words && self.cfg.run_window > 0 && !self.frozen {
             if self.chunk.is_none() && self.run_scr.is_empty() {
                 for z in [0.5, 1.0, 1.5] {
@@ -1636,7 +1649,9 @@ impl Brain {
                     ));
                 }
             }
+            let c_fs = std::time::Instant::now();
             self.feed_screens(t);
+            self.prof[9] += c_fs.elapsed().as_secs_f64();
         }
         if self.cfg.grow && t % 1000 == 999 && !self.frozen {
             let c0 = std::time::Instant::now();
@@ -1647,6 +1662,7 @@ impl Brain {
         let d = self.bits[t] - self.sm;
         self.sm += a * d;
         self.sv = (1.0 - a) * self.sv + a * d * d;
+        self.prof[11] += tick0.elapsed().as_secs_f64();
         self.t += 1;
     }
 

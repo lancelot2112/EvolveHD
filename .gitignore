@@ -29,3 +29,4 @@ corpus/
 reference/python/__pycache__/
 runs/
 /target-native
+/target-prof

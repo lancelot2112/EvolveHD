@@ -723,6 +723,12 @@ fn main() {
                 }
             }
             });
+            {
+                let p = &b.prof;
+                let names = ["", "temporal", "synergy", "screen", "check", "scoring", "gains", "writes", "nodes", "run-screens", "matching", "tick"];
+                let parts: Vec<String> = (1..12).map(|i| format!("{} {:.1}", names[i], p[i])).collect();
+                eprintln!("profile (s): {}", parts.join(", "));
+            }
             let h = n / 2;
             let sp = spell[h..].iter().sum::<f64>() / (n - h) as f64;
             let sp0 = spell0[h..].iter().sum::<f64>() / (n - h) as f64;
