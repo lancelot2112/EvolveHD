@@ -12,6 +12,7 @@ r_, c_ = [], []
 for d in range(1, 11): r_.append(cw[:-d]); c_.append(cw[d:])
 r_ = np.concatenate(r_); c_ = np.concatenate(c_)
 M = spm.coo_matrix((np.ones(len(r_)), (r_, c_)), shape=(NW, NW)).tocsr(); M = M + M.T
+M.setdiag(0); M.eliminate_zeros()  # a word is not its own associate
 cnt = np.bincount(cw, minlength=NW); words = np.nonzero(cnt >= 3)[0]
 M = M[words][:, words].tocoo(); tot = M.sum(); rs = np.asarray(M.sum(1)).ravel()
 pmi = np.log(M.data * tot / (rs[M.row] * rs[M.col])); keep = (pmi > 0) & (M.data >= 2)

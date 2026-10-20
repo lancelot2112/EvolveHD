@@ -229,6 +229,7 @@ for name, qs in combos.items():
     out[name] = {'gain': float(d[sc].mean()), 'rare': m(rare), 'storynew': m(storynew), 'weights': ls}
     print(f"  {name:<16} gain {d[sc].mean():+.4f}   on rare words {m(rare):+.4f}   on words new to the story {m(storynew):+.4f}   weights {ls}", flush=True)
 json.dump(out, open(A.out + '.json', 'w'), indent=1)
+np.savez_compressed(A.out + '.map.npz', order=order[:N], sword=sword[:S], spos=spos[:S])
 np.savez_compressed(A.out + '.npz', q_bits=q_bits[h:], q_reg=q_reg[h:])
 if not A.report: sys.exit()
 # ---- stage 1 report: what the map looks like
@@ -246,6 +247,7 @@ r_, c_ = [], []
 for d_ in range(1, 11): r_.append(cw[:-d_]); c_.append(cw[d_:])
 r_ = np.concatenate(r_); c_ = np.concatenate(c_)
 M = spm.coo_matrix((np.ones(len(r_)), (r_, c_)), shape=(NW, NW)).tocsr(); M = M + M.T
+M.setdiag(0); M.eliminate_zeros()  # a word is not its own associate
 tot = M.sum(); rs = np.asarray(M.sum(1)).ravel()
 cnt = np.bincount(cw, minlength=NW)
 cand = [w for w in wspots if cnt[w] >= 50]
