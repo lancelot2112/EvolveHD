@@ -80,6 +80,18 @@ fn cfg_from(args: &[String]) -> Cfg {
         c.w = x.parse().unwrap();
     }
     c.recency_kept = flag(args, "--recency-kept");
+    if let Some(x) = arg(args, "--err-write") {
+        c.err_write = match x { "global" | "1" => 1, "local" | "2" => 2, _ => 0 };
+    }
+    if let Some(x) = arg(args, "--err-alpha") {
+        c.err_alpha = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--err-floor") {
+        c.err_floor = x.parse().unwrap();
+    }
+    if let Some(x) = arg(args, "--err-forget") {
+        c.err_forget = x.parse().unwrap();
+    }
     if let Some(x) = arg(args, "--story") {
         c.story = x.parse().unwrap();
     }

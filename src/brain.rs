@@ -114,6 +114,12 @@ pub struct Cfg {
     pub ext_edges: Vec<String>,
     /// External edges write every row of their set each tick instead of one drawn by weight.
     pub ext_write_all: bool,
+    /// Error-modulated writes: 0 = off (counting writes), 1 = gated by the level's miss (1 - p(y))^alpha,
+    /// 2 = gated by each edge's own miss; floor `err_floor`; `err_forget` 0/1/2 (see `Edge::forget`).
+    pub err_write: u8,
+    pub err_alpha: f64,
+    pub err_floor: f64,
+    pub err_forget: u8,
     /// The bias edge's own mask bits and aging (0 = the same as every edge), to set its memory apart.
     pub bias_mask_bits: usize,
     pub bias_age: Option<u32>,
@@ -200,6 +206,10 @@ impl Default for Cfg {
             story_write1: false,
             ext_edges: vec![],
             ext_write_all: false,
+            err_write: 0,
+            err_alpha: 1.0,
+            err_floor: 0.05,
+            err_forget: 0,
             bias_mask_bits: 0,
             bias_age: None,
             hand_up_z: 0.0,
@@ -1546,6 +1556,41 @@ impl Brain {
             }
             let ycode = self.byte.pool.codes[yu];
             let tgt = bits::from_positions(&ycode[..self.tix.rk]);
+            if self.cfg.err_write > 0 {
+                let (a, fl) = (self.cfg.err_alpha, self.cfg.err_floor);
+                let gate = |py: f64| (1.0 - py).max(0.0).powf(a).max(fl);
+                let argmax_wrong = |q: &[f64]| {
+                    let mut jb = usize::MAX;
+                    for (j, &v) in q.iter().enumerate() {
+                        if j != yi && (jb == usize::MAX || v > q[jb]) {
+                            jb = j;
+                        }
+                    }
+                    jb
+                };
+                let jw = argmax_wrong(&p);
+                for &e in kept.iter().chain(trials.iter()) {
+                    let (g, wr) = if self.cfg.err_write == 1 {
+                        (gate(p[yi]), (jw != usize::MAX).then(|| (self.alive_idx[jw], p[jw])))
+                    } else {
+                        // the edge's own prediction: softmax of its contribution alone
+                        match self.slab[e].contribution() {
+                            Some(c) => {
+                                let mx = c.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                                let z: f64 = c.iter().map(|x| (x - mx).exp()).sum();
+                                let q: Vec<f64> = c.iter().map(|x| (x - mx).exp() / z).collect();
+                                let j = argmax_wrong(&q);
+                                (gate(q[yi]), (j != usize::MAX).then(|| (self.alive_idx[j], q[j])))
+                            }
+                            None => (1.0, None),
+                        }
+                    };
+                    let ed = &mut self.slab[e];
+                    ed.err_g = g;
+                    ed.err_wrong = wr;
+                    ed.forget = self.cfg.err_forget;
+                }
+            }
             for &e in kept.iter().chain(trials.iter()) {
                 let src = self.slab[e].src;
                 let g = self.gen_of(src, self.slab[e].cur);

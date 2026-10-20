@@ -196,6 +196,13 @@ pub struct Edge {
     pub set: Vec<(u32, f32)>,
     /// Story edges: write only one row per update, drawn by weight, instead of all of them.
     pub write_one: bool,
+    /// Error-modulated writes (set by the brain before each `learn`): every level's write probability is
+    /// multiplied by `err_g` (1 = the plain counting write), and with `forget` > 0 bits of the most wrongly
+    /// predicted cell (`err_wrong` = (cell, its probability)) are dropped from the row: 1 = preferred when room
+    /// is needed, 2 = also removed actively on every written level, in proportion to that probability.
+    pub err_g: f64,
+    pub err_wrong: Option<(usize, f64)>,
+    pub forget: u8,
 }
 
 impl Edge {
@@ -230,6 +237,9 @@ impl Edge {
             multi: false,
             set: Vec::new(),
             write_one: false,
+            err_g: 1.0,
+            err_wrong: None,
+            forget: 0,
         }
     }
 
@@ -407,13 +417,18 @@ impl Edge {
         talive: &[bool],
         rng: &mut Rng,
     ) {
-        let prob = self.prob;
+        let mut prob = self.prob;
+        if self.err_g < 1.0 {
+            prob.iter_mut().for_each(|p| *p *= self.err_g);
+        }
         let cur = self.cur as u32;
         // draw the levels first, so the row borrow below holds no rng
         let mut lv = [false; LEVELS];
         for k in 0..LEVELS {
             lv[k] = rng.f64() < prob[k];
         }
+        let wrong = if self.forget > 0 { self.err_wrong } else { None };
+        let forget = self.forget;
         self.row(cur, gen, tix, tcodes, talive, rng);
         let r = self.rows.get_mut(&cur).unwrap();
         r.n += 1;
@@ -460,16 +475,35 @@ impl Edge {
             let need = add.len().saturating_sub(room);
             // bits to drop: set in the mask, not in the target code; sampled without replacement
             let mut ra: Vec<u16> = Vec::with_capacity(w);
+            let mut extra = 0;
+            if let Some((wc, pw)) = wrong {
+                // the most wrongly predicted cell's bits in this row (not the target's), in random order
+                let wb: Vec<u16> = tcodes[wc][..tix.rk]
+                    .iter()
+                    .copied()
+                    .filter(|&b| bits::get(m, b as usize) && !bits::get(tgt, b as usize))
+                    .collect();
+                let wb = rng.sample(&wb, wb.len());
+                let sround = |x: f64, rng: &mut Rng| x.floor() as usize + (rng.f64() < x.fract()) as usize;
+                let mut take = sround(need as f64 * pw, rng);
+                if forget >= 2 {
+                    extra = sround(w as f64 * pw, rng);
+                    take += extra;
+                }
+                ra.extend(wb.into_iter().take(take));
+                extra = extra.min(ra.len());
+            }
+            let need = (need + extra).saturating_sub(ra.len()) + ra.len();
             if self.drop_lowest {
                 // Python reference rule: 4w+8 draws, keep eligible, sort, take the lowest
                 let mut c: Vec<u16> = (0..4 * w + 8)
                     .map(|_| rng.below(D) as u16)
-                    .filter(|&b| bits::get(m, b as usize) && !bits::get(tgt, b as usize))
+                    .filter(|&b| bits::get(m, b as usize) && !bits::get(tgt, b as usize) && !ra.contains(&b))
                     .collect();
                 c.sort_unstable();
                 c.dedup();
-                c.truncate(need);
-                ra = c;
+                c.truncate(need.saturating_sub(ra.len()));
+                ra.extend(c);
             } else {
                 let mut tries = 0;
                 while ra.len() < need && tries < 4 * w + 8 {
@@ -480,7 +514,7 @@ impl Edge {
                     }
                 }
             }
-            add.truncate(room + ra.len());
+            add.truncate(room + ra.len() - extra.min(ra.len()));
             for &b in &ra {
                 bits::clear(m, b as usize);
                 for &c in &tix.owners[b as usize] {
