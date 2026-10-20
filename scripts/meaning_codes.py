@@ -27,6 +27,10 @@ ap.add_argument('--D', type=int, default=2048)   # width of the space
 # fast mapping (hippocampal): on each of a word's first --fast-n occurrences, add the story code lit at that moment
 # to its counters with this weight per bit, so a new word starts out meaning what the story is about
 ap.add_argument('--fast', type=float, default=0.0); ap.add_argument('--fast-n', type=int, default=8)
+# working memory (layer 3): a recursive state over every word, state <- fade * rotate(state) + identity code,
+# read through its --wm-k most active bits; --wm-half words half-life; --wm-rot 0 = no rotation (orderless control)
+ap.add_argument('--wm-half', type=float, default=0.0); ap.add_argument('--wm-k', type=int, default=64)
+ap.add_argument('--wm-rot', type=int, default=1)
 A = ap.parse_args()
 rng = np.random.default_rng(1)
 ids = np.fromfile(A.ids, dtype=np.uint32).astype(np.int64); n = len(ids)
@@ -52,6 +56,10 @@ recent = []                                    # last --win content words
 g = 1.0; act = np.zeros(D); code = np.zeros(0, dtype=np.int64); incode = np.zeros(D, dtype=bool)
 rows = np.zeros((D, NW), dtype=np.int32); nb = np.zeros(D, dtype=np.int64)
 q_bits = np.zeros(n); q_mean = np.zeros(n); prior = np.zeros(n, dtype=np.int64)
+q_wm = np.zeros(n)
+if A.wm_half > 0:
+    wm = np.zeros(D); wm_fade = 2 ** (-1 / A.wm_half); wm_code = np.zeros(0, dtype=np.int64)
+    wrows = np.zeros((D, NW), dtype=np.int32); wnb = np.zeros(D, dtype=np.int64)
 snap = None; snapU = None; snapu = None
 def snapshot():
     """Meaning codes of every word seen so far, as a sparse word x bit matrix, with frequency weights."""
@@ -74,6 +82,15 @@ DEMO = [w for w in ('light', 'spring', 'bank', 'fire', 'court', 'heart', 'charge
 didx = {words.index(w): w for w in DEMO}; dcodes = {w: [] for w in DEMO}
 for i in range(n):
     w = int(ids[i]); prior[i] = fc[w]
+    if A.wm_half > 0:
+        if len(wm_code):
+            r = wrows[wm_code, w].astype(np.float64); q_wm[i] = ((r + BETA * u_p[i]) / (wnb[wm_code] + BETA)).mean()
+            wrows[wm_code, w] += 1; wnb[wm_code] += 1
+        else:
+            q_wm[i] = u_p[i]
+        wm = wm_fade * (np.roll(wm, A.wm_rot) if A.wm_rot else wm); wm[ident[w]] += 1.0
+        kk = min(A.wm_k, int(np.count_nonzero(wm)))
+        wm_code = np.argpartition(-wm, kk - 1)[:kk]
     if len(code):
         r = rows[code, w].astype(np.float64); q_bits[i] = ((r + BETA * u_p[i]) / (nb[code] + BETA)).mean()
         if snap is not None and w < snap.shape[0]:
@@ -129,8 +146,12 @@ for i in range(n):
 rare = prior < 10
 out = {'args': vars(A), 'base': float(base_bits[sc].mean())}
 print(f"{A.out}: base {out['base']:.4f} bits per exact word (scored part)")
-for name, qs in {'story': [q_story], 'bits': [q_bits], 'mean': [q_mean], 'story+bits': [q_story, q_bits],
-                 'story+mean': [q_story, q_mean], 'story+bits+mean': [q_story, q_bits, q_mean]}.items():
+combos = {'story': [q_story], 'bits': [q_bits], 'mean': [q_mean], 'story+bits': [q_story, q_bits],
+          'story+mean': [q_story, q_mean], 'story+bits+mean': [q_story, q_bits, q_mean]}
+if A.wm_half > 0:
+    combos = {'story': [q_story], 'wm': [q_wm], 'story+wm': [q_story, q_wm], 'story+mean': [q_story, q_mean],
+              'story+mean+wm': [q_story, q_mean, q_wm]}
+for name, qs in combos.items():
     bb, ls = fit(qs); d = base_bits - bb
     m_ = lambda mask: float(d[sc][mask[sc]].mean())
     out[name] = {'gain': float(d[sc].mean()), 'rare': m_(rare), 'storynew': m_(storynew), 'weights': ls}
