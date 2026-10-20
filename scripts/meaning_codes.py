@@ -158,6 +158,8 @@ for name, qs in combos.items():
     print(f"  {name:<16} gain {d[sc].mean():+.4f}   on rare words {m_(rare):+.4f}   on words new to the story {m_(storynew):+.4f}   weights {ls}", flush=True)
 json.dump(out, open(A.out + '.json', 'w'), indent=1)
 if not A.report or A.identity: sys.exit()
+del rows                                      # free the readout tables before building the report
+if A.wm_half > 0: del wrows
 # ---- groupings
 lines = []
 W = lambda w: words[w] if w < len(words) else str(w)
