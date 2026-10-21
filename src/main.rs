@@ -22,6 +22,24 @@ fn arg_owned(k: &str) -> Option<String> {
     arg(&args, k).map(String::from)
 }
 
+/// The situation model's settings from --sit-* flags (see src/situation.rs).
+fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
+    let g = |k: &str, d: &str| arg(args, k).unwrap_or(d).to_string();
+    evolvehd::situation::SitCfg {
+        d: g("--sit-d", "65536").parse().unwrap(),
+        k: g("--sit-k", "64").parse().unwrap(),
+        mag: g("--sit-mag", "2").parse().unwrap(),
+        cue: g("--sit-cue", "4").parse().unwrap(),
+        win: g("--sit-win", "8").parse().unwrap(),
+        ntop: g("--sit-ntop", "40").parse().unwrap(),
+        pool: g("--sit-pool", "0.6").parse().unwrap(),
+        recluster: g("--sit-recluster", "2000").parse().unwrap(),
+        mdim: g("--sit-mdim", "2048").parse().unwrap(),
+        mwin: g("--sit-mwin", "2").parse().unwrap(),
+        bdrift: g("--sit-bdrift", "1").parse().unwrap(),
+    }
+}
+
 /// The bitwise hippocampal store's settings from --hp-* flags (see src/hippo.rs).
 fn hippo_cfg(args: &[String]) -> evolvehd::hippo::HippoCfg {
     let g = |k: &str, d: &str| arg(args, k).unwrap_or(d).to_string();
@@ -601,22 +619,27 @@ fn main() {
             enum St {
                 A(evolvehd::assoc::Assoc),
                 H(evolvehd::hippo::Hippo),
+                S(evolvehd::situation::Situation),
             }
             impl St {
                 fn recall(&mut self) -> Vec<Vec<(u32, f64)>> {
                     match self {
                         St::A(a) => a.recall(),
                         St::H(h) => h.recall(),
+                        St::S(x) => vec![x.recall()],
                     }
                 }
                 fn observe(&mut self, w: u32) {
                     match self {
                         St::A(a) => a.observe(w),
                         St::H(h) => h.observe(w),
+                        St::S(x) => x.observe(w),
                     }
                 }
             }
-            let (mut a, hops, kk) = if flag(&args, "--hippo") {
+            let (mut a, hops, kk) = if flag(&args, "--sit") {
+                (St::S(evolvehd::situation::Situation::new(sit_cfg(&args), nw)), 1, 8)
+            } else if flag(&args, "--hippo") {
                 let c = hippo_cfg(&args);
                 let k = c.k;
                 (St::H(evolvehd::hippo::Hippo::new(c, nw)), 2, k)
@@ -647,7 +670,16 @@ fn main() {
                         );
                     }
                 }
-                if let St::H(h) = &a {
+                if let St::S(x) = &a {
+                let voc: Vec<String> = arg(&args, "--vocab").map(|p| std::fs::read_to_string(p).unwrap().lines().map(String::from).collect()).unwrap_or_default();
+                let name = |w: u32| voc.get(w as usize).cloned().unwrap_or(w.to_string());
+                eprintln!("learned boundaries: {} | paths {} | relation classes {}", x.boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.n_paths(), x.n_classes());
+                for cl in x.classes(8) {
+                    let ps: Vec<String> = cl.iter().map(|p| format!("{} {}", if p[0] == 0 { "f" } else { "b" }, p[1..].iter().rev().map(|&w| name(w)).collect::<Vec<_>>().join(" "))).collect();
+                    eprintln!("  class: {}", ps.join(" | "));
+                }
+            }
+            if let St::H(h) = &a {
                     for ch in 0..h.nch_pub {
                         for i in 0..kk {
                             chans.push(

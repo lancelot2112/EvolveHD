@@ -24,4 +24,5 @@ pub mod info;
 pub mod meaning;
 pub mod pool;
 pub mod rng;
+pub mod situation;
 pub mod stack;
