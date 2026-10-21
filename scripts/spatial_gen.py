@@ -1,4 +1,4 @@
-"""Spatial stories (experiment 32): each story places 9 rooms (of 12 names) on a 3 x 3 grid at random and states
+"""Spatial stories (experiment 33): each story places 9 rooms (of 12 names) on a 3 x 3 grid at random and states
 adjacencies one at a time ("the kitchen is north of the garden ."), either way round, in random order. Now and
 then a question asks what lies one step in a direction from a room ("what is north of the garden ?"); the answer
 may never have been stated, only implied by facts chained through other rooms, or not determined yet at all.

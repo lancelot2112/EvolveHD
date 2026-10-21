@@ -1,4 +1,4 @@
-"""A learned map for the spatial stories (experiment 32), integer phases throughout.
+"""A learned map for the spatial stories (experiment 33), integer phases throughout.
 
 Place codes: each room's position in the current story is a phase vector (D elements, L phases each).
 Direction cells: each relation word r has a step code s_r (a phase vector); "X is r of Y" means p_X = p_Y + s_r.

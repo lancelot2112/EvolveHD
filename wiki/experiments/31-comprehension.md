@@ -1,6 +1,6 @@
 # 31 · Reading comprehension with a hippocampal store (2026-10-20)
 
-*[All experiments](README.md)* · [← 28](28-width-fast-working-memory.md)
+*[All experiments](README.md)* · [← 28](28-width-fast-working-memory.md) · [32 →](32-learned-bitwise-store.md)
 
 **Concepts:** [Shift-bind](../concepts/shift-bind.md) · [Writer-mask readout](../concepts/writer-mask-readout.md) · [Growth operators](../concepts/growth-operators.md#story-state)
 
@@ -99,6 +99,8 @@ What the gates learned (roles only, gated on question form; *[\* .]* is a senten
 Caveats: one run per configuration, with no seed variation, on a synthetic, templated task with a 42-word vocabulary; the store is given the content-word split and the clause boundaries.
 
 ## What next
+
+Followed up in [experiment 32](32-learned-bitwise-store.md): a store with nothing hand-coded, on held-out phrasings.
 
 - **Roles shared through meaning:** define roles by meaning-code classes rather than exact words, so synonyms ("walked into the") share a role, and test on phrasings held out of training.
 - **Real text:** the same store on Austen, measured on the bits spent on names and places, where knowing who is with whom should pay.
