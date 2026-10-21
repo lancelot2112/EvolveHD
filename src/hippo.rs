@@ -62,6 +62,9 @@ pub struct HippoCfg {
     pub cancel: bool,
     /// Rank by excess share over the long-run baseline (subtraction) instead of the ratio.
     pub excess: bool,
+    /// Roles as phase: contents are bound to their word's phase (steps since the last boundary, below `phase`)
+    /// by shifting each block's position by phase * m_b (mod l); reading unbinds by shifting back. 0 = off.
+    pub phase: usize,
 }
 
 struct SegRow {
@@ -84,6 +87,9 @@ pub struct Hippo {
     tick: u64,
     seg: Vec<Option<SegRow>>,
     hist: Vec<u32>,
+    /// Each word's phase: steps since the last boundary (a free-running count, reset at boundaries).
+    hist_ph: Vec<u32>,
+    cur_phase: u32,
     nch: usize,
     att: Vec<u8>,
     last: Option<(Vec<usize>, Vec<Vec<u32>>, [usize; 2])>,
@@ -104,7 +110,8 @@ impl Hippo {
         let d = cfg.s * cfg.l;
         assert!(d % 64 == 0);
         let wpr = d / 64;
-        let nch = cfg.cue * 2 + cfg.cue * 4;
+        let np = if cfg.phase > 0 { cfg.phase + 1 } else { 1 };
+        let nch = cfg.cue * 2 * np + cfg.cue * 4;
         Hippo {
             d,
             wpr,
@@ -114,6 +121,8 @@ impl Hippo {
             tick: 0,
             seg: (0..nw).map(|_| None).collect(),
             hist: vec![],
+            hist_ph: vec![],
+            cur_phase: 0,
             nch,
             att: vec![128; d * nch],
             last: None,
@@ -131,6 +140,23 @@ impl Hippo {
     }
     fn bits(&self, c: &[u16]) -> Vec<usize> {
         c.iter().enumerate().map(|(b, &p)| b * self.cfg.l + p as usize).collect()
+    }
+    /// A code bound to a phase: each block's position moves by ph * m_b (m_b odd, fixed per block).
+    fn shift(&self, c: &[u16], ph: u32) -> Vec<u16> {
+        let l = self.cfg.l;
+        c.iter()
+            .enumerate()
+            .map(|(b, &p)| ((p as usize + ph as usize * (2 * (hash(77, b as u64) as usize % l) + 1)) % l) as u16)
+            .collect()
+    }
+    /// The content bits a word would have in phase ph (None: in any phase, all of them).
+    fn wbits(&self, w: u32, ph: Option<u32>) -> Vec<usize> {
+        let c = self.code(w);
+        match ph {
+            Some(p) => self.bits(&self.shift(&c, p)),
+            None if self.cfg.phase == 0 => self.bits(&c),
+            None => (0..self.cfg.phase as u32).flat_map(|p| self.bits(&self.shift(&c, p))).collect(),
+        }
     }
     fn back(&self, j: usize) -> u32 {
         let n = self.hist.len();
@@ -187,7 +213,7 @@ impl Hippo {
         }
     }
     /// Words scored through their codes, best first, the excluded words left out.
-    fn rank(&self, sc: &[u32], skip: &[u32], k: usize) -> Vec<(u32, u32)> {
+    fn rank(&self, sc: &[u32], skip: &[u32], k: usize, ph: Option<u32>) -> Vec<(u32, u32)> {
         // (word, score, baseline): the baseline is how often the word has been bound at all (its content bits'
         // write counts) plus the mean, so a word is ranked by how much more it is recalled here than anywhere;
         // compared by cross-multiplying (no division)
@@ -196,7 +222,7 @@ impl Hippo {
             .iter()
             .filter(|w| !skip.contains(w))
             .map(|&w| {
-                let b = self.bits(&self.code(w));
+                let b = self.wbits(w, ph);
                 (w, b.iter().map(|&x| sc[x]).sum::<u32>(), b.iter().map(|&x| self.busy[x]).sum::<u64>())
             })
             .filter(|x| x.1 > 0)
@@ -228,10 +254,12 @@ impl Hippo {
     /// Rank each channel's words by cancellation: the word's count in this channel times the number of
     /// channels, minus its counts summed over all of them (what every cue recalls cancels out). Integer add
     /// and subtract only.
-    fn rank_cancel(&self, scs: &[Vec<u32>], skip: &[u32], k: usize) -> Vec<Vec<(u32, u32)>> {
+    fn rank_cancel(&self, scs: &[(Vec<u32>, Option<u32>)], skip: &[u32], k: usize) -> Vec<Vec<(u32, u32)>> {
         let words: Vec<u32> = self.words.iter().copied().filter(|w| !skip.contains(w)).collect();
-        let bits: Vec<Vec<usize>> = words.iter().map(|&w| self.bits(&self.code(w))).collect();
-        let ws: Vec<Vec<i64>> = scs.iter().map(|sc| bits.iter().map(|b| b.iter().map(|&x| sc[x] as i64).sum()).collect()).collect();
+        let ws: Vec<Vec<i64>> = scs
+            .iter()
+            .map(|(sc, ph)| words.iter().map(|&w| self.wbits(w, *ph).iter().map(|&x| sc[x] as i64).sum()).collect())
+            .collect();
         let n = scs.len() as i64;
         let tot: Vec<i64> = (0..words.len()).map(|i| ws.iter().map(|v| v[i]).sum()).collect();
         ws.iter()
@@ -338,52 +366,66 @@ impl Hippo {
                 .clone()
         };
         let c = self.cfg.cue;
-        let mut scs1: Vec<Vec<u32>> = vec![];
+        let np = if self.cfg.phase > 0 { self.cfg.phase + 1 } else { 1 };
+        let n1 = c * 2 * np;
+        // hop-1 channel (j, dir, phase): the phase wanted, or any (the last)
+        let ph_of = |p: usize| -> Option<u32> {
+            if self.cfg.phase == 0 { Some(0) } else if p == self.cfg.phase { None } else { Some(p as u32) }
+        };
+        let mut scs1: Vec<(usize, Vec<u32>, Option<u32>)> = vec![];
         for (j, &w) in cue.iter().enumerate() {
             for dir in 0..2 {
                 let sc = get(self, w, dir, &mut cache);
-                if self.cfg.cancel {
-                    scs1.push(sc);
-                } else {
-                    lists[j * 2 + dir] = self.rank(&sc, &cue, kk);
+                for p in 0..np {
+                    let i1 = (j * 2 + dir) * np + p;
+                    if self.cfg.cancel {
+                        scs1.push((i1, sc.clone(), ph_of(p)));
+                    } else {
+                        lists[i1] = self.rank(&sc, &cue, kk, ph_of(p));
+                    }
                 }
             }
         }
-        if self.cfg.cancel {
-            for (i, l) in self.rank_cancel(&scs1, &cue, kk).into_iter().enumerate() {
+        if self.cfg.cancel && !scs1.is_empty() {
+            let idx: Vec<usize> = scs1.iter().map(|x| x.0).collect();
+            let v: Vec<(Vec<u32>, Option<u32>)> = scs1.into_iter().map(|x| (x.1, x.2)).collect();
+            for (i, l) in idx.into_iter().zip(self.rank_cancel(&v, &cue, kk)) {
                 lists[i] = l;
             }
         }
-        let mut scs2: Vec<(usize, Vec<u32>)> = vec![];
-        for j in 0..cue.len() {
-            for d1 in 0..2 {
-                let fronts: Vec<u32> = lists[j * 2 + d1].iter().take(self.cfg.k2).map(|x| x.0).collect();
-                for d2 in 0..2 {
-                    let mut sc = vec![0u32; d];
-                    for (r, &f) in fronts.iter().enumerate() {
-                        let s1 = get(self, f, d2, &mut cache);
-                        // fronts weighted by rank when asked (halving per place, a shift)
-                        let sh = if self.cfg.front_rank { (r as u32).min(16) } else { 0 };
-                        sc.iter_mut().zip(&s1).for_each(|(o, &x)| *o += (x << 16) >> sh);
-                    }
-                    if self.cfg.cancel {
-                        scs2.push((2 * c + j * 4 + d1 * 2 + d2, sc));
-                    } else {
-                        lists[2 * c + j * 4 + d1 * 2 + d2] = self.rank(&sc, &cue, kk);
-                    }
+        // hop 2 from each (cue word, direction)'s best words in any phase, either direction, any phase
+        let mut scs2: Vec<(usize, Vec<u32>, Option<u32>)> = vec![];
+        for jd in 0..cue.len() * 2 {
+            let i1 = jd * np + np - 1;
+            let fronts: Vec<u32> = lists[i1].iter().take(self.cfg.k2).map(|x| x.0).collect();
+            for d2 in 0..2 {
+                let mut sc = vec![0u32; d];
+                for (r, &f) in fronts.iter().enumerate() {
+                    let s1 = get(self, f, d2, &mut cache);
+                    // fronts weighted by rank when asked (halving per place, a shift)
+                    let sh = if self.cfg.front_rank { (r as u32).min(16) } else { 0 };
+                    sc.iter_mut().zip(&s1).for_each(|(o, &x)| *o += (x << 16) >> sh);
+                }
+                let i2 = n1 + jd * 2 + d2;
+                let any = if self.cfg.phase == 0 { Some(0) } else { None };
+                if self.cfg.cancel {
+                    scs2.push((i2, sc, any));
+                } else {
+                    lists[i2] = self.rank(&sc, &cue, kk, any);
                 }
             }
         }
         if self.cfg.cancel && !scs2.is_empty() {
-            let (idx, sc2): (Vec<usize>, Vec<Vec<u32>>) = scs2.into_iter().unzip();
-            for (i, l) in idx.into_iter().zip(self.rank_cancel(&sc2, &cue, kk)) {
+            let idx: Vec<usize> = scs2.iter().map(|x| x.0).collect();
+            let v: Vec<(Vec<u32>, Option<u32>)> = scs2.into_iter().map(|x| (x.1, x.2)).collect();
+            for (i, l) in idx.into_iter().zip(self.rank_cancel(&v, &cue, kk)) {
                 lists[i] = l;
             }
         }
         let addr = self.ctx_addr();
         let att: Vec<u32> = (0..self.nch).map(|ch| addr.iter().map(|&i| self.att[i * self.nch + ch] as u32).sum()).collect();
         let best = |r: std::ops::Range<usize>| r.max_by(|&a, &b| att[a].cmp(&att[b]).then(b.cmp(&a))).unwrap();
-        let (b1, b2) = (best(0..2 * c), best(2 * c..self.nch));
+        let (b1, b2) = (best(0..n1), best(n1..self.nch));
         let offer = |l: &Vec<(u32, u32)>| -> Vec<(u32, f64)> {
             // weights by rank (halving per place), the ranking being the store's own measure
             let mut o: Vec<(u32, f64)> = l.iter().take(self.cfg.k).enumerate().map(|(r, &(w, _))| (w, (1u32 << (self.cfg.k - 1 - r)) as f64)).collect();
@@ -408,7 +450,7 @@ impl Hippo {
             return out;
         }
         let mut out = vec![offer(&lists[b1]), offer(&lists[b2])];
-        for ch in order(0..2 * c).into_iter().skip(1).chain(order(2 * c..self.nch).into_iter().skip(1)) {
+        for ch in order(0..n1).into_iter().skip(1).chain(order(n1..self.nch).into_iter().skip(1)) {
             out.push(offer(&lists[ch]));
         }
         self.chan_lists = lists.iter().map(|l| l.iter().take(self.cfg.k).map(|x| x.0).collect()).collect();
@@ -447,7 +489,10 @@ impl Hippo {
                     }
                 }
             }
-            for (g, r) in [(0usize, 0..2 * c), (1, 2 * c..self.nch)].into_iter().filter(|_| !self.cfg.att_rate) {
+            let np = if self.cfg.phase > 0 { self.cfg.phase + 1 } else { 1 };
+            let n1 = self.cfg.cue * 2 * np;
+            let _ = c;
+            for (g, r) in [(0usize, 0..n1), (1, n1..self.nch)].into_iter().filter(|_| !self.cfg.att_rate) {
                 let b = chosen[g];
                 let top = r.clone().map(|ch| rank[ch]).min().unwrap();
                 if top == usize::MAX || rank[b] <= top {
@@ -472,20 +517,30 @@ impl Hippo {
         }
         // bind w to the words before it, back to and including the first boundary
         let fw = self.code(w);
+        let pw = self.cur_phase;
+        let fwp = self.shift(&fw, pw);
         for j in 0..self.cfg.win.min(self.hist.len()) {
             let s = self.back(j);
             if s != w {
                 let fs = self.code(s);
-                self.write(0, &fs, &fw);
-                self.write(1, &fw, &fs);
+                let ps = self.hist_ph[self.hist_ph.len() - 1 - j];
+                let fsp = self.shift(&fs, ps);
+                self.write(0, &fs, &fwp);
+                self.write(1, &fw, &fsp);
             }
             if self.is_boundary(s) {
                 break;
             }
         }
         self.hist.push(w);
+        self.hist_ph.push(pw);
+        // the free-running phase: one step per word, back to 0 after a boundary
+        if self.cfg.phase > 0 {
+            self.cur_phase = if self.is_boundary(w) { 0 } else { (pw + 1).min(self.cfg.phase as u32 - 1) };
+        }
         if self.hist.len() > 64 {
             self.hist.drain(..32);
+            self.hist_ph.drain(..32);
         }
         if !self.seen[w as usize] {
             self.seen[w as usize] = true;

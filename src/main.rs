@@ -46,6 +46,7 @@ fn hippo_cfg(args: &[String]) -> evolvehd::hippo::HippoCfg {
         att_rate: flag(args, "--hp-att-rate"),
         cancel: flag(args, "--hp-cancel"),
         excess: flag(args, "--hp-excess"),
+        phase: g("--hp-phase", "0").parse().unwrap(),
     }
 }
 

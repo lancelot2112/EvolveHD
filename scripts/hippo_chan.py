@@ -1,18 +1,16 @@
 """Per-channel accuracy of the bitwise store (evolvehd assoc --hippo --out PREFIX writes PREFIX.chan): for each
 question type, how often each channel's first candidate of the answer's kind is the answer, and how often the
-offered channels' (the attention's choice) is.  usage: hippo_chan.py IDS INFO.json PREFIX [CUE] [K]"""
+offered channels' (the attention's choice) is.  usage: hippo_chan.py IDS INFO.json PREFIX [CUE] [K] [PHASE]"""
 import sys, json
 import numpy as np
 ids = np.fromfile(sys.argv[1], dtype=np.uint32); n = len(ids); info = json.load(open(sys.argv[2]))
 cue = int(sys.argv[4]) if len(sys.argv) > 4 else 4; K = int(sys.argv[5]) if len(sys.argv) > 5 else 8
+P = int(sys.argv[6]) if len(sys.argv) > 6 else 0; np_ = P + 1 if P else 1
 ch = np.fromfile(sys.argv[3] + ".chan", dtype=np.uint32); nch = len(ch) // n // K; ch = ch.reshape(n, nch, K)
 top = np.fromfile(sys.argv[3] + ".top", dtype=np.uint32).reshape(n, 2, K)
-names = []
-for j in range(cue):
-    for d in 'fb': names.append(f"{j}{d}")
-for j in range(cue):
-    for d1 in 'fb':
-        for d2 in 'fb': names.append(f"{j}{d1}{d2}")
+ph = lambda p: '' if not P else ('*' if p == P else str(p))
+names = [f"{j}{d}{ph(p)}" for j in range(cue) for d in 'fb' for p in range(np_)]
+names += [f"{j}{d}>{d2}" for j in range(cue) for d in 'fb' for d2 in 'fb']
 ans = [(p, k) for p, k in info['answers'] if p >= n // 2]
 places, people = set(info['places']), set(info['names'])
 def first_kind(lst, kind):
