@@ -38,6 +38,8 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         mwin: g("--sit-mwin", "2").parse().unwrap(),
         bdrift: g("--sit-bdrift", "1").parse().unwrap(),
         clock: g("--sit-clock", "0").parse().unwrap(),
+        sense: flag(args, "--sit-sense"),
+        sense_mix: g("--sit-sense-mix", "1").parse().unwrap(),
     }
 }
 
@@ -687,6 +689,14 @@ fn main() {
                 a.observe(w);
             }
             eprintln!("{} words, {:.1} s", ids.len(), t0.elapsed().as_secs_f64());
+            if let St::S(x) = &mut a {
+                let voc: Vec<String> = arg(&args, "--vocab").map(|p| std::fs::read_to_string(p).unwrap().lines().map(String::from).collect()).unwrap_or_default();
+                let id = |s: &str| voc.iter().position(|w| w == s).map(|i| i as u32);
+                if let (Some(to), Some(went), Some(kit), Some(gave), Some(apple), Some(mary)) = (id("to"), id("went"), id("kitchen"), id("gave"), id("apple"), id("mary")) {
+                    let (ab, ap, bp) = x.sense_overlap(to, &[went, kit], &[gave, apple, mary]);
+                    eprintln!("sense of 'to': moving vs giving overlap {ab:.2}; moving vs plain {ap:.2}; giving vs plain {bp:.2}");
+                }
+            }
             if let St::S(x) = &a {
                 let voc: Vec<String> = arg(&args, "--vocab").map(|p| std::fs::read_to_string(p).unwrap().lines().map(String::from).collect()).unwrap_or_default();
                 let name = |w: u32| voc.get(w as usize).cloned().unwrap_or(w.to_string());

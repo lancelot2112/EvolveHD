@@ -43,6 +43,9 @@ pub struct SitCfg {
     /// gradually as the clocks of more of its slots tick; proposals from reliable routes are then ranked by
     /// strength, the freshest first.
     pub clock: u64,
+    /// Attend each path word's meaning to its clause before pooling (its sense in context).
+    pub sense: bool,
+    pub sense_mix: f32,
 }
 
 /// A pooled relation class: a prototype (bit counts) and its name (its first path).
@@ -93,6 +96,8 @@ impl Situation {
         mc.win = cfg.mwin;
         mc.skip = 0;
         mc.seed = 21;
+        let mut mn = Meaning::new(mc, nw);
+        mn.sense_mix = cfg.sense_mix;
         Situation {
             nw,
             re: vec![0; cfg.d],
@@ -104,7 +109,7 @@ impl Situation {
             seg_hits: HashMap::new(),
             seg_n: HashMap::new(),
             boundary: vec![false; nw],
-            mn: Meaning::new(mc, nw),
+            mn,
             path_count: HashMap::new(),
             path_class: HashMap::new(),
             protos: vec![],
@@ -121,6 +126,14 @@ impl Situation {
         }
     }
 
+    /// Diagnostics: the overlap (shared bits / k) of word w's sense in two contexts, and of its plain code with each.
+    pub fn sense_overlap(&mut self, w: u32, c1: &[u32], c2: &[u32]) -> (f64, f64, f64) {
+        let a = self.mn.sense(w, c1);
+        let b = self.mn.sense(w, c2);
+        let p = self.mn.code_or_ident(w);
+        let ov = |x: &[u32], y: &[u32]| x.iter().filter(|b| y.contains(b)).count() as f64 / x.len().max(1) as f64;
+        (ov(&a, &b), ov(&a, &p), ov(&b, &p))
+    }
     pub fn boundaries(&self) -> Vec<u32> {
         (0..self.nw as u32).filter(|&w| self.boundary[w as usize]).collect()
     }
@@ -185,8 +198,17 @@ impl Situation {
     fn path_code(&mut self, path: &[u32]) -> Vec<u32> {
         let d = self.cfg.mdim;
         let mut out: Vec<u32> = vec![];
-        for (i, &w) in path[1..].iter().enumerate() {
-            let c = self.mn.code_or_ident(w);
+        // with senses, the key is [dir, s, w, path...]: each path word's code is its sense in the clause (the
+        // context: the two ends and the other path words)
+        let (ends, words): (Vec<u32>, Vec<u32>) =
+            if self.cfg.sense { (path[1..3].to_vec(), path[3..].to_vec()) } else { (vec![], path[1..].to_vec()) };
+        for (i, &w) in words.iter().enumerate() {
+            let c = if self.cfg.sense {
+                let ctx: Vec<u32> = ends.iter().chain(words.iter()).copied().filter(|&x| x != w).collect();
+                self.mn.sense(w, &ctx)
+            } else {
+                self.mn.code_or_ident(w)
+            };
             out.extend(c.iter().map(|&b| ((b as usize + i * 7919) % d) as u32));
         }
         out.sort_unstable();
@@ -466,6 +488,11 @@ impl Situation {
             if s != w {
                 for dir in 0..2u32 {
                     let mut p = vec![dir];
+                    // with senses the ends are part of the key (they are the context the path words are read
+                    // in); adjacency (no words between) stays one class per direction
+                    if self.cfg.sense && !path.is_empty() {
+                        p.extend([s, w]);
+                    }
                     p.extend(&path);
                     *self.path_count.entry(p.clone()).or_insert(0) += 1;
                     let c = self.class_of(&p);

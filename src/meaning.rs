@@ -78,6 +78,8 @@ pub struct Meaning {
     wm_fade: f32,
     pub wm_code: Vec<u32>,
     scratch: Vec<f32>,
+    /// How much of the plain meaning a sense keeps (in units of the context's mean weight; see `sense`).
+    pub sense_mix: f32,
 }
 
 /// The meaning code of one counter row: its k most distinctive bits (row * inv), or None for an empty row.
@@ -173,6 +175,7 @@ impl Meaning {
             wm_fade,
             wm_code: vec![],
             scratch: vec![0.0; d],
+            sense_mix: 1.0,
             cfg,
         }
     }
@@ -202,6 +205,39 @@ impl Meaning {
         );
         self.scratch = scratch;
         r
+    }
+
+    /// A word's meaning in context: its counters weighted by the meaning of the context words (the product, per
+    /// bit, of its distinctive weights and the context words' summed, normalised counters), and the `k_word`
+    /// strongest bits of that. So a word with several senses ("to": moving to, giving to) keeps the part the
+    /// context shares. With no context, or nothing shared, its plain meaning code (or identity code).
+    pub fn sense(&mut self, w: u32, ctx: &[u32]) -> Vec<u32> {
+        let d = self.cfg.d;
+        if ctx.is_empty() || self.cfg.identity {
+            return self.code_or_ident(w);
+        }
+        let inv = self.inv_busy();
+        let row = &self.m[w as usize * d..(w as usize + 1) * d];
+        let mut cx = vec![0f32; d];
+        for &c in ctx {
+            let r = &self.m[c as usize * d..(c as usize + 1) * d];
+            let tot: f32 = r.iter().sum();
+            if tot > 0.0 {
+                for (o, &x) in cx.iter_mut().zip(r) {
+                    *o += x / tot;
+                }
+            }
+        }
+        // the plain distinctive weight, tipped by the context: (mean + context) per bit, so bits the context
+        // does not speak to keep their plain weight and the context only shifts the balance between senses
+        let mean = cx.iter().sum::<f32>() / d as f32 * self.sense_mix;
+        let mut sc: Vec<f32> = row.iter().zip(&inv).zip(&cx).map(|((&r, &v), &c)| r * v * (mean + c)).collect();
+        if !sc.iter().any(|&x| x > 0.0) {
+            return self.code_or_ident(w);
+        }
+        let mut idx = Vec::with_capacity(d);
+        let out = top_k(&mut sc, self.cfg.k_word, &mut idx);
+        out
     }
 
     /// A word's meaning as a block code: the d bits split into `s` blocks, and in each block the most
