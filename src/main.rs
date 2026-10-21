@@ -22,6 +22,29 @@ fn arg_owned(k: &str) -> Option<String> {
     arg(&args, k).map(String::from)
 }
 
+/// The bitwise hippocampal store's settings from --hp-* flags (see src/hippo.rs).
+fn hippo_cfg(args: &[String]) -> evolvehd::hippo::HippoCfg {
+    let g = |k: &str, d: &str| arg(args, k).unwrap_or(d).to_string();
+    evolvehd::hippo::HippoCfg {
+        s: g("--hp-s", "16").parse().unwrap(),
+        l: g("--hp-l", "256").parse().unwrap(),
+        win: g("--hp-win", "8").parse().unwrap(),
+        planes: g("--hp-planes", "8").parse().unwrap(),
+        epoch: g("--hp-epoch", "32").parse().unwrap(),
+        cue: g("--hp-cue", "4").parse().unwrap(),
+        k: g("--hp-k", "8").parse().unwrap(),
+        k2: g("--hp-k2", "2").parse().unwrap(),
+        khit: g("--hp-khit", "3").parse().unwrap(),
+        ctx: g("--hp-ctx", "0,2,3").split(',').map(|x| x.parse().unwrap()).collect(),
+        seg_r: g("--hp-seg-r", "16").parse().unwrap(),
+        ctx_bind: flag(args, "--hp-ctx-bind"),
+        lift: !flag(args, "--hp-no-lift"),
+        steep: flag(args, "--hp-steep"),
+        offer: g("--hp-offer", "1").parse().unwrap(),
+        offer_all: flag(args, "--hp-offer-all"),
+    }
+}
+
 /// The heteroassociative store's settings from --as-* flags (see src/assoc.rs).
 fn assoc_cfg(args: &[String]) -> evolvehd::assoc::AssocCfg {
     let g = |k: &str, d: &str| arg(args, k).unwrap_or(d).to_string();
@@ -535,13 +558,32 @@ fn main() {
             // u32::MAX for none) to OUT.top
             let raw = std::fs::read(arg(&args, "--data").expect("--data")).unwrap();
             let ids: Vec<u32> = raw.chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-            let cfg = assoc_cfg(&args);
-            let hops = cfg.hops;
-            let kk = cfg.k;
-            let mut a = evolvehd::assoc::Assoc::new(cfg, *ids.iter().max().unwrap() as usize + 1);
+            let nw = *ids.iter().max().unwrap() as usize + 1;
+            enum St {
+                A(evolvehd::assoc::Assoc),
+                H(evolvehd::hippo::Hippo),
+            }
+            impl St {
+                fn recall(&mut self) -> Vec<Vec<(u32, f64)>> {
+                    match self { St::A(a) => a.recall(), St::H(h) => h.recall() }
+                }
+                fn observe(&mut self, w: u32) {
+                    match self { St::A(a) => a.observe(w), St::H(h) => h.observe(w) }
+                }
+            }
+            let (mut a, hops, kk) = if flag(&args, "--hippo") {
+                let c = hippo_cfg(&args);
+                let k = c.k;
+                (St::H(evolvehd::hippo::Hippo::new(c, nw)), 2, k)
+            } else {
+                let c = assoc_cfg(&args);
+                let (h, k) = (c.hops, c.k);
+                (St::A(evolvehd::assoc::Assoc::new(c, nw)), h, k)
+            };
             let t0 = Instant::now();
             let mut out: Vec<u8> = Vec::with_capacity(ids.len() * hops);
             let mut top: Vec<u32> = Vec::with_capacity(ids.len() * hops);
+            let mut chans: Vec<u32> = vec![];
             for &w in &ids {
                 let sets = a.recall();
                 for h in 0..hops {
@@ -551,9 +593,30 @@ fn main() {
                         top.push(sets.get(h).and_then(|s| s.get(i)).map(|x| x.0).unwrap_or(u32::MAX));
                     }
                 }
+                if let St::H(h) = &a {
+                    for ch in 0..h.nch_pub {
+                        for i in 0..kk {
+                            chans.push(h.chan_lists.get(ch).and_then(|l| l.get(i)).copied().unwrap_or(u32::MAX));
+                        }
+                    }
+                }
                 a.observe(w);
             }
-            eprintln!("{} words, {:.1} s, {} gate writes", ids.len(), t0.elapsed().as_secs_f64(), a.gate_writes);
+            eprintln!("{} words, {:.1} s", ids.len(), t0.elapsed().as_secs_f64());
+            if !chans.is_empty() {
+                std::fs::write(format!("{}.chan", arg(&args, "--out").unwrap()), chans.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+            }
+            if let St::H(h) = &a {
+                let voc: Vec<String> = arg(&args, "--vocab").map(|p| std::fs::read_to_string(p).unwrap().lines().map(String::from).collect()).unwrap_or_default();
+                let b: Vec<String> = h.boundaries().iter().map(|&w| voc.get(w as usize).cloned().unwrap_or(w.to_string())).collect();
+                eprintln!("learned boundaries: {} | attention updates {}", b.join(" "), h.att_updates);
+                if flag(&args, "--seg-stats") {
+                    for (w, n, hh, bd) in h.seg_stats() {
+                        let r = |x: u64| x as f64 / n as f64;
+                        eprintln!("  {:<10} n {n:5} hit rate before {:.2} after {:.2} pair {:.2}{}", voc.get(w as usize).cloned().unwrap_or_default(), r(hh[0]), r(hh[1]), r(hh[2]), if bd { "  boundary" } else { "" });
+                    }
+                }
+            }
             let o = arg(&args, "--out").expect("--out");
             std::fs::write(format!("{o}.rank"), out).unwrap();
             std::fs::write(format!("{o}.top"), top.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
@@ -732,6 +795,11 @@ fn main() {
                 None
             };
             // the heteroassociative store (experiment 31b): --assoc, --as-* (see src/assoc.rs)
+            let mut hip = if flag(&args, "--hippo") {
+                Some(evolvehd::hippo::Hippo::new(hippo_cfg(&args), *ids.iter().max().unwrap() as usize + 1))
+            } else {
+                None
+            };
             let mut asc = if flag(&args, "--assoc") {
                 Some(evolvehd::assoc::Assoc::new(assoc_cfg(&args), *ids.iter().max().unwrap() as usize + 1))
             } else {
@@ -794,12 +862,20 @@ fn main() {
                         b.set_copy(j, set);
                     }
                 }
+                if let Some(h) = hip.as_mut() {
+                    for (j, set) in h.recall().into_iter().enumerate() {
+                        b.set_copy(j, set);
+                    }
+                }
                 b.push(mapped[t]);
                 if let Some(ep) = epi.as_mut() {
                     ep.observe(ids[t]);
                 }
                 if let Some(a) = asc.as_mut() {
                     a.observe(ids[t]);
+                }
+                if let Some(h) = hip.as_mut() {
+                    h.observe(ids[t]);
                 }
                 if let Some((_, _, qm)) = item {
                     if mean_spell && mapped[t] == other {
