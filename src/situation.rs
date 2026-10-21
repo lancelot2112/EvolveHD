@@ -220,14 +220,17 @@ impl Situation {
         let mut out: Vec<u32> = vec![];
         // with senses, the key is [dir, s, w, path...]: each path word's code is its sense in the clause (the
         // context: the two ends and the other path words)
-        let (ends, words): (Vec<u32>, Vec<u32>) =
-            if self.cfg.sense { (path[1..3].to_vec(), path[3..].to_vec()) } else { (vec![], path[1..].to_vec()) };
+        // with senses the key is [dir, n, path..., the sense each path word took]
+        let (words, sids): (Vec<u32>, Vec<u32>) = if self.cfg.sense {
+            let n = path[1] as usize;
+            (path[2..2 + n].to_vec(), path[2 + n..].to_vec())
+        } else {
+            (path[1..].to_vec(), vec![])
+        };
         for (i, &w) in words.iter().enumerate() {
-            let c = if self.cfg.sense {
-                let ctx: Vec<u32> = ends.iter().chain(words.iter()).copied().filter(|&x| x != w).collect();
-                self.sense_code(w, &ctx, self.learning)
-            } else {
-                self.mn.code_or_ident(w)
+            let c = match sids.get(i) {
+                Some(&k) if k != u32::MAX => self.sense_mask(w, k as usize),
+                _ => self.mn.code_or_ident(w),
             };
             out.extend(c.iter().map(|&b| ((b as usize + i * 7919) % d) as u32));
         }
@@ -242,16 +245,23 @@ impl Situation {
     /// learning, that sense's prototype counts the context. The sense's code is the half of the word's meaning
     /// code most counted in its prototype.
     fn sense_code(&mut self, w: u32, ctx: &[u32], learn: bool) -> Vec<u32> {
-        let plain = self.mn.code_or_ident(w);
+        match self.sense_pick(w, ctx, learn) {
+            Some(i) => self.sense_mask(w, i),
+            None => self.mn.code_or_ident(w),
+        }
+    }
+
+    /// Which of w's learned senses the context picks (learning: the sense counts the context, or a new one
+    /// starts); None while there is no context or no sense yet.
+    fn sense_pick(&mut self, w: u32, ctx: &[u32], learn: bool) -> Option<usize> {
         let mut cb: Vec<u32> = ctx.iter().flat_map(|&c| self.mn.ident(c).to_vec()).collect();
         cb.sort_unstable();
         cb.dedup();
-        if cb.is_empty() || plain.is_empty() {
-            return plain;
+        if cb.is_empty() {
+            return None;
         }
         let d = self.cfg.mdim;
         let ss = self.senses.entry(w).or_default();
-        // the best-matching sense: the share of the context's bits it has seen, per use
         let mut best = (0.0f64, usize::MAX);
         for (i, sn) in ss.iter().enumerate() {
             let m = cb.iter().map(|&b| sn.counts[b as usize] as f64).sum::<f64>() / (sn.n.max(1) as f64 * cb.len() as f64);
@@ -261,7 +271,7 @@ impl Situation {
         }
         let i = if best.1 == usize::MAX || (best.0 < self.cfg.sense_new && ss.len() < self.cfg.nsenses) {
             if !learn {
-                return plain;
+                return if best.1 == usize::MAX { None } else { Some(best.1) };
             }
             ss.push(Sense { counts: vec![0; d], n: 0 });
             ss.len() - 1
@@ -275,8 +285,15 @@ impl Situation {
                 sn.counts[b as usize] += 1;
             }
         }
-        let sn = &ss[i];
-        if sn.n < 4 {
+        Some(i)
+    }
+
+    /// Sense i of w: the half of w's meaning code most counted in that sense's context prototype (the plain code
+    /// while the sense is young).
+    fn sense_mask(&mut self, w: u32, i: usize) -> Vec<u32> {
+        let plain = self.mn.code_or_ident(w);
+        let Some(sn) = self.senses.get(&w).and_then(|v| v.get(i)) else { return plain };
+        if sn.n < 4 || plain.is_empty() {
             return plain;
         }
         let mut v: Vec<(u32, u32)> = plain.iter().map(|&b| (sn.counts[b as usize], b)).collect();
@@ -296,7 +313,8 @@ impl Situation {
             return c;
         }
         let dir = path[0] as u8;
-        let code = if path.len() == 1 { vec![] } else { self.path_code(path) };
+        let bare = if self.cfg.sense { 2 } else { 1 };
+        let code = if path.len() <= bare { vec![] } else { self.path_code(path) };
         let mut best = (0.0f64, usize::MAX);
         if !code.is_empty() && self.cfg.pool > 0.0 {
             for (i, p) in self.protos.iter().enumerate() {
@@ -564,12 +582,19 @@ impl Situation {
             if s != w {
                 for dir in 0..2u32 {
                     let mut p = vec![dir];
-                    // with senses the ends are part of the key (they are the context the path words are read
-                    // in); adjacency (no words between) stays one class per direction
-                    if self.cfg.sense && !path.is_empty() {
-                        p.extend([s, w]);
+                    if self.cfg.sense {
+                        // the key holds which sense each path word took (picked by the clause: both ends and the
+                        // other path words), not the ends themselves, so a relation does not split by its entities
+                        p.push(path.len() as u32);
+                        p.extend(&path);
+                        for (pi, &pw) in path.iter().enumerate() {
+                            let ctx: Vec<u32> = [s, w].iter().chain(path.iter().enumerate().filter(|(k, _)| *k != pi).map(|(_, x)| x)).copied().collect();
+                            let k = self.sense_pick(pw, &ctx, dir == 0).map(|k| k as u32).unwrap_or(u32::MAX);
+                            p.push(k);
+                        }
+                    } else {
+                        p.extend(&path);
                     }
-                    p.extend(&path);
                     *self.path_count.entry(p.clone()).or_insert(0) += 1;
                     let c = self.class_of(&p);
                     self.class_count[c as usize] += 1;
