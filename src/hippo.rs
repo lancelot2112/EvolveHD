@@ -69,6 +69,12 @@ pub struct HippoCfg {
     pub hop2_ph: Vec<usize>,
     /// Learn which words follow each context (a bit row per address bit) and offer only those.
     pub typed: bool,
+    /// Memory as quantized complex holographic traces (src/holo.rs) of this many elements (0 = bit planes),
+    /// with `holo_levels` states per part.
+    pub holo_d: usize,
+    pub holo_levels: usize,
+    /// Halve the holographic traces every this many words (0 = never; saturation alone forgets).
+    pub holo_decay: usize,
 }
 
 struct SegRow {
@@ -105,6 +111,7 @@ pub struct Hippo {
     /// Every channel's candidates at the last recall (for diagnostics).
     pub chan_lists: Vec<Vec<u32>>,
     pub nch_pub: usize,
+    holo: Option<crate::holo::Holo>,
 }
 
 fn hash(a: u64, b: u64) -> u64 {
@@ -118,10 +125,16 @@ impl Hippo {
         let wpr = d / 64;
         let np = if cfg.phase > 0 { cfg.phase + 1 } else { 1 };
         let nch = cfg.cue * 2 * np + cfg.cue * 4 * (1 + cfg.hop2_ph.len());
+        let holo = if cfg.holo_d > 0 {
+            Some(crate::holo::Holo::new(cfg.holo_d, cfg.holo_levels, nw, cfg.phase.max(1)))
+        } else {
+            None
+        };
         Hippo {
             d,
             wpr,
-            mem: vec![0; 2 * cfg.planes * d * wpr],
+            holo,
+            mem: vec![0; if cfg.holo_d > 0 { 0 } else { 2 * cfg.planes * d * wpr }],
             busy: vec![0; d],
             tmem: vec![0; if cfg.typed { d * wpr } else { 0 }],
             head: 0,
@@ -355,6 +368,66 @@ impl Hippo {
             .collect()
     }
 
+    /// The channels' lists from the holographic traces: hop 1 per (cue word, direction, phase or any), hop 2
+    /// from the best words of each (cue word, direction) in any phase and in the phases of `hop2_ph`, either
+    /// direction. Words are ranked by excess share over the background (subtraction).
+    fn holo_lists(&self, cue: &[u32], skipf: &[u32], kk: usize, np: usize, lists: &mut [Vec<(u32, u32)>]) {
+        let h = self.holo.as_ref().unwrap();
+        let nr = self.cfg.phase.max(1);
+        let c = self.cfg.cue;
+        let n1 = c * 2 * np;
+        let ph_of = |p: usize| -> Option<usize> {
+            if self.cfg.phase == 0 { Some(0) } else if p == self.cfg.phase { None } else { Some(p) }
+        };
+        let rank = |z: &(Vec<i32>, Vec<i32>), dir: usize, skip: &[u32], k: usize, r: Option<usize>| -> Vec<(u32, u32)> {
+            let v: Vec<(u32, i64, i64)> = self
+                .words
+                .iter()
+                .copied()
+                .filter(|w| !skip.contains(w))
+                .map(|w| (w, h.score(z, w, r, nr), h.base(dir, w, r, nr).max(0)))
+                .filter(|x| x.1 > 0)
+                .collect();
+            let st: i128 = v.iter().map(|x| x.1 as i128).sum();
+            let bt: i128 = v.iter().map(|x| x.2 as i128).sum::<i128>().max(1);
+            let mut e: Vec<(u32, i64, i128)> = v.iter().map(|x| (x.0, x.1, x.1 as i128 * bt - x.2 as i128 * st)).filter(|x| x.2 > 0).collect();
+            e.sort_unstable_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+            e.truncate(k);
+            e.into_iter().map(|x| (x.0, x.1.min(u32::MAX as i64) as u32)).collect()
+        };
+        let mut zs: HashMap<(u32, usize), (Vec<i32>, Vec<i32>)> = HashMap::new();
+        let mut fronts: HashMap<(usize, usize), Vec<u32>> = HashMap::new();
+        for (j, &w) in cue.iter().enumerate() {
+            for dir in 0..2 {
+                let z = zs.entry((w, dir)).or_insert_with(|| h.unbind(dir, w)).clone();
+                for p in 0..np {
+                    lists[(j * 2 + dir) * np + p] = rank(&z, dir, skipf, kk, ph_of(p));
+                    fronts.insert((j * 2 + dir, p), rank(&z, dir, cue, self.cfg.k2, ph_of(p)).into_iter().map(|x| x.0).collect());
+                }
+            }
+        }
+        let srcs: Vec<usize> = std::iter::once(np - 1).chain(self.cfg.hop2_ph.iter().copied()).collect();
+        for (si, &p1) in srcs.iter().enumerate() {
+            for jd in 0..cue.len() * 2 {
+                let fr = fronts.get(&(jd, p1)).cloned().unwrap_or_default();
+                for d2 in 0..2 {
+                    // the unbound traces are linear: hop 2 sums the fronts', halved per rank place
+                    let mut z = (vec![0i32; h.d], vec![0i32; h.d]);
+                    for (r, &f) in fr.iter().enumerate() {
+                        let zf = zs.entry((f, d2)).or_insert_with(|| h.unbind(d2, f));
+                        let sh = if self.cfg.front_rank { (r as u32).min(16) } else { 0 };
+                        for e in 0..h.d {
+                            z.0[e] += (zf.0[e] << 8) >> sh;
+                            z.1[e] += (zf.1[e] << 8) >> sh;
+                        }
+                    }
+                    let any = if self.cfg.phase == 0 { Some(0) } else { None };
+                    lists[n1 + si * c * 4 + jd * 2 + d2] = rank(&z, d2, skipf, kk, any);
+                }
+            }
+        }
+    }
+
     // ---- segmentation ----
     fn seg_update(&mut self, a: u32, u: u32, c: u32) {
         let (s, l, wpr) = (self.cfg.s, self.cfg.l, self.wpr);
@@ -494,6 +567,9 @@ impl Hippo {
             1
         };
         let n1 = c * 2 * np;
+        if self.holo.is_some() {
+            self.holo_lists(&cue, &skipf, kk, np, &mut lists);
+        } else {
         // hop-1 channel (j, dir, phase): the phase wanted, or any (the last)
         let ph_of = |p: usize| -> Option<u32> {
             if self.cfg.phase == 0 {
@@ -569,6 +645,7 @@ impl Hippo {
             for (i, l) in idx.into_iter().zip(self.rank_cancel(&v, &cue, kk)) {
                 lists[i] = l;
             }
+        }
         }
         let att: Vec<u32> = (0..self.nch)
             .map(|ch| {
@@ -725,8 +802,13 @@ impl Hippo {
                 let fs = self.code(s);
                 let ps = self.hist_ph[self.hist_ph.len() - 1 - j];
                 let fsp = self.shift(&fs, ps);
-                self.write(0, &fs, &fwp);
-                self.write(1, &fw, &fsp);
+                if let Some(h) = self.holo.as_mut() {
+                    h.write(0, s, w, pw as usize);
+                    h.write(1, w, s, ps as usize);
+                } else {
+                    self.write(0, &fs, &fwp);
+                    self.write(1, &fw, &fsp);
+                }
             }
             if self.is_boundary(s) {
                 break;
@@ -751,7 +833,12 @@ impl Hippo {
             self.words.push(w);
         }
         self.tick += 1;
-        if self.tick % self.cfg.epoch as u64 == 0 {
+        if self.cfg.holo_decay > 0 && self.tick % self.cfg.holo_decay as u64 == 0 {
+            if let Some(h) = self.holo.as_mut() {
+                h.halve();
+            }
+        }
+        if self.holo.is_none() && self.tick % self.cfg.epoch as u64 == 0 {
             self.head = (self.head + 1) % self.cfg.planes;
             for dir in 0..2 {
                 let a = self.row_at(dir, self.head, 0);

@@ -51,6 +51,9 @@ fn hippo_cfg(args: &[String]) -> evolvehd::hippo::HippoCfg {
         excess: flag(args, "--hp-excess"),
         phase: g("--hp-phase", "0").parse().unwrap(),
         typed: flag(args, "--hp-typed"),
+        holo_d: g("--hp-holo", "0").parse().unwrap(),
+        holo_levels: g("--hp-holo-levels", "16").parse().unwrap(),
+        holo_decay: g("--hp-holo-decay", "0").parse().unwrap(),
         hop2_ph: g("--hp-hop2-ph", "")
             .split(',')
             .filter(|x| !x.is_empty())
