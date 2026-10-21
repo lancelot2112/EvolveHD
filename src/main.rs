@@ -60,6 +60,11 @@ fn hippo_cfg(args: &[String]) -> evolvehd::hippo::HippoCfg {
         ch_k: g("--hp-ch-k", "1024").parse().unwrap(),
         ch_drift: g("--hp-ch-drift", "4").parse().unwrap(),
         ch_bdrift: g("--hp-ch-bdrift", "32").parse().unwrap(),
+        ch_levels: g("--hp-ch-levels", "0").parse().unwrap(),
+        ch2_d: g("--hp-ch2", "0").parse().unwrap(),
+        ch2_k: g("--hp-ch2-k", "1024").parse().unwrap(),
+        ch2_levels: g("--hp-ch2-levels", "16").parse().unwrap(),
+        ch2_every: g("--hp-ch2-every", "1").parse().unwrap(),
         hop2_ph: g("--hp-hop2-ph", "")
             .split(',')
             .filter(|x| !x.is_empty())

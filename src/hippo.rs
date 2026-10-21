@@ -85,6 +85,13 @@ pub struct HippoCfg {
     pub ch_k: usize,
     pub ch_drift: usize,
     pub ch_bdrift: usize,
+    /// A second, slow memory beside it: no context (the same keys in every story), many levels, larger, written
+    /// with probability 1 / ch2_every. 0 elements = off. The fast one's levels are `ch_levels`.
+    pub ch_levels: usize,
+    pub ch2_d: usize,
+    pub ch2_k: usize,
+    pub ch2_levels: usize,
+    pub ch2_every: usize,
 }
 
 struct SegRow {
@@ -123,6 +130,7 @@ pub struct Hippo {
     pub nch_pub: usize,
     holo: Option<crate::holo::Holo>,
     ch: Option<crate::ctxholo::CtxHolo>,
+    ch2: Option<crate::ctxholo::CtxHolo>,
     pub superseded: u64,
 }
 
@@ -136,7 +144,8 @@ impl Hippo {
         assert!(d % 64 == 0);
         let wpr = d / 64;
         let np = if cfg.phase > 0 { cfg.phase + 1 } else { 1 };
-        let nch = cfg.cue * 2 * np + cfg.cue * 4 * (1 + cfg.hop2_ph.len());
+        let nm = if cfg.ch_d > 0 && cfg.ch2_d > 0 { 2 } else { 1 };
+        let nch = (cfg.cue * 2 * np + cfg.cue * 4 * (1 + cfg.hop2_ph.len())) * nm;
         let holo = if cfg.holo_d > 0 {
             Some(crate::holo::Holo::new(cfg.holo_d, cfg.holo_levels, nw, cfg.phase.max(1)))
         } else {
@@ -147,7 +156,13 @@ impl Hippo {
             wpr,
             holo,
             ch: if cfg.ch_d > 0 {
-                Some(crate::ctxholo::CtxHolo::new(cfg.ch_d, cfg.ch_k, cfg.holo_levels, cfg.ch_drift, cfg.ch_bdrift))
+                let lv = if cfg.ch_levels > 0 { cfg.ch_levels } else { cfg.holo_levels };
+                Some(crate::ctxholo::CtxHolo::new(cfg.ch_d, cfg.ch_k, lv, cfg.ch_drift, cfg.ch_bdrift, nw, true))
+            } else {
+                None
+            },
+            ch2: if cfg.ch_d > 0 && cfg.ch2_d > 0 {
+                Some(crate::ctxholo::CtxHolo::new(cfg.ch2_d, cfg.ch2_k, cfg.ch2_levels, 0, 0, nw, false))
             } else {
                 None
             },
@@ -450,18 +465,20 @@ impl Hippo {
     /// one's best words (scores summed, halved per rank place), either direction. Ranked by excess share over
     /// the background, by subtraction.
     fn ch_lists(&self, cue: &[u32], skipf: &[u32], kk: usize, lists: &mut [Vec<(u32, u32)>]) {
-        let h = self.ch.as_ref().unwrap();
+        // memories: the fast one, and the slow one when there is one; channels per memory
+        let mems: Vec<&crate::ctxholo::CtxHolo> = std::iter::once(self.ch.as_ref().unwrap()).chain(self.ch2.as_ref()).collect();
+        let nm = mems.len();
         let c = self.cfg.cue;
-        let n1 = c * 2;
+        let n1 = c * 2 * nm;
         let words: Vec<u32> = self.words.clone();
         // per read: every word's (score, baseline)
-        let mut reads: HashMap<(u32, usize), Vec<(i64, i64)>> = HashMap::new();
-        let get = |w: u32, dir: usize, reads: &mut HashMap<(u32, usize), Vec<(i64, i64)>>| -> Vec<(i64, i64)> {
+        let mut reads: HashMap<(u32, usize, usize), Vec<(i64, i64)>> = HashMap::new();
+        let get = |w: u32, dir: usize, m: usize, reads: &mut HashMap<(u32, usize, usize), Vec<(i64, i64)>>| -> Vec<(i64, i64)> {
             reads
-                .entry((w, dir))
+                .entry((w, dir, m))
                 .or_insert_with(|| {
-                    let z = h.read(dir, w);
-                    words.iter().map(|&x| h.score(&z, x)).collect()
+                    let z = mems[m].read(dir, w);
+                    words.iter().map(|&x| mems[m].score(&z, x)).collect()
                 })
                 .clone()
         };
@@ -481,25 +498,33 @@ impl Hippo {
             e.truncate(k);
             e.into_iter().map(|x| (x.0, x.1.min(u32::MAX as i64) as u32)).collect()
         };
-        let mut fronts: Vec<Vec<u32>> = vec![vec![]; n1];
+        // hop 1 per (cue word, direction, memory); hop-2 fronts from the fast memory's hop 1
+        let mut fronts: Vec<Vec<u32>> = vec![vec![]; c * 2];
         for (j, &w) in cue.iter().enumerate() {
             for dir in 0..2 {
-                let sb = get(w, dir, &mut reads);
-                lists[j * 2 + dir] = rank(&sb, skipf, kk);
-                fronts[j * 2 + dir] = rank(&sb, cue, self.cfg.k2).into_iter().map(|x| x.0).collect();
-            }
-        }
-        for jd in 0..cue.len() * 2 {
-            for d2 in 0..2 {
-                let mut sb = vec![(0i64, 0i64); self.words.len()];
-                for (r, &f) in fronts[jd].iter().enumerate() {
-                    let sh = if self.cfg.front_rank { (r as u32).min(16) } else { 0 };
-                    for (o, x) in sb.iter_mut().zip(get(f, d2, &mut reads)) {
-                        o.0 += (x.0 << 8) >> sh;
-                        o.1 += (x.1 << 8) >> sh;
+                for m in 0..nm {
+                    let sb = get(w, dir, m, &mut reads);
+                    lists[(j * 2 + dir) * nm + m] = rank(&sb, skipf, kk);
+                    if m == 0 {
+                        fronts[j * 2 + dir] = rank(&sb, cue, self.cfg.k2).into_iter().map(|x| x.0).collect();
                     }
                 }
-                lists[n1 + jd * 2 + d2] = rank(&sb, skipf, kk);
+            }
+        }
+        // hop 2: the fronts' partners, either direction, in each memory
+        for jd in 0..cue.len() * 2 {
+            for d2 in 0..2 {
+                for m2 in 0..nm {
+                    let mut sb = vec![(0i64, 0i64); self.words.len()];
+                    for (r, &f) in fronts[jd].iter().enumerate() {
+                        let sh = if self.cfg.front_rank { (r as u32).min(16) } else { 0 };
+                        for (o, x) in sb.iter_mut().zip(get(f, d2, m2, &mut reads)) {
+                            o.0 += (x.0 << 8) >> sh;
+                            o.1 += (x.1 << 8) >> sh;
+                        }
+                    }
+                    lists[n1 + (jd * 2 + d2) * nm + m2] = rank(&sb, skipf, kk);
+                }
             }
         }
     }
@@ -642,7 +667,7 @@ impl Hippo {
         } else {
             1
         };
-        let n1 = c * 2 * np;
+        let n1 = c * 2 * np * if self.ch2.is_some() { 2 } else { 1 };
         if self.ch.is_some() {
             self.ch_lists(&cue, &skipf, kk, &mut lists);
         } else if self.holo.is_some() {
@@ -842,7 +867,7 @@ impl Hippo {
             } else {
                 1
             };
-            let n1 = self.cfg.cue * 2 * np;
+            let n1 = self.cfg.cue * 2 * np * if self.ch2.is_some() { 2 } else { 1 };
             let _ = c;
             for (g, r) in [(0usize, 0..n1), (1, n1..self.nch)]
                 .into_iter()
@@ -885,6 +910,13 @@ impl Hippo {
                     let mag = self.cfg.holo_mag as i16;
                     h.write(0, s, w, mag);
                     h.write(1, w, s, mag);
+                    // the slow memory takes each binding with probability 1 / ch2_every (a stochastic write)
+                    if let Some(h2) = self.ch2.as_mut() {
+                        if hash(self.tick * 131 + j as u64, s as u64 * 7 + w as u64) % self.cfg.ch2_every.max(1) as u64 == 0 {
+                            h2.write(0, s, w, 1);
+                            h2.write(1, w, s, 1);
+                        }
+                    }
                 } else if let Some(h) = self.holo.as_mut() {
                     let mag = self.cfg.holo_mag as i16;
                     if self.cfg.holo_sup > 0 {

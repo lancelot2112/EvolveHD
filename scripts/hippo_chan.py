@@ -13,6 +13,10 @@ ph = lambda p: '' if not P else ('*' if p == P else str(p))
 names = [f"{j}{d}{ph(p)}" for j in range(cue) for d in 'fb' for p in range(np_)]
 for src in [P if P else 0] + H2:
     names += [f"{j}{d}{ph(src)}>{d2}" for j in range(cue) for d in 'fb' for d2 in 'fb']
+if nch == cue * 12 and not P:
+    # two memories (fast F, slow S): hop 1 per (word, direction, memory), hop 2 per (word, direction, direction, memory)
+    names = [f"{j}{d}{m}" for j in range(cue) for d in 'fb' for m in 'FS']
+    names += [f"{j}{d}>{d2}{m}" for j in range(cue) for d in 'fb' for d2 in 'fb' for m in 'FS']
 ans = [(p, k) for p, k in info['answers'] if p >= n // 2]
 places, people = set(info['places']), set(info['names'])
 def first_kind(lst, kind):

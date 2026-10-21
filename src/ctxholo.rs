@@ -26,6 +26,8 @@ pub struct CtxHolo {
     drift: usize,
     bdrift: usize,
     tick: u64,
+    /// Each value's phase at every element (computed once from the hash; nw x d phases).
+    vtab: Vec<u8>,
 }
 
 /// An unbound read: the key's active elements and the trace there rotated back by the key's phases.
@@ -51,18 +53,24 @@ fn pick(re: i32, im: i32, p: u8) -> i32 {
 }
 
 impl CtxHolo {
-    pub fn new(d: usize, k: usize, levels: usize, drift: usize, bdrift: usize) -> Self {
+    /// `levels` per part: an odd count is symmetric (3: -1..1, 5: -2..2), an even one runs -L/2..L/2-1.
+    /// `ctx` false: no context (keys are the same in every story, for a slow memory across stories).
+    pub fn new(d: usize, k: usize, levels: usize, drift: usize, bdrift: usize, nw: usize, ctx: bool) -> Self {
+        let vtab = (0..nw as u64)
+            .flat_map(|v| (0..d as u64).map(move |e| (hash(v + 0x7777, e) & 3) as u8))
+            .collect();
         CtxHolo {
+            vtab,
             d,
             k,
             lo: -((levels / 2) as i16),
-            hi: (levels / 2) as i16 - 1,
+            hi: if levels % 2 == 1 { (levels / 2) as i16 } else { (levels / 2) as i16 - 1 },
             tr: [vec![0; d], vec![0; d], vec![0; d], vec![0; d]],
             bg: [vec![0; d], vec![0; d], vec![0; d], vec![0; d]],
-            ctx_off: (0..k).map(|i| (hash(91, i as u64) % d as u64) as u32).collect(),
-            ctx_ph: (0..k).map(|i| (hash(92, i as u64) & 3) as u8).collect(),
-            drift,
-            bdrift,
+            ctx_off: (0..k).map(|i| if ctx { (hash(91, i as u64) % d as u64) as u32 } else { 0 }).collect(),
+            ctx_ph: (0..k).map(|i| if ctx { (hash(92, i as u64) & 3) as u8 } else { 0 }).collect(),
+            drift: if ctx { drift } else { 0 },
+            bdrift: if ctx { bdrift } else { 0 },
             tick: 0,
         }
     }
@@ -92,8 +100,8 @@ impl CtxHolo {
     }
 
     #[inline]
-    fn vph(val: u32, e: u32) -> u8 {
-        (hash(val as u64 + 0x7777, e as u64) & 3) as u8
+    fn vph(&self, val: u32, e: u32) -> u8 {
+        self.vtab[val as usize * self.d + e as usize]
     }
 
     /// Bind key -> value (magnitude m) in direction dir, in the current context.
@@ -101,7 +109,7 @@ impl CtxHolo {
         let (idx, ph) = self.key(key);
         let (lo, hi) = (self.lo, self.hi);
         for (&e, &kp) in idx.iter().zip(&ph) {
-            let vp = Self::vph(val, e);
+            let vp = self.vph(val, e);
             let e = e as usize;
             let (re, im) = (2 * dir, 2 * dir + 1);
             match (kp + vp) & 3 {
@@ -145,7 +153,7 @@ impl CtxHolo {
         let mut s = 0i64;
         let mut b = 0i64;
         for (i, &e) in z.idx.iter().enumerate() {
-            let p = Self::vph(val, e);
+            let p = self.vph(val, e);
             s += pick(z.re[i], z.im[i], p) as i64;
             b += pick(bre[e as usize], bim[e as usize], p) as i64;
         }
