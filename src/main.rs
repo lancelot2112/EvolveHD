@@ -680,9 +680,10 @@ fn main() {
                     .map(|&w| voc.get(w as usize).cloned().unwrap_or(w.to_string()))
                     .collect();
                 eprintln!(
-                    "learned boundaries: {} | attention updates {}",
+                    "learned boundaries: {} | attention updates {} | superseded {}",
                     b.join(" "),
-                    h.att_updates
+                    h.att_updates,
+                    h.superseded
                 );
                 if flag(&args, "--seg-stats") {
                     for (w, n, hh, bd) in h.seg_stats() {
