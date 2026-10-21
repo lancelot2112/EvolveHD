@@ -44,6 +44,8 @@ fn hippo_cfg(args: &[String]) -> evolvehd::hippo::HippoCfg {
         offer_all: flag(args, "--hp-offer-all"),
         front_rank: flag(args, "--hp-front-rank"),
         att_rate: flag(args, "--hp-att-rate"),
+        cancel: flag(args, "--hp-cancel"),
+        excess: flag(args, "--hp-excess"),
     }
 }
 

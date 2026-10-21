@@ -58,6 +58,10 @@ pub struct HippoCfg {
     pub front_rank: bool,
     /// Attention counters track each channel's hit rate (a running average) instead of moving on errors.
     pub att_rate: bool,
+    /// Rank by cancelling what all channels of a group recall (instead of the lift ratio).
+    pub cancel: bool,
+    /// Rank by excess share over the long-run baseline (subtraction) instead of the ratio.
+    pub excess: bool,
 }
 
 struct SegRow {
@@ -197,6 +201,16 @@ impl Hippo {
             })
             .filter(|x| x.1 > 0)
             .collect();
+        if self.cfg.excess {
+            // excess share, by subtraction: s_w * B - b_w * S (S, B the totals over the candidates), so a word
+            // ranks by how much more of this recall it takes than of all bindings; drops those at or below
+            let st: u128 = v.iter().map(|x| x.1 as u128).sum();
+            let bt: u128 = v.iter().map(|x| x.2 as u128).sum::<u128>().max(1);
+            let mut e: Vec<(u32, u32, i128)> = v.iter().map(|x| (x.0, x.1, (x.1 as u128 * bt) as i128 - (x.2 as u128 * st) as i128)).filter(|x| x.2 > 0).collect();
+            e.sort_unstable_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+            e.truncate(k);
+            return e.into_iter().map(|x| (x.0, x.1)).collect();
+        }
         if self.cfg.lift {
             let mean = self.words.iter().map(|&w| self.bits(&self.code(w)).iter().map(|&x| self.busy[x]).sum::<u64>()).sum::<u64>()
                 / self.words.len().max(1) as u64;
@@ -209,6 +223,25 @@ impl Hippo {
         }
         v.truncate(k);
         v.into_iter().map(|x| (x.0, x.1)).collect()
+    }
+
+    /// Rank each channel's words by cancellation: the word's count in this channel times the number of
+    /// channels, minus its counts summed over all of them (what every cue recalls cancels out). Integer add
+    /// and subtract only.
+    fn rank_cancel(&self, scs: &[Vec<u32>], skip: &[u32], k: usize) -> Vec<Vec<(u32, u32)>> {
+        let words: Vec<u32> = self.words.iter().copied().filter(|w| !skip.contains(w)).collect();
+        let bits: Vec<Vec<usize>> = words.iter().map(|&w| self.bits(&self.code(w))).collect();
+        let ws: Vec<Vec<i64>> = scs.iter().map(|sc| bits.iter().map(|b| b.iter().map(|&x| sc[x] as i64).sum()).collect()).collect();
+        let n = scs.len() as i64;
+        let tot: Vec<i64> = (0..words.len()).map(|i| ws.iter().map(|v| v[i]).sum()).collect();
+        ws.iter()
+            .map(|v| {
+                let mut r: Vec<(u32, i64)> = (0..words.len()).map(|i| (words[i], n * v[i] - tot[i])).filter(|x| x.1 > 0).collect();
+                r.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                r.truncate(k);
+                r.into_iter().map(|(w, x)| (w, x.min(u32::MAX as i64) as u32)).collect()
+            })
+            .collect()
     }
 
     // ---- segmentation ----
@@ -305,12 +338,23 @@ impl Hippo {
                 .clone()
         };
         let c = self.cfg.cue;
+        let mut scs1: Vec<Vec<u32>> = vec![];
         for (j, &w) in cue.iter().enumerate() {
             for dir in 0..2 {
                 let sc = get(self, w, dir, &mut cache);
-                lists[j * 2 + dir] = self.rank(&sc, &cue, kk);
+                if self.cfg.cancel {
+                    scs1.push(sc);
+                } else {
+                    lists[j * 2 + dir] = self.rank(&sc, &cue, kk);
+                }
             }
         }
+        if self.cfg.cancel {
+            for (i, l) in self.rank_cancel(&scs1, &cue, kk).into_iter().enumerate() {
+                lists[i] = l;
+            }
+        }
+        let mut scs2: Vec<(usize, Vec<u32>)> = vec![];
         for j in 0..cue.len() {
             for d1 in 0..2 {
                 let fronts: Vec<u32> = lists[j * 2 + d1].iter().take(self.cfg.k2).map(|x| x.0).collect();
@@ -322,8 +366,18 @@ impl Hippo {
                         let sh = if self.cfg.front_rank { (r as u32).min(16) } else { 0 };
                         sc.iter_mut().zip(&s1).for_each(|(o, &x)| *o += (x << 16) >> sh);
                     }
-                    lists[2 * c + j * 4 + d1 * 2 + d2] = self.rank(&sc, &cue, kk);
+                    if self.cfg.cancel {
+                        scs2.push((2 * c + j * 4 + d1 * 2 + d2, sc));
+                    } else {
+                        lists[2 * c + j * 4 + d1 * 2 + d2] = self.rank(&sc, &cue, kk);
+                    }
                 }
+            }
+        }
+        if self.cfg.cancel && !scs2.is_empty() {
+            let (idx, sc2): (Vec<usize>, Vec<Vec<u32>>) = scs2.into_iter().unzip();
+            for (i, l) in idx.into_iter().zip(self.rank_cancel(&sc2, &cue, kk)) {
+                lists[i] = l;
             }
         }
         let addr = self.ctx_addr();
