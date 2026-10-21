@@ -17,7 +17,8 @@ from collections import defaultdict, Counter
 ap = argparse.ArgumentParser(); ap.add_argument('ids'); ap.add_argument('info')
 ap.add_argument('--D', type=int, default=65536); ap.add_argument('--K', type=int, default=64)
 ap.add_argument('--mag', type=int, default=1); ap.add_argument('--N', type=int, default=40)
-ap.add_argument('--drift', type=int, default=2); ap.add_argument('--bdrift', type=int, default=8)
+ap.add_argument('--drift', type=int, default=0); ap.add_argument('--bdrift', type=int, default=1)
+ap.add_argument('--pool', type=float, default=0.0, help='pool paths into relation classes at this cosine (0 = off)')
 a = ap.parse_args()
 ids = np.fromfile(a.ids, dtype=np.uint32).astype(int).tolist(); n = len(ids)
 info = json.load(open(a.info)); voc = open(a.ids.replace('.ids', '.txt')).read().split()
@@ -28,6 +29,34 @@ UNIT = np.array([1, 1j, -1, -1j]); DRE = np.array([1, 0, -1, 0]); DIM = np.array
 re = np.zeros(D, np.int8); im = np.zeros(D, np.int8); bg = np.zeros(V, np.int64)
 ctx_off = rng.integers(0, D, K); ctx_ph = rng.integers(0, 4, K)
 sig_id = {}; sig_count = Counter()
+# ---- pooling: each word's meaning is its left and right neighbours' counts (learned online); a path's code is the
+# sum of its words' normalised meanings (with its direction); paths are pooled into relation classes, each the
+# nearest prototype above the cosine threshold (else a new class), re-clustered every 2,000 words as the
+# meanings mature. The class keeps the name of its most frequent path, so its slots and counts stay put. ----
+mean = np.zeros((V, 2 * V)); path_class = {}; protos = []      # protos: [code sum, name, members]
+def path_code(sig):
+    d, path = sig[0], sig[1:]
+    if not path: return None
+    m = mean[list(path)]; m = m / (np.linalg.norm(m, axis=1, keepdims=True) + 1e-9)
+    return m.sum(0)
+def cls(sig):
+    """the relation class of a path (the path itself when pooling is off or it has no words)"""
+    if a.pool <= 0 or len(sig) == 1: return sig
+    c = path_class.get(sig)
+    if c is not None: return c
+    v = path_code(sig); best_i, best_s = -1, a.pool
+    for i, (ps, name, mem) in enumerate(protos):
+        if name[0] != sig[0]: continue
+        sc = float(v @ ps) / (np.linalg.norm(v) * np.linalg.norm(ps) + 1e-9)
+        if sc > best_s: best_i, best_s = i, sc
+    if best_i < 0: protos.append([v.copy(), sig, 1]); c = sig
+    else: protos[best_i][0] += v; protos[best_i][2] += 1; c = protos[best_i][1]
+    path_class[sig] = c; return c
+def recluster():
+    global protos, path_class
+    paths = [sg for sg, _ in sig_count.most_common() if len(sg) > 1]
+    protos, path_class = [], {}
+    for sg in paths: cls(sg)
 def sid(sig):
     if sig not in sig_id: sig_id[sig] = len(sig_id)
     return sig_id[sig]
@@ -105,7 +134,9 @@ for t in range(n):
         results.append((ans[t], t in newq, t in newf, fk == w, bool(props) and props[0][1] == w))
     # ---- learn which relations answer this context: relations whose slot holds w ----
     if seen[w]:
-        top = [sig_id[s] for s, _ in sig_count.most_common(a.N)]
+        cc = Counter()
+        for sg, c in sig_count.items(): cc[cls(sg)] += c
+        top = [sid(s) for s, _ in cc.most_common(a.N)]
         for j, e in enumerate(cue):
             if e == w or not seen[e] or not top: continue
             v, x = best(read_many(e, top), [e])
@@ -124,14 +155,29 @@ for t in range(n):
     path = []
     for s in reversed(clause[-8:]):
         if s != w:
-            fwd = sid(('f',) + tuple(path)); bwd = sid(('b',) + tuple(path))
-            write(s, fwd, w); write(w, bwd, s); sig_count[('f',) + tuple(path)] += 1; sig_count[('b',) + tuple(path)] += 1
+            fs_, bs_ = ('f',) + tuple(path), ('b',) + tuple(path)
+            sig_count[fs_] += 1; sig_count[bs_] += 1
+            fwd = sid(cls(fs_)); bwd = sid(cls(bs_))
+            write(s, fwd, w); write(w, bwd, s)
         path.append(s)
         if s in boundary: break
     clause.append(w); clause = clause[-16:]; seen[w] = True
+    if t >= 1: mean[w, ids[t - 1]] += 1
+    if t >= 1: mean[ids[t - 1], V + w] += 1
+    if a.pool > 0 and t % 2000 == 1999: recluster()
     nd = a.drift + (a.bdrift if w in boundary else 0)
     sl = rng.integers(0, K, nd); ctx_off[sl] = rng.integers(0, D, nd); ctx_ph[sl] = rng.integers(0, 4, nd)
-print(f"{n} words, D={D} K={K} mag={a.mag}; boundaries: {' '.join(voc[b] for b in sorted(boundary))}; relations {len(sig_id)}")
+print(f"{n} words, D={D} K={K} mag={a.mag} pool={a.pool}; boundaries: {' '.join(voc[b] for b in sorted(boundary))}; paths {len(sig_count)}, relation classes {len(set(cls(x) for x in sig_count))}")
+if a.pool > 0:
+    # the classes that hold the most-used paths
+    groups = defaultdict(list)
+    for sg, c in sig_count.most_common(400): groups[cls(sg)].append((c, sg))
+    shown = 0
+    for c_, mem in sorted(groups.items(), key=lambda x: -sum(m[0] for m in x[1])):
+        if len(mem) < 2: continue
+        print("   class:", " | ".join(sg[0] + ' ' + ' '.join(voc[w] for w in sg[1:]) for _, sg in sorted(mem, reverse=True)[:6]))
+        shown += 1
+        if shown >= 8: break
 for k in ('where-person', 'where-object', 'who-has', 'all'):
     sel = [r for r in results if k == 'all' or r[0] == k]
     print(f"  {k:<13} first of the right kind {np.mean([r[3] for r in sel]):6.1%}   top overall {np.mean([r[4] for r in sel]):6.1%}   ({len(sel)})")
