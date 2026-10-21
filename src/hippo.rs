@@ -79,6 +79,12 @@ pub struct HippoCfg {
     /// a fresh binding's score (0 = off).
     pub holo_mag: usize,
     pub holo_sup: usize,
+    /// Sparse contextified holographic memory (src/ctxholo.rs): elements, active elements per key, context
+    /// slots redrawn per word and per boundary (0 elements = off).
+    pub ch_d: usize,
+    pub ch_k: usize,
+    pub ch_drift: usize,
+    pub ch_bdrift: usize,
 }
 
 struct SegRow {
@@ -116,6 +122,7 @@ pub struct Hippo {
     pub chan_lists: Vec<Vec<u32>>,
     pub nch_pub: usize,
     holo: Option<crate::holo::Holo>,
+    ch: Option<crate::ctxholo::CtxHolo>,
     pub superseded: u64,
 }
 
@@ -139,8 +146,13 @@ impl Hippo {
             d,
             wpr,
             holo,
+            ch: if cfg.ch_d > 0 {
+                Some(crate::ctxholo::CtxHolo::new(cfg.ch_d, cfg.ch_k, cfg.holo_levels, cfg.ch_drift, cfg.ch_bdrift))
+            } else {
+                None
+            },
             superseded: 0,
-            mem: vec![0; if cfg.holo_d > 0 { 0 } else { 2 * cfg.planes * d * wpr }],
+            mem: vec![0; if cfg.holo_d > 0 || cfg.ch_d > 0 { 0 } else { 2 * cfg.planes * d * wpr }],
             busy: vec![0; d],
             tmem: vec![0; if cfg.typed { d * wpr } else { 0 }],
             head: 0,
@@ -434,6 +446,64 @@ impl Hippo {
         }
     }
 
+    /// Channel lists from the contextified trace (no phases): hop 1 per (cue word, direction), hop 2 from each
+    /// one's best words (scores summed, halved per rank place), either direction. Ranked by excess share over
+    /// the background, by subtraction.
+    fn ch_lists(&self, cue: &[u32], skipf: &[u32], kk: usize, lists: &mut [Vec<(u32, u32)>]) {
+        let h = self.ch.as_ref().unwrap();
+        let c = self.cfg.cue;
+        let n1 = c * 2;
+        let words: Vec<u32> = self.words.clone();
+        // per read: every word's (score, baseline)
+        let mut reads: HashMap<(u32, usize), Vec<(i64, i64)>> = HashMap::new();
+        let get = |w: u32, dir: usize, reads: &mut HashMap<(u32, usize), Vec<(i64, i64)>>| -> Vec<(i64, i64)> {
+            reads
+                .entry((w, dir))
+                .or_insert_with(|| {
+                    let z = h.read(dir, w);
+                    words.iter().map(|&x| h.score(&z, x)).collect()
+                })
+                .clone()
+        };
+        let rank = |sb: &[(i64, i64)], skip: &[u32], k: usize| -> Vec<(u32, u32)> {
+            let v: Vec<(u32, i64, i64)> = self
+                .words
+                .iter()
+                .zip(sb)
+                .filter(|(w, _)| !skip.contains(w))
+                .map(|(&w, &(s, b))| (w, s, b.max(0)))
+                .filter(|x| x.1 > 0)
+                .collect();
+            let st: i128 = v.iter().map(|x| x.1 as i128).sum();
+            let bt: i128 = v.iter().map(|x| x.2 as i128).sum::<i128>().max(1);
+            let mut e: Vec<(u32, i64, i128)> = v.iter().map(|x| (x.0, x.1, x.1 as i128 * bt - x.2 as i128 * st)).filter(|x| x.2 > 0).collect();
+            e.sort_unstable_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+            e.truncate(k);
+            e.into_iter().map(|x| (x.0, x.1.min(u32::MAX as i64) as u32)).collect()
+        };
+        let mut fronts: Vec<Vec<u32>> = vec![vec![]; n1];
+        for (j, &w) in cue.iter().enumerate() {
+            for dir in 0..2 {
+                let sb = get(w, dir, &mut reads);
+                lists[j * 2 + dir] = rank(&sb, skipf, kk);
+                fronts[j * 2 + dir] = rank(&sb, cue, self.cfg.k2).into_iter().map(|x| x.0).collect();
+            }
+        }
+        for jd in 0..cue.len() * 2 {
+            for d2 in 0..2 {
+                let mut sb = vec![(0i64, 0i64); self.words.len()];
+                for (r, &f) in fronts[jd].iter().enumerate() {
+                    let sh = if self.cfg.front_rank { (r as u32).min(16) } else { 0 };
+                    for (o, x) in sb.iter_mut().zip(get(f, d2, &mut reads)) {
+                        o.0 += (x.0 << 8) >> sh;
+                        o.1 += (x.1 << 8) >> sh;
+                    }
+                }
+                lists[n1 + jd * 2 + d2] = rank(&sb, skipf, kk);
+            }
+        }
+    }
+
     // ---- segmentation ----
     fn seg_update(&mut self, a: u32, u: u32, c: u32) {
         let (s, l, wpr) = (self.cfg.s, self.cfg.l, self.wpr);
@@ -573,7 +643,9 @@ impl Hippo {
             1
         };
         let n1 = c * 2 * np;
-        if self.holo.is_some() {
+        if self.ch.is_some() {
+            self.ch_lists(&cue, &skipf, kk, &mut lists);
+        } else if self.holo.is_some() {
             self.holo_lists(&cue, &skipf, kk, np, &mut lists);
         } else {
         // hop-1 channel (j, dir, phase): the phase wanted, or any (the last)
@@ -809,7 +881,11 @@ impl Hippo {
                 let fs = self.code(s);
                 let ps = self.hist_ph[self.hist_ph.len() - 1 - j];
                 let fsp = self.shift(&fs, ps);
-                if let Some(h) = self.holo.as_mut() {
+                if let Some(h) = self.ch.as_mut() {
+                    let mag = self.cfg.holo_mag as i16;
+                    h.write(0, s, w, mag);
+                    h.write(1, w, s, mag);
+                } else if let Some(h) = self.holo.as_mut() {
                     let mag = self.cfg.holo_mag as i16;
                     if self.cfg.holo_sup > 0 {
                         // supersede: the value the key held in this role, if it is held clearly and is not the
@@ -837,6 +913,10 @@ impl Hippo {
                 break;
             }
         }
+        if let Some(h) = self.ch.as_mut() {
+            let b = self.seg.get(w as usize).and_then(|r| r.as_ref()).map(|r| r.boundary).unwrap_or(false);
+            h.step(b);
+        }
         self.hist.push(w);
         self.hist_ph.push(pw);
         // the free-running phase: one step per word, back to 0 after a boundary
@@ -861,7 +941,7 @@ impl Hippo {
                 h.halve();
             }
         }
-        if self.holo.is_none() && self.tick % self.cfg.epoch as u64 == 0 {
+        if self.holo.is_none() && self.ch.is_none() && self.tick % self.cfg.epoch as u64 == 0 {
             self.head = (self.head + 1) % self.cfg.planes;
             for dir in 0..2 {
                 let a = self.row_at(dir, self.head, 0);

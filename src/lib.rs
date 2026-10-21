@@ -17,6 +17,7 @@ pub mod bits;
 pub mod brain;
 pub mod edge;
 pub mod episodic;
+pub mod ctxholo;
 pub mod hippo;
 pub mod holo;
 pub mod info;
