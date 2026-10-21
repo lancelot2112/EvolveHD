@@ -37,6 +37,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         mdim: g("--sit-mdim", "2048").parse().unwrap(),
         mwin: g("--sit-mwin", "2").parse().unwrap(),
         bdrift: g("--sit-bdrift", "1").parse().unwrap(),
+        clock: g("--sit-clock", "0").parse().unwrap(),
     }
 }
 
@@ -670,16 +671,7 @@ fn main() {
                         );
                     }
                 }
-                if let St::S(x) = &a {
-                let voc: Vec<String> = arg(&args, "--vocab").map(|p| std::fs::read_to_string(p).unwrap().lines().map(String::from).collect()).unwrap_or_default();
-                let name = |w: u32| voc.get(w as usize).cloned().unwrap_or(w.to_string());
-                eprintln!("learned boundaries: {} | paths {} | relation classes {}", x.boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.n_paths(), x.n_classes());
-                for cl in x.classes(8) {
-                    let ps: Vec<String> = cl.iter().map(|p| format!("{} {}", if p[0] == 0 { "f" } else { "b" }, p[1..].iter().rev().map(|&w| name(w)).collect::<Vec<_>>().join(" "))).collect();
-                    eprintln!("  class: {}", ps.join(" | "));
-                }
-            }
-            if let St::H(h) = &a {
+                if let St::H(h) = &a {
                     for ch in 0..h.nch_pub {
                         for i in 0..kk {
                             chans.push(
@@ -695,6 +687,15 @@ fn main() {
                 a.observe(w);
             }
             eprintln!("{} words, {:.1} s", ids.len(), t0.elapsed().as_secs_f64());
+            if let St::S(x) = &a {
+                let voc: Vec<String> = arg(&args, "--vocab").map(|p| std::fs::read_to_string(p).unwrap().lines().map(String::from).collect()).unwrap_or_default();
+                let name = |w: u32| voc.get(w as usize).cloned().unwrap_or(w.to_string());
+                eprintln!("learned boundaries: {} | paths {} | relation classes {}", x.boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.n_paths(), x.n_classes());
+                for cl in x.classes(8) {
+                    let ps: Vec<String> = cl.iter().map(|p| format!("{} {}", if p[0] == 0 { "f" } else { "b" }, p[1..].iter().rev().map(|&w| name(w)).collect::<Vec<_>>().join(" "))).collect();
+                    eprintln!("  class: {}", ps.join(" | "));
+                }
+            }
             if !chans.is_empty() {
                 std::fs::write(
                     format!("{}.chan", arg(&args, "--out").unwrap()),

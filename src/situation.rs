@@ -39,6 +39,10 @@ pub struct SitCfg {
     pub mdim: usize,
     pub mwin: usize,
     pub bdrift: usize,
+    /// Per-slot clocks: slot i's phase steps on every `clock` * 2^(i mod 7) words (0 = off), so a write fades
+    /// gradually as the clocks of more of its slots tick; proposals from reliable routes are then ranked by
+    /// strength, the freshest first.
+    pub clock: u64,
 }
 
 /// A pooled relation class: a prototype (bit counts) and its name (its first path).
@@ -369,14 +373,14 @@ impl Situation {
     pub fn recall(&mut self) -> Vec<(u32, f64)> {
         let ctx = self.ctx_key();
         let cue: Vec<u32> = (0..self.cfg.cue.min(self.hist.len())).map(|j| self.hist[self.hist.len() - 1 - j]).collect();
-        let mut props: Vec<(u32, u32)> = vec![];
+        let mut props: Vec<(u32, u32, i128)> = vec![];
         for (j, &e) in cue.iter().enumerate() {
             if let Some(c1) = self.c1.get(&(ctx, j)) {
                 let mut v: Vec<(u32, u32)> = c1.iter().map(|(&c, &n)| (c, n)).filter(|x| x.1 >= 2).collect();
                 v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
                 for &(c, n) in v.iter().take(3) {
-                    if let Some((val, _)) = self.read_best(e, c, &cue) {
-                        props.push((n, val));
+                    if let Some((val, x)) = self.read_best(e, c, &cue) {
+                        props.push((n, val, x));
                     }
                 }
             }
@@ -385,14 +389,22 @@ impl Situation {
                 v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
                 for &((c1_, c2_), n) in v.iter().take(2) {
                     if let Some((m, _)) = self.read_best(e, c1_, &[e]) {
-                        if let Some((val, _)) = self.read_best(m, c2_, &cue) {
-                            props.push((n, val));
+                        if let Some((val, x)) = self.read_best(m, c2_, &cue) {
+                            props.push((n, val, x));
                         }
                     }
                 }
             }
         }
-        props.sort_by(|a, b| b.0.cmp(&a.0));
+        // routes reliable enough (counts at least half the best), then the freshest (strongest) reading first
+        let maxc = props.iter().map(|x| x.0).max().unwrap_or(0);
+        if self.cfg.clock > 0 {
+            props.retain(|x| 2 * x.0 >= maxc);
+            props.sort_by(|a, b| b.2.cmp(&a.2));
+        } else {
+            props.sort_by(|a, b| b.0.cmp(&a.0));
+        }
+        let props: Vec<(u32, u32)> = props.into_iter().map(|x| (x.0, x.1)).collect();
         self.last = props.clone();
         let tot: f64 = props.iter().map(|x| x.0 as f64).sum();
         let mut out: Vec<(u32, f64)> = vec![];
@@ -481,6 +493,15 @@ impl Situation {
         if !self.seen[w as usize] {
             self.seen[w as usize] = true;
             self.words.push(w);
+        }
+        // the clocks: slot i steps its phase every clock * 2^(i mod 7) words
+        if self.cfg.clock > 0 {
+            for i in 0..self.cfg.k {
+                let per = self.cfg.clock << (i % 7);
+                if (self.t + 1) % per == 0 {
+                    self.ctx_ph[i] = (self.ctx_ph[i] + 1) & 3;
+                }
+            }
         }
         // the context drifts at learned boundaries
         if self.boundary[w as usize] {
