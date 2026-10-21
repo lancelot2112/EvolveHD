@@ -180,6 +180,11 @@ impl Meaning {
         }
     }
 
+    /// A word's identity code (its fixed 32 bits, the bits its neighbours' meaning counters count).
+    pub fn ident(&self, w: u32) -> &[u32] {
+        &self.ident[w as usize]
+    }
+
     /// A word's meaning code, or its random identity code while it has none.
     pub fn code_or_ident(&mut self, w: u32) -> Vec<u32> {
         self.mcode(w)

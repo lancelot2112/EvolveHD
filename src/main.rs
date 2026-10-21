@@ -40,6 +40,8 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         clock: g("--sit-clock", "0").parse().unwrap(),
         sense: flag(args, "--sit-sense"),
         sense_mix: g("--sit-sense-mix", "1").parse().unwrap(),
+        nsenses: g("--sit-nsenses", "3").parse().unwrap(),
+        sense_new: g("--sit-sense-new", "0.3").parse().unwrap(),
     }
 }
 
@@ -694,7 +696,7 @@ fn main() {
                 let id = |s: &str| voc.iter().position(|w| w == s).map(|i| i as u32);
                 if let (Some(to), Some(went), Some(kit), Some(gave), Some(apple), Some(mary)) = (id("to"), id("went"), id("kitchen"), id("gave"), id("apple"), id("mary")) {
                     let (ab, ap, bp) = x.sense_overlap(to, &[went, kit], &[gave, apple, mary]);
-                    eprintln!("sense of 'to': moving vs giving overlap {ab:.2}; moving vs plain {ap:.2}; giving vs plain {bp:.2}");
+                    eprintln!("sense of 'to': moving vs giving overlap {ab:.2}; moving vs plain {ap:.2}; giving vs plain {bp:.2}; senses learned for 'to': {}", x.n_senses(to));
                 }
             }
             if let St::S(x) = &a {

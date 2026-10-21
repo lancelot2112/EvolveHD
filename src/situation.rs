@@ -46,6 +46,16 @@ pub struct SitCfg {
     /// Attend each path word's meaning to its clause before pooling (its sense in context).
     pub sense: bool,
     pub sense_mix: f32,
+    /// Learned senses per word (at most), and the match below which a context starts a new one.
+    pub nsenses: usize,
+    pub sense_new: f64,
+}
+
+/// A learned sense of a word: a prototype of the contexts it is used in (counts over the identity bits of the
+/// clause words around it).
+struct Sense {
+    counts: Vec<u32>,
+    n: u32,
 }
 
 /// A pooled relation class: a prototype (bit counts) and its name (its first path).
@@ -75,6 +85,7 @@ pub struct Situation {
     path_class: HashMap<Vec<u32>, u32>,
     protos: Vec<Proto>,
     class_count: Vec<u64>,
+    senses: HashMap<u32, Vec<Sense>>,
     // slow memory
     c1: HashMap<(u64, usize), HashMap<u32, u32>>,
     c2: HashMap<(u64, usize), HashMap<(u32, u32), u32>>,
@@ -84,6 +95,7 @@ pub struct Situation {
     words: Vec<u32>,
     t: u64,
     pub last: Vec<(u32, u32)>, // the last prediction's proposals: (value, weight)
+    learning: bool,
 }
 
 const DRE: [i8; 4] = [1, 0, -1, 0];
@@ -114,6 +126,7 @@ impl Situation {
             path_class: HashMap::new(),
             protos: vec![],
             class_count: vec![],
+            senses: HashMap::new(),
             c1: HashMap::new(),
             c2: HashMap::new(),
             hist: vec![],
@@ -122,17 +135,24 @@ impl Situation {
             words: vec![],
             t: 0,
             last: vec![],
+            learning: true,
             cfg,
         }
     }
 
     /// Diagnostics: the overlap (shared bits / k) of word w's sense in two contexts, and of its plain code with each.
     pub fn sense_overlap(&mut self, w: u32, c1: &[u32], c2: &[u32]) -> (f64, f64, f64) {
-        let a = self.mn.sense(w, c1);
-        let b = self.mn.sense(w, c2);
+        let (a, b) = if self.cfg.nsenses > 0 {
+            (self.sense_code(w, c1, false), self.sense_code(w, c2, false))
+        } else {
+            (self.mn.sense(w, c1), self.mn.sense(w, c2))
+        };
         let p = self.mn.code_or_ident(w);
         let ov = |x: &[u32], y: &[u32]| x.iter().filter(|b| y.contains(b)).count() as f64 / x.len().max(1) as f64;
         (ov(&a, &b), ov(&a, &p), ov(&b, &p))
+    }
+    pub fn n_senses(&self, w: u32) -> usize {
+        self.senses.get(&w).map(|v| v.len()).unwrap_or(0)
     }
     pub fn boundaries(&self) -> Vec<u32> {
         (0..self.nw as u32).filter(|&w| self.boundary[w as usize]).collect()
@@ -205,7 +225,7 @@ impl Situation {
         for (i, &w) in words.iter().enumerate() {
             let c = if self.cfg.sense {
                 let ctx: Vec<u32> = ends.iter().chain(words.iter()).copied().filter(|&x| x != w).collect();
-                self.mn.sense(w, &ctx)
+                self.sense_code(w, &ctx, self.learning)
             } else {
                 self.mn.code_or_ident(w)
             };
@@ -213,6 +233,60 @@ impl Situation {
         }
         out.sort_unstable();
         out.dedup();
+        out
+    }
+
+    /// A word's sense in a context: a sparse subset of its own meaning code. The context (the identity bits of
+    /// the clause words around it) picks the word's learned sense whose context prototype it matches best (mean
+    /// count over the context's bits, relative to the sense's uses), or starts one (up to `nsenses`); when
+    /// learning, that sense's prototype counts the context. The sense's code is the half of the word's meaning
+    /// code most counted in its prototype.
+    fn sense_code(&mut self, w: u32, ctx: &[u32], learn: bool) -> Vec<u32> {
+        let plain = self.mn.code_or_ident(w);
+        let mut cb: Vec<u32> = ctx.iter().flat_map(|&c| self.mn.ident(c).to_vec()).collect();
+        cb.sort_unstable();
+        cb.dedup();
+        if cb.is_empty() || plain.is_empty() {
+            return plain;
+        }
+        let d = self.cfg.mdim;
+        let ss = self.senses.entry(w).or_default();
+        // the best-matching sense: the share of the context's bits it has seen, per use
+        let mut best = (0.0f64, usize::MAX);
+        for (i, sn) in ss.iter().enumerate() {
+            let m = cb.iter().map(|&b| sn.counts[b as usize] as f64).sum::<f64>() / (sn.n.max(1) as f64 * cb.len() as f64);
+            if m > best.0 {
+                best = (m, i);
+            }
+        }
+        let i = if best.1 == usize::MAX || (best.0 < self.cfg.sense_new && ss.len() < self.cfg.nsenses) {
+            if !learn {
+                return plain;
+            }
+            ss.push(Sense { counts: vec![0; d], n: 0 });
+            ss.len() - 1
+        } else {
+            best.1
+        };
+        if learn {
+            let sn = &mut ss[i];
+            sn.n += 1;
+            for &b in &cb {
+                sn.counts[b as usize] += 1;
+            }
+        }
+        let sn = &ss[i];
+        if sn.n < 4 {
+            return plain;
+        }
+        let mut v: Vec<(u32, u32)> = plain.iter().map(|&b| (sn.counts[b as usize], b)).collect();
+        v.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        let keep = (plain.len() + 1) / 2;
+        let mut out: Vec<u32> = v.into_iter().take(keep).filter(|x| x.0 > 0).map(|x| x.1).collect();
+        if out.is_empty() {
+            return plain;
+        }
+        out.sort_unstable();
         out
     }
 
@@ -290,10 +364,12 @@ impl Situation {
         self.protos.clear();
         self.class_count.clear();
         self.path_class.clear();
+        self.learning = false;
         for (c, p) in paths {
             let k = self.class_of(&p) as usize;
             self.class_count[k] += c;
         }
+        self.learning = true;
         let map: HashMap<u32, u32> = rep.into_iter().map(|(old, p)| (old, self.path_class[&p])).collect();
         let c1 = std::mem::take(&mut self.c1);
         for (k, m) in c1 {
