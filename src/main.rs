@@ -35,7 +35,10 @@ fn hippo_cfg(args: &[String]) -> evolvehd::hippo::HippoCfg {
         k: g("--hp-k", "8").parse().unwrap(),
         k2: g("--hp-k2", "2").parse().unwrap(),
         khit: g("--hp-khit", "0").parse().unwrap(),
-        ctx: g("--hp-ctx", "0,2,3").split(',').map(|x| x.parse().unwrap()).collect(),
+        ctx: g("--hp-ctx", "0,2,3")
+            .split(',')
+            .map(|x| x.parse().unwrap())
+            .collect(),
         seg_r: g("--hp-seg-r", "16").parse().unwrap(),
         ctx_bind: flag(args, "--hp-ctx-bind"),
         lift: !flag(args, "--hp-no-lift"),
@@ -47,6 +50,11 @@ fn hippo_cfg(args: &[String]) -> evolvehd::hippo::HippoCfg {
         cancel: flag(args, "--hp-cancel"),
         excess: flag(args, "--hp-excess"),
         phase: g("--hp-phase", "0").parse().unwrap(),
+        hop2_ph: g("--hp-hop2-ph", "")
+            .split(',')
+            .filter(|x| !x.is_empty())
+            .map(|x| x.parse().unwrap())
+            .collect(),
     }
 }
 
@@ -132,7 +140,11 @@ fn cfg_from(args: &[String]) -> Cfg {
     }
     c.recency_kept = flag(args, "--recency-kept");
     if let Some(x) = arg(args, "--err-write") {
-        c.err_write = match x { "global" | "1" => 1, "local" | "2" => 2, _ => 0 };
+        c.err_write = match x {
+            "global" | "1" => 1,
+            "local" | "2" => 2,
+            _ => 0,
+        };
     }
     if let Some(x) = arg(args, "--err-alpha") {
         c.err_alpha = x.parse().unwrap();
@@ -516,7 +528,11 @@ fn main() {
             let mut mn = Meaning::new(cfg, nw);
             let small = flag(&args, "--rows16");
             let mut rows = BitRows::new(d, nw, small);
-            let mut wrows = if wm_on { Some(BitRows::new(d, nw, small)) } else { None };
+            let mut wrows = if wm_on {
+                Some(BitRows::new(d, nw, small))
+            } else {
+                None
+            };
             let mut snap: Option<Snapshot> = None;
             let (mut qb, mut qm, mut qw) = (vec![0.0f64; n], vec![0.0f64; n], vec![0.0f64; n]);
             let t0 = Instant::now();
@@ -562,7 +578,10 @@ fn main() {
             // candidates (255 = not among them), as u8 per hop, to OUT.rank; and each hop's k candidates (u32,
             // u32::MAX for none) to OUT.top
             let raw = std::fs::read(arg(&args, "--data").expect("--data")).unwrap();
-            let ids: Vec<u32> = raw.chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            let ids: Vec<u32> = raw
+                .chunks(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
             let nw = *ids.iter().max().unwrap() as usize + 1;
             enum St {
                 A(evolvehd::assoc::Assoc),
@@ -570,10 +589,16 @@ fn main() {
             }
             impl St {
                 fn recall(&mut self) -> Vec<Vec<(u32, f64)>> {
-                    match self { St::A(a) => a.recall(), St::H(h) => h.recall() }
+                    match self {
+                        St::A(a) => a.recall(),
+                        St::H(h) => h.recall(),
+                    }
                 }
                 fn observe(&mut self, w: u32) {
-                    match self { St::A(a) => a.observe(w), St::H(h) => h.observe(w) }
+                    match self {
+                        St::A(a) => a.observe(w),
+                        St::H(h) => h.observe(w),
+                    }
                 }
             }
             let (mut a, hops, kk) = if flag(&args, "--hippo") {
@@ -592,16 +617,31 @@ fn main() {
             for &w in &ids {
                 let sets = a.recall();
                 for h in 0..hops {
-                    let r = sets.get(h).and_then(|s| s.iter().position(|x| x.0 == w)).map(|p| p as u8).unwrap_or(255);
+                    let r = sets
+                        .get(h)
+                        .and_then(|s| s.iter().position(|x| x.0 == w))
+                        .map(|p| p as u8)
+                        .unwrap_or(255);
                     out.push(r);
                     for i in 0..kk {
-                        top.push(sets.get(h).and_then(|s| s.get(i)).map(|x| x.0).unwrap_or(u32::MAX));
+                        top.push(
+                            sets.get(h)
+                                .and_then(|s| s.get(i))
+                                .map(|x| x.0)
+                                .unwrap_or(u32::MAX),
+                        );
                     }
                 }
                 if let St::H(h) = &a {
                     for ch in 0..h.nch_pub {
                         for i in 0..kk {
-                            chans.push(h.chan_lists.get(ch).and_then(|l| l.get(i)).copied().unwrap_or(u32::MAX));
+                            chans.push(
+                                h.chan_lists
+                                    .get(ch)
+                                    .and_then(|l| l.get(i))
+                                    .copied()
+                                    .unwrap_or(u32::MAX),
+                            );
                         }
                     }
                 }
@@ -609,22 +649,58 @@ fn main() {
             }
             eprintln!("{} words, {:.1} s", ids.len(), t0.elapsed().as_secs_f64());
             if !chans.is_empty() {
-                std::fs::write(format!("{}.chan", arg(&args, "--out").unwrap()), chans.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+                std::fs::write(
+                    format!("{}.chan", arg(&args, "--out").unwrap()),
+                    chans
+                        .iter()
+                        .flat_map(|x| x.to_le_bytes())
+                        .collect::<Vec<u8>>(),
+                )
+                .unwrap();
             }
             if let St::H(h) = &a {
-                let voc: Vec<String> = arg(&args, "--vocab").map(|p| std::fs::read_to_string(p).unwrap().lines().map(String::from).collect()).unwrap_or_default();
-                let b: Vec<String> = h.boundaries().iter().map(|&w| voc.get(w as usize).cloned().unwrap_or(w.to_string())).collect();
-                eprintln!("learned boundaries: {} | attention updates {}", b.join(" "), h.att_updates);
+                let voc: Vec<String> = arg(&args, "--vocab")
+                    .map(|p| {
+                        std::fs::read_to_string(p)
+                            .unwrap()
+                            .lines()
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let b: Vec<String> = h
+                    .boundaries()
+                    .iter()
+                    .map(|&w| voc.get(w as usize).cloned().unwrap_or(w.to_string()))
+                    .collect();
+                eprintln!(
+                    "learned boundaries: {} | attention updates {}",
+                    b.join(" "),
+                    h.att_updates
+                );
                 if flag(&args, "--seg-stats") {
                     for (w, n, hh, bd) in h.seg_stats() {
                         let r = |x: u64| x as f64 / n as f64;
-                        eprintln!("  {:<10} n {n:5} hit rate before {:.2} after {:.2} pair {:.2}{}", voc.get(w as usize).cloned().unwrap_or_default(), r(hh[0]), r(hh[1]), r(hh[2]), if bd { "  boundary" } else { "" });
+                        eprintln!(
+                            "  {:<10} n {n:5} hit rate before {:.2} after {:.2} pair {:.2}{}",
+                            voc.get(w as usize).cloned().unwrap_or_default(),
+                            r(hh[0]),
+                            r(hh[1]),
+                            r(hh[2]),
+                            if bd { "  boundary" } else { "" }
+                        );
                     }
                 }
             }
             let o = arg(&args, "--out").expect("--out");
             std::fs::write(format!("{o}.rank"), out).unwrap();
-            std::fs::write(format!("{o}.top"), top.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+            std::fs::write(
+                format!("{o}.top"),
+                top.iter()
+                    .flat_map(|x| x.to_le_bytes())
+                    .collect::<Vec<u8>>(),
+            )
+            .unwrap();
         }
         Some("wordslots") => {
             // a word-level brain over full word ids (u32 LE, frequency ranks): the `--base` commonest words
@@ -671,7 +747,8 @@ fn main() {
                     mapped[t] = w;
                     continue;
                 }
-                let decayed = |v: f64, tl: usize| v * 2f64.powf(-((t - tl) as f64) / slot_half.max(1.0));
+                let decayed =
+                    |v: f64, tl: usize| v * 2f64.powf(-((t - tl) as f64) / slot_half.max(1.0));
                 match slot_of.get(&w) {
                     Some(&s) => {
                         mapped[t] = base + 1 + s as u32;
@@ -690,9 +767,15 @@ fn main() {
                         spell0[t] = spell[t];
                         q_uni[t] = q;
                         if keep_half > 0.0 {
-                            let qc = if keep_tot > 0.0 { keep.get(&w).copied().unwrap_or(0.0) / keep_tot } else { 0.0 };
+                            let qc = if keep_tot > 0.0 {
+                                keep.get(&w).copied().unwrap_or(0.0) / keep_tot
+                            } else {
+                                0.0
+                            };
                             q_keep[t] = qc;
-                            let best = (0..8).min_by(|&a, &b| lam_loss[a].partial_cmp(&lam_loss[b]).unwrap()).unwrap();
+                            let best = (0..8)
+                                .min_by(|&a, &b| lam_loss[a].partial_cmp(&lam_loss[b]).unwrap())
+                                .unwrap();
                             for k in 0..8 {
                                 let p = (1.0 - lams[k]) * q + lams[k] * qc;
                                 lam_loss[k] -= p.log2();
@@ -703,13 +786,23 @@ fn main() {
                             let s = if slot_half > 0.0 {
                                 (0..ns)
                                     .min_by(|&a, &b| {
-                                        let va = if owner[a].is_some() { decayed(use_v[a], last[a]) } else { -1.0 };
-                                        let vb = if owner[b].is_some() { decayed(use_v[b], last[b]) } else { -1.0 };
+                                        let va = if owner[a].is_some() {
+                                            decayed(use_v[a], last[a])
+                                        } else {
+                                            -1.0
+                                        };
+                                        let vb = if owner[b].is_some() {
+                                            decayed(use_v[b], last[b])
+                                        } else {
+                                            -1.0
+                                        };
                                         va.partial_cmp(&vb).unwrap()
                                     })
                                     .unwrap()
                             } else {
-                                (0..ns).min_by_key(|&s| (owner[s].is_some(), last[s])).unwrap()
+                                (0..ns)
+                                    .min_by_key(|&s| (owner[s].is_some(), last[s]))
+                                    .unwrap()
                             };
                             use_v[s] = 1.0;
                             if let Some(o) = owner[s] {
@@ -763,7 +856,11 @@ fn main() {
                 mc.k_story = g("--m-k", "64").parse().unwrap();
                 mc.fast = g("--m-fast", "0").parse().unwrap();
                 mc.fast_n = g("--m-fast-n", "8").parse().unwrap();
-                mc.wm_half = if wm_edge { g("--m-wm-half", "4").parse().unwrap() } else { 0.0 };
+                mc.wm_half = if wm_edge {
+                    g("--m-wm-half", "4").parse().unwrap()
+                } else {
+                    0.0
+                };
                 mc.identity = flag(&args, "--m-identity");
                 Some(Meaning::new(mc, *ids.iter().max().unwrap() as usize + 1))
             } else {
@@ -778,35 +875,48 @@ fn main() {
             let mut epi = if flag(&args, "--epi") {
                 use evolvehd::episodic::{EpiCfg, Episodic};
                 let g = |k: &str, d: &str| arg(&args, k).unwrap_or(d).to_string();
-                Some(Episodic::new(EpiCfg {
-                    skip: g("--epi-skip", "100").parse().unwrap(),
-                    bounds: g("--epi-bounds", "").split(',').filter(|x| !x.is_empty()).map(|x| x.parse().unwrap()).collect(),
-                    half: g("--epi-half", "200").parse().unwrap(),
-                    k: g("--epi-k", "8").parse().unwrap(),
-                    hops: g("--epi-hops", "2").parse().unwrap(),
-                    roles: flag(&args, "--epi-roles") || flag(&args, "--epi-both"),
-                    both: flag(&args, "--epi-both"),
-                    ctx_words: g("--epi-ctx", "0").parse().unwrap(),
-                    mclass: flag(&args, "--epi-mclass"),
-                    mdim: g("--epi-mdim", "14336").parse().unwrap(),
-                    mbar: g("--epi-mbar", "0.5").parse().unwrap(),
-                    learned: flag(&args, "--epi-learned"),
-                    win: g("--epi-win", "8").parse().unwrap(),
-                    cue: g("--epi-cue", "6").parse().unwrap(),
-                    role_cap: g("--epi-role-cap", "32").parse().unwrap(),
-                    gate_cap: g("--epi-gate-cap", "128").parse().unwrap(),
-                }).with_meaning(*ids.iter().max().unwrap() as usize + 1))
+                Some(
+                    Episodic::new(EpiCfg {
+                        skip: g("--epi-skip", "100").parse().unwrap(),
+                        bounds: g("--epi-bounds", "")
+                            .split(',')
+                            .filter(|x| !x.is_empty())
+                            .map(|x| x.parse().unwrap())
+                            .collect(),
+                        half: g("--epi-half", "200").parse().unwrap(),
+                        k: g("--epi-k", "8").parse().unwrap(),
+                        hops: g("--epi-hops", "2").parse().unwrap(),
+                        roles: flag(&args, "--epi-roles") || flag(&args, "--epi-both"),
+                        both: flag(&args, "--epi-both"),
+                        ctx_words: g("--epi-ctx", "0").parse().unwrap(),
+                        mclass: flag(&args, "--epi-mclass"),
+                        mdim: g("--epi-mdim", "14336").parse().unwrap(),
+                        mbar: g("--epi-mbar", "0.5").parse().unwrap(),
+                        learned: flag(&args, "--epi-learned"),
+                        win: g("--epi-win", "8").parse().unwrap(),
+                        cue: g("--epi-cue", "6").parse().unwrap(),
+                        role_cap: g("--epi-role-cap", "32").parse().unwrap(),
+                        gate_cap: g("--epi-gate-cap", "128").parse().unwrap(),
+                    })
+                    .with_meaning(*ids.iter().max().unwrap() as usize + 1),
+                )
             } else {
                 None
             };
             // the heteroassociative store (experiment 31b): --assoc, --as-* (see src/assoc.rs)
             let mut hip = if flag(&args, "--hippo") {
-                Some(evolvehd::hippo::Hippo::new(hippo_cfg(&args), *ids.iter().max().unwrap() as usize + 1))
+                Some(evolvehd::hippo::Hippo::new(
+                    hippo_cfg(&args),
+                    *ids.iter().max().unwrap() as usize + 1,
+                ))
             } else {
                 None
             };
             let mut asc = if flag(&args, "--assoc") {
-                Some(evolvehd::assoc::Assoc::new(assoc_cfg(&args), *ids.iter().max().unwrap() as usize + 1))
+                Some(evolvehd::assoc::Assoc::new(
+                    assoc_cfg(&args),
+                    *ids.iter().max().unwrap() as usize + 1,
+                ))
             } else {
                 None
             };
@@ -815,103 +925,136 @@ fn main() {
                 b.copy_lr = x.parse().unwrap();
             }
             let t0 = Instant::now();
-            let prog: usize = std::env::var("EVOLVEHD_PROGRESS").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let prog: usize = std::env::var("EVOLVEHD_PROGRESS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
             // the meaning state depends only on the word stream, so it runs on its own thread, a step ahead,
             // handing each tick's story code, working-memory code and naming probability to the word level
             let has_m = mn.is_some();
             let (tx, rx) = std::sync::mpsc::sync_channel::<(Vec<u32>, Vec<u32>, f64)>(4096);
             std::thread::scope(|sc| {
-            if let Some(mut m) = mn.take() {
-                let (ids_r, mapped_r) = (&ids, &mapped);
-                sc.spawn(move || {
-                    let mut msnap: Option<Snapshot> = None;
-                    for t in 0..n {
-                        let qm = if mean_spell && mapped_r[t] == other {
-                            msnap.as_ref().map(|s| s.prob_oov(ids_r[t], &m.code, &m.incode)).unwrap_or(0.0)
-                        } else {
-                            0.0
-                        };
-                        if tx.send((m.code.clone(), m.wm_code.clone(), qm)).is_err() {
-                            return;
-                        }
-                        m.observe(ids_r[t]);
-                        if mean_spell && t % 20000 == 19999 {
-                            msnap = Some(Snapshot::take_oov(&mut m, base));
-                        }
-                    }
-                });
-            } else {
-                drop(tx);
-            }
-            for t in 0..n {
-                let item = if has_m { Some(rx.recv().unwrap()) } else { None };
-                if let Some((code, wmc, _)) = item.as_ref() {
-                    let mut j = 0;
-                    if mcode_edge {
-                        b.set_ext(j, code.iter().map(|&x| (x, 1.0)).collect());
-                        j += 1;
-                    }
-                    if wm_edge {
-                        b.set_ext(j, wmc.iter().map(|&x| (x, 1.0)).collect());
-                    }
-                }
-                if let Some(ep) = epi.as_mut() {
-                    let sets = if ep.cfg.learned { ep.recall_learned() } else if ep.cfg.both { ep.recall_both() } else if ep.cfg.roles { ep.recall_roles() } else { ep.recall() };
-                    for (j, set) in sets.into_iter().enumerate() {
-                        b.set_copy(j, set);
-                    }
-                    b.copy_ctx_ext = ep.ctx_key();
-                }
-                if let Some(a) = asc.as_mut() {
-                    for (j, set) in a.recall().into_iter().enumerate() {
-                        b.set_copy(j, set);
-                    }
-                }
-                if let Some(h) = hip.as_mut() {
-                    for (j, set) in h.recall().into_iter().enumerate() {
-                        b.set_copy(j, set);
-                    }
-                }
-                b.push(mapped[t]);
-                if let Some(ep) = epi.as_mut() {
-                    ep.observe(ids[t]);
-                }
-                if let Some(a) = asc.as_mut() {
-                    a.observe(ids[t]);
-                }
-                if let Some(h) = hip.as_mut() {
-                    h.observe(ids[t]);
-                }
-                if let Some((_, _, qm)) = item {
-                    if mean_spell && mapped[t] == other {
-                        let (q, qc) = (q_uni[t], q_keep[t]);
-                        let mut best = 0;
-                        for (i, l) in mloss.iter().enumerate() {
-                            if *l < mloss[best] {
-                                best = i;
+                if let Some(mut m) = mn.take() {
+                    let (ids_r, mapped_r) = (&ids, &mapped);
+                    sc.spawn(move || {
+                        let mut msnap: Option<Snapshot> = None;
+                        for t in 0..n {
+                            let qm = if mean_spell && mapped_r[t] == other {
+                                msnap
+                                    .as_ref()
+                                    .map(|s| s.prob_oov(ids_r[t], &m.code, &m.incode))
+                                    .unwrap_or(0.0)
+                            } else {
+                                0.0
+                            };
+                            if tx.send((m.code.clone(), m.wm_code.clone(), qm)).is_err() {
+                                return;
+                            }
+                            m.observe(ids_r[t]);
+                            if mean_spell && t % 20000 == 19999 {
+                                msnap = Some(Snapshot::take_oov(&mut m, base));
                             }
                         }
-                        let p_at = |i: usize| {
-                            let (lk, lm) = (mlk[i / mlm.len()], mlm[i % mlm.len()]);
-                            if lk + lm >= 0.95 { f64::NAN } else { (1.0 - lk - lm) * q + lk * qc + lm * qm }
-                        };
-                        spell[t] = -p_at(best).log2();
-                        for i in 0..mloss.len() {
-                            let p = p_at(i);
-                            mloss[i] += if p.is_nan() { f64::INFINITY } else { -p.log2() };
+                    });
+                } else {
+                    drop(tx);
+                }
+                for t in 0..n {
+                    let item = if has_m {
+                        Some(rx.recv().unwrap())
+                    } else {
+                        None
+                    };
+                    if let Some((code, wmc, _)) = item.as_ref() {
+                        let mut j = 0;
+                        if mcode_edge {
+                            b.set_ext(j, code.iter().map(|&x| (x, 1.0)).collect());
+                            j += 1;
+                        }
+                        if wm_edge {
+                            b.set_ext(j, wmc.iter().map(|&x| (x, 1.0)).collect());
                         }
                     }
+                    if let Some(ep) = epi.as_mut() {
+                        let sets = if ep.cfg.learned {
+                            ep.recall_learned()
+                        } else if ep.cfg.both {
+                            ep.recall_both()
+                        } else if ep.cfg.roles {
+                            ep.recall_roles()
+                        } else {
+                            ep.recall()
+                        };
+                        for (j, set) in sets.into_iter().enumerate() {
+                            b.set_copy(j, set);
+                        }
+                        b.copy_ctx_ext = ep.ctx_key();
+                    }
+                    if let Some(a) = asc.as_mut() {
+                        for (j, set) in a.recall().into_iter().enumerate() {
+                            b.set_copy(j, set);
+                        }
+                    }
+                    if let Some(h) = hip.as_mut() {
+                        for (j, set) in h.recall().into_iter().enumerate() {
+                            b.set_copy(j, set);
+                        }
+                    }
+                    b.push(mapped[t]);
+                    if let Some(ep) = epi.as_mut() {
+                        ep.observe(ids[t]);
+                    }
+                    if let Some(a) = asc.as_mut() {
+                        a.observe(ids[t]);
+                    }
+                    if let Some(h) = hip.as_mut() {
+                        h.observe(ids[t]);
+                    }
+                    if let Some((_, _, qm)) = item {
+                        if mean_spell && mapped[t] == other {
+                            let (q, qc) = (q_uni[t], q_keep[t]);
+                            let mut best = 0;
+                            for (i, l) in mloss.iter().enumerate() {
+                                if *l < mloss[best] {
+                                    best = i;
+                                }
+                            }
+                            let p_at = |i: usize| {
+                                let (lk, lm) = (mlk[i / mlm.len()], mlm[i % mlm.len()]);
+                                if lk + lm >= 0.95 {
+                                    f64::NAN
+                                } else {
+                                    (1.0 - lk - lm) * q + lk * qc + lm * qm
+                                }
+                            };
+                            spell[t] = -p_at(best).log2();
+                            for i in 0..mloss.len() {
+                                let p = p_at(i);
+                                mloss[i] += if p.is_nan() { f64::INFINITY } else { -p.log2() };
+                            }
+                        }
+                    }
+                    if let Some(sym) = renew[t] {
+                        b.renew_sym(sym);
+                    }
+                    if prog > 0 && (t + 1) % prog == 0 {
+                        eprintln!(
+                            "t={} secs={:.0} bits={:.3}",
+                            t + 1,
+                            t0.elapsed().as_secs_f64(),
+                            b.bpb(t + 1 - prog, t + 1)
+                        );
+                    }
                 }
-                if let Some(sym) = renew[t] {
-                    b.renew_sym(sym);
-                }
-                if prog > 0 && (t + 1) % prog == 0 {
-                    eprintln!("t={} secs={:.0} bits={:.3}", t + 1, t0.elapsed().as_secs_f64(), b.bpb(t + 1 - prog, t + 1));
-                }
-            }
             });
             let vocab_txt: Vec<String> = arg(&args, "--epi-vocab")
-                .map(|p| std::fs::read_to_string(p).unwrap().lines().map(String::from).collect())
+                .map(|p| {
+                    std::fs::read_to_string(p)
+                        .unwrap()
+                        .lines()
+                        .map(String::from)
+                        .collect()
+                })
                 .unwrap_or_default();
             if let Some(ep) = epi.as_ref() {
                 let (r, g, c) = ep.stats();
@@ -919,13 +1062,30 @@ fn main() {
             }
             let mut gl: Vec<(f64, String)> = vec![];
             for (j, (b0, w)) in b.copy_gains().into_iter().enumerate() {
-                let top: Vec<String> = w.iter().take(3).map(|(c, x)| format!("cell {c}: {x:+.2}")).collect();
+                let top: Vec<String> = w
+                    .iter()
+                    .take(3)
+                    .map(|(c, x)| format!("cell {c}: {x:+.2}"))
+                    .collect();
                 let lab = match epi.as_ref() {
-                    Some(ep) if (ep.cfg.roles || ep.cfg.learned) && j < ep.chan_names.len() + if ep.cfg.both || ep.cfg.learned { ep.cfg.hops } else { 0 } => ep.chan_label(j, &vocab_txt),
+                    Some(ep)
+                        if (ep.cfg.roles || ep.cfg.learned)
+                            && j < ep.chan_names.len()
+                                + if ep.cfg.both || ep.cfg.learned {
+                                    ep.cfg.hops
+                                } else {
+                                    0
+                                } =>
+                    {
+                        ep.chan_label(j, &vocab_txt)
+                    }
                     _ => format!("channel {j}"),
                 };
                 let best = w.first().map(|x| x.1).unwrap_or(0.0);
-                gl.push((best, format!("{lab}: base {b0:+.2}; context {}", top.join(", "))));
+                gl.push((
+                    best,
+                    format!("{lab}: base {b0:+.2}; context {}", top.join(", ")),
+                ));
             }
             gl.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
             for (_, l) in gl.iter().take(12) {
@@ -940,8 +1100,23 @@ fn main() {
             }
             {
                 let p = &b.prof;
-                let names = ["", "temporal", "synergy", "screen", "check", "scoring", "gains", "writes", "nodes", "run-screens", "matching", "tick"];
-                let parts: Vec<String> = (1..12).map(|i| format!("{} {:.1}", names[i], p[i])).collect();
+                let names = [
+                    "",
+                    "temporal",
+                    "synergy",
+                    "screen",
+                    "check",
+                    "scoring",
+                    "gains",
+                    "writes",
+                    "nodes",
+                    "run-screens",
+                    "matching",
+                    "tick",
+                ];
+                let parts: Vec<String> = (1..12)
+                    .map(|i| format!("{} {:.1}", names[i], p[i]))
+                    .collect();
                 eprintln!("profile (s): {}", parts.join(", "));
             }
             let h = n / 2;

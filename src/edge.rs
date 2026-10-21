@@ -433,7 +433,11 @@ impl Edge {
         for k in 0..LEVELS {
             lv[k] = rng.f64() < prob[k];
         }
-        let wrong = if self.forget > 0 { self.err_wrong } else { None };
+        let wrong = if self.forget > 0 {
+            self.err_wrong
+        } else {
+            None
+        };
         let forget = self.forget;
         self.row(cur, gen, tix, tcodes, talive, rng);
         let r = self.rows.get_mut(&cur).unwrap();
@@ -490,7 +494,8 @@ impl Edge {
                     .filter(|&b| bits::get(m, b as usize) && !bits::get(tgt, b as usize))
                     .collect();
                 let wb = rng.sample(&wb, wb.len());
-                let sround = |x: f64, rng: &mut Rng| x.floor() as usize + (rng.f64() < x.fract()) as usize;
+                let sround =
+                    |x: f64, rng: &mut Rng| x.floor() as usize + (rng.f64() < x.fract()) as usize;
                 let mut take = sround(need as f64 * pw, rng);
                 if forget >= 2 {
                     extra = sround(w as f64 * pw, rng);
@@ -504,7 +509,9 @@ impl Edge {
                 // Python reference rule: 4w+8 draws, keep eligible, sort, take the lowest
                 let mut c: Vec<u16> = (0..4 * w + 8)
                     .map(|_| rng.below(D) as u16)
-                    .filter(|&b| bits::get(m, b as usize) && !bits::get(tgt, b as usize) && !ra.contains(&b))
+                    .filter(|&b| {
+                        bits::get(m, b as usize) && !bits::get(tgt, b as usize) && !ra.contains(&b)
+                    })
                     .collect();
                 c.sort_unstable();
                 c.dedup();
@@ -544,7 +551,12 @@ impl Edge {
             Some(s) => s,
             None => return false,
         };
-        let w = self.beta + if self.confidence { self.beta_c * self.lam } else { 0.0 };
+        let w = self.beta
+            + if self.confidence {
+                self.beta_c * self.lam
+            } else {
+                0.0
+            };
         if neg {
             out.iter_mut().zip(sc).for_each(|(o, s)| *o -= w * s);
         } else {

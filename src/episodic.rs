@@ -61,7 +61,16 @@ struct Classes {
 
 impl Classes {
     fn new(d: usize, bar: f64) -> Self {
-        Classes { d, counts: vec![], members: vec![], size: vec![], seen: vec![], bar, owners: vec![vec![]; d], cap: 1024 }
+        Classes {
+            d,
+            counts: vec![],
+            members: vec![],
+            size: vec![],
+            seen: vec![],
+            bar,
+            owners: vec![vec![]; d],
+            cap: 1024,
+        }
     }
     /// The class of a code (bit positions), learning from it.
     fn assign(&mut self, code: &[u32]) -> u32 {
@@ -104,7 +113,9 @@ impl Classes {
         // the prototype: the code-sized set of its most counted bits
         let k = code.len();
         let c = &self.counts[j];
-        let mut idx: Vec<u32> = (0..self.d as u32).filter(|&i| c[i as usize] > 0.0).collect();
+        let mut idx: Vec<u32> = (0..self.d as u32)
+            .filter(|&i| c[i as usize] > 0.0)
+            .collect();
         if idx.len() > k {
             idx.select_nth_unstable_by(k - 1, |&a, &b| c[b as usize].total_cmp(&c[a as usize]));
             idx.truncate(k);
@@ -205,7 +216,11 @@ impl Episodic {
             mc.d = self.cfg.mdim;
             mc.skip = 0;
             mc.seed = 7;
-            self.wild_code = crate::rng::Rng::new(11).choose_distinct(mc.d, mc.k_word).into_iter().map(|x| x as u32).collect();
+            self.wild_code = crate::rng::Rng::new(11)
+                .choose_distinct(mc.d, mc.k_word)
+                .into_iter()
+                .map(|x| x as u32)
+                .collect();
             self.mn = Some(Meaning::new(mc, nw));
             let mut rc = Classes::new(self.cfg.mdim, self.cfg.mbar);
             rc.cap = self.cfg.role_cap;
@@ -226,7 +241,7 @@ impl Episodic {
             let c = if !self.cfg.learned && w >= self.cfg.skip && w < u32::MAX - 1 {
                 self.wild_code.clone()
             } else if w >= u32::MAX - 1 {
-                continue
+                continue;
             } else {
                 self.cached_code(w)
             };
@@ -276,7 +291,11 @@ impl Episodic {
     }
     /// A word's context with content words replaced by a wildcard (u32::MAX).
     fn wild(&self, w: u32) -> u32 {
-        if w >= self.cfg.skip && w < u32::MAX - 1 { u32::MAX } else { w }
+        if w >= self.cfg.skip && w < u32::MAX - 1 {
+            u32::MAX
+        } else {
+            w
+        }
     }
 
     /// Learn from word w (after it has been predicted).
@@ -361,7 +380,13 @@ impl Episodic {
     /// Learned-mode recall: cue = the last `cue` words; partners weighted by binding strength and their learned
     /// recall weight; a plain channel per hop plus one channel per role pair (and chain).
     pub fn recall_learned(&mut self) -> Vec<Vec<(u32, f64)>> {
-        let mut cue: Vec<u32> = self.recent.iter().rev().take(self.cfg.cue).map(|x| x.0).collect();
+        let mut cue: Vec<u32> = self
+            .recent
+            .iter()
+            .rev()
+            .take(self.cfg.cue)
+            .map(|x| x.0)
+            .collect();
         cue.sort_unstable();
         cue.dedup();
         let mut plain: Vec<HashMap<u32, f64>> = vec![HashMap::new(); self.cfg.hops];
@@ -473,7 +498,12 @@ impl Episodic {
 
     /// Role-free recall over the role store (pairs merged, the newest stamp kept).
     fn recall_plain_from_roles(&self) -> Vec<Vec<(u32, f64)>> {
-        let mut cue: Vec<u32> = self.rcur.iter().map(|x| x.0).chain(self.prev.iter().copied()).collect();
+        let mut cue: Vec<u32> = self
+            .rcur
+            .iter()
+            .map(|x| x.0)
+            .chain(self.prev.iter().copied())
+            .collect();
         cue.sort_unstable();
         cue.dedup();
         let partners = |a: u32| -> HashMap<u32, u64> {
@@ -511,7 +541,12 @@ impl Episodic {
     }
 
     pub fn recall_roles(&mut self) -> Vec<Vec<(u32, f64)>> {
-        let mut cue: Vec<u32> = self.rcur.iter().map(|x| x.0).chain(self.prev.iter().copied()).collect();
+        let mut cue: Vec<u32> = self
+            .rcur
+            .iter()
+            .map(|x| x.0)
+            .chain(self.prev.iter().copied())
+            .collect();
         cue.sort_unstable();
         cue.dedup();
         let mut chans: HashMap<u32, HashMap<u32, f64>> = HashMap::new();
@@ -555,7 +590,8 @@ impl Episodic {
                     for ((c, pr2), tc) in links {
                         if !cue.contains(&c) && c != b {
                             let ch = self.intern_chan((2, pr1, pr2));
-                            *chans.entry(ch).or_default().entry(c).or_insert(0.0) += wb * self.strength(tc);
+                            *chans.entry(ch).or_default().entry(c).or_insert(0.0) +=
+                                wb * self.strength(tc);
                         }
                     }
                 }
@@ -594,14 +630,34 @@ impl Episodic {
         } else {
             j
         };
-        let w = |x: u32| if x == u32::MAX { "*".to_string() } else { vocab.get(x as usize).cloned().unwrap_or_else(|| x.to_string()) };
+        let w = |x: u32| {
+            if x == u32::MAX {
+                "*".to_string()
+            } else {
+                vocab
+                    .get(x as usize)
+                    .cloned()
+                    .unwrap_or_else(|| x.to_string())
+            }
+        };
         let role = |r: u32| {
             let (a, b) = self.role_names[r as usize];
-            if b == u32::MAX - 2 { format!("[class {a}]") } else { format!("[{} {}]", w(a), w(b)) }
+            if b == u32::MAX - 2 {
+                format!("[class {a}]")
+            } else {
+                format!("[{} {}]", w(a), w(b))
+            }
         };
-        let pair = |p: u32| { let (a, b) = self.pair_names[p as usize]; format!("{}->{}", role(a), role(b)) };
+        let pair = |p: u32| {
+            let (a, b) = self.pair_names[p as usize];
+            format!("{}->{}", role(a), role(b))
+        };
         let (h, p1, p2) = self.chan_names[j];
-        if h == 1 { format!("hop1 {}", pair(p1)) } else { format!("hop2 {} then {}", pair(p1), pair(p2)) }
+        if h == 1 {
+            format!("hop1 {}", pair(p1))
+        } else {
+            format!("hop2 {} then {}", pair(p1), pair(p2))
+        }
     }
 
     fn strength(&self, t_bind: u64) -> f64 {

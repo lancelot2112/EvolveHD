@@ -195,7 +195,13 @@ impl<'a> MixBase<'a> {
         let n = yp.len().min(yn.len());
         let h = n / 2;
         if h == 0 || n == h {
-            return MixBase { yp, yn, n, h, pb: vec![] };
+            return MixBase {
+                yp,
+                yn,
+                n,
+                h,
+                pb: vec![],
+            };
         }
         let v = yn.iter().copied().max().unwrap_or(0) as usize + 1;
         let mut p0 = vec![1.0f64; v];
@@ -213,7 +219,11 @@ impl<'a> MixBase<'a> {
         let pb = (h..n)
             .map(|i| {
                 let y = yn[i];
-                let base = if (y as usize) < v { p0[y as usize] } else { 1e-9 };
+                let base = if (y as usize) < v {
+                    p0[y as usize]
+                } else {
+                    1e-9
+                };
                 wb_of(cb.get(&yp[i]), y, base)
             })
             .collect();
@@ -265,7 +275,10 @@ pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec
     let chunk = items.len().div_ceil(nt);
     let f = &f;
     std::thread::scope(|sc| {
-        let hs: Vec<_> = items.chunks(chunk).map(|c| sc.spawn(move || c.iter().map(f).collect::<Vec<R>>())).collect();
+        let hs: Vec<_> = items
+            .chunks(chunk)
+            .map(|c| sc.spawn(move || c.iter().map(f).collect::<Vec<R>>()))
+            .collect();
         hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
     })
 }

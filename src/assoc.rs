@@ -99,20 +99,27 @@ impl Assoc {
     }
 
     fn filler(&self, w: u32) -> Vec<u16> {
-        (0..self.cfg.s).map(|b| (hash2(w as u64 + 1, b as u64) % self.cfg.l as u64) as u16).collect()
+        (0..self.cfg.s)
+            .map(|b| (hash2(w as u64 + 1, b as u64) % self.cfg.l as u64) as u16)
+            .collect()
     }
 
     /// A word's meaning block code (its filler while it has no meaning yet), refreshed every 256 words.
     fn mblock(&mut self, w: u32) -> Vec<u16> {
         if w == u32::MAX {
-            return (0..self.cfg.s).map(|b| (hash2(u64::MAX, b as u64) % self.cfg.l as u64) as u16).collect();
+            return (0..self.cfg.s)
+                .map(|b| (hash2(u64::MAX, b as u64) % self.cfg.l as u64) as u16)
+                .collect();
         }
         if let Some((t0, c)) = self.cache.get(&w) {
             if self.t - t0 < 256 {
                 return c.clone();
             }
         }
-        let c = self.mn.block_code(w, self.cfg.s).unwrap_or_else(|| self.filler(w));
+        let c = self
+            .mn
+            .block_code(w, self.cfg.s)
+            .unwrap_or_else(|| self.filler(w));
         self.cache.insert(w, (self.t, c.clone()));
         c
     }
@@ -134,12 +141,19 @@ impl Assoc {
 
     fn back(&self, j: usize) -> u32 {
         let n = self.hist.len();
-        if j < n { self.hist[n - 1 - j] } else { u32::MAX }
+        if j < n {
+            self.hist[n - 1 - j]
+        } else {
+            u32::MAX
+        }
     }
 
     fn bits(&self, c: &[u16]) -> Vec<usize> {
         let l = self.cfg.l;
-        c.iter().enumerate().map(|(b, &p)| b * l + p as usize).collect()
+        c.iter()
+            .enumerate()
+            .map(|(b, &p)| b * l + p as usize)
+            .collect()
     }
 
     /// The context's address: the meaning codes of the last `ctx` words, each permuted by its distance back.
@@ -152,7 +166,9 @@ impl Assoc {
             codes.push(self.permute(&mb, j + 2));
         }
         let l = self.cfg.l;
-        (0..self.cfg.s).map(|b| (b * l + codes[b % codes.len()][b] as usize) as u32).collect()
+        (0..self.cfg.s)
+            .map(|b| (b * l + codes[b % codes.len()][b] as usize) as u32)
+            .collect()
     }
 
     /// Learn from word w (after it has been predicted).
@@ -163,7 +179,10 @@ impl Assoc {
         if self.cfg.cue_gate && !self.last_cue.is_empty() {
             let busy: Vec<f32> = self.busy.iter().map(|&b| b as f32).collect();
             let lc = std::mem::take(&mut self.last_cue);
-            let q: Vec<f32> = lc.iter().map(|(v, _)| self.score_of(v, &busy, &fw)).collect();
+            let q: Vec<f32> = lc
+                .iter()
+                .map(|(v, _)| self.score_of(v, &busy, &fw))
+                .collect();
             let mean = q.iter().sum::<f32>() / q.len() as f32;
             let a = self.cue_logits(&self.last_addr);
             let c = self.cfg.cue;
@@ -219,7 +238,11 @@ impl Assoc {
             let b = self.permute(&b, 1);
             self.bind(&a, &b)
         };
-        let ct = if self.cfg.roles { self.bind(&fw, &r) } else { fw.clone() };
+        let ct = if self.cfg.roles {
+            self.bind(&fw, &r)
+        } else {
+            fw.clone()
+        };
         self.mn.observe(w);
         self.t += 1;
         self.g *= 2f64.powf(1.0 / self.cfg.half);
@@ -290,7 +313,8 @@ impl Assoc {
             let tv: f32 = v[b * l..(b + 1) * l].iter().sum();
             let tb: f32 = busy[b * l..(b + 1) * l].iter().sum();
             if tv > 0.0 && tb > 0.0 {
-                tot += (v[b * l + p as usize] / tv) / (busy[b * l + p as usize] / tb + 1.0 / l as f32);
+                tot +=
+                    (v[b * l + p as usize] / tv) / (busy[b * l + p as usize] / tb + 1.0 / l as f32);
             }
         }
         tot / fw.len() as f32
@@ -301,7 +325,10 @@ impl Assoc {
         let c = self.cfg.cue;
         let mut a = vec![0f32; c];
         for &i in addr {
-            for (o, &y) in a.iter_mut().zip(&self.cue_g[i as usize * c..(i as usize + 1) * c]) {
+            for (o, &y) in a
+                .iter_mut()
+                .zip(&self.cue_g[i as usize * c..(i as usize + 1) * c])
+            {
                 *o += y;
             }
         }
@@ -314,14 +341,19 @@ impl Assoc {
         let (d, l, s) = (self.d, self.cfg.l, self.cfg.s);
         let mut u = vec![0f32; d];
         for &i in addr {
-            for (o, &y) in u.iter_mut().zip(&self.gates[h][i as usize * d..(i as usize + 1) * d]) {
+            for (o, &y) in u
+                .iter_mut()
+                .zip(&self.gates[h][i as usize * d..(i as usize + 1) * d])
+            {
                 *o += y;
             }
         }
         (0..s)
             .map(|b| {
-                let mut v: Vec<(usize, f32)> =
-                    (0..l).map(|q| (q, u[b * l + q].max(0.0).powf(self.cfg.sharpen))).filter(|x| x.1 > 0.0).collect();
+                let mut v: Vec<(usize, f32)> = (0..l)
+                    .map(|q| (q, u[b * l + q].max(0.0).powf(self.cfg.sharpen)))
+                    .filter(|x| x.1 > 0.0)
+                    .collect();
                 if v.is_empty() {
                     return (0..l).map(|q| (q, 1.0 / l as f32)).collect();
                 }
@@ -336,7 +368,13 @@ impl Assoc {
 
     /// Unbind v by the wanted role and score words through the inverted index; the k best (above the
     /// (k+1)-th), normalised, excluding `skip`.
-    fn candidates(&self, v: &[f32], busy: &[f32], role: &[Vec<(usize, f32)>], skip: &[u32]) -> Vec<(u32, f64)> {
+    fn candidates(
+        &self,
+        v: &[f32],
+        busy: &[f32],
+        role: &[Vec<(usize, f32)>],
+        skip: &[u32],
+    ) -> Vec<(u32, f64)> {
         let (l, s) = (self.cfg.l, self.cfg.s);
         let mut sc: HashMap<u32, f64> = HashMap::new();
         // unbind the recall and the cue-free baseline (how busy each content bit is) by the wanted role, and
@@ -372,7 +410,11 @@ impl Assoc {
         out.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         let floor = out.get(self.cfg.k).map(|x| x.1).unwrap_or(0.0);
         out.truncate(self.cfg.k);
-        let mut v: Vec<(u32, f64)> = out.into_iter().map(|(w, x)| (w, x - floor)).filter(|x| x.1 > 0.0).collect();
+        let mut v: Vec<(u32, f64)> = out
+            .into_iter()
+            .map(|(w, x)| (w, x - floor))
+            .filter(|x| x.1 > 0.0)
+            .collect();
         let t: f64 = v.iter().map(|x| x.1).sum();
         if t > 0.0 {
             v.iter_mut().for_each(|x| x.1 /= t);
@@ -396,7 +438,11 @@ impl Assoc {
             }
             f *= self.cfg.fade;
         }
-        let skip: Vec<u32> = if self.cfg.exclude { cue.iter().map(|x| x.0).collect() } else { vec![] };
+        let skip: Vec<u32> = if self.cfg.exclude {
+            cue.iter().map(|x| x.0).collect()
+        } else {
+            vec![]
+        };
         let mut out = vec![];
         let mut vs = vec![];
         let mut front = cue;
@@ -429,10 +475,18 @@ impl Assoc {
                 (0, Some(v)) => v,
                 _ => self.read(&front),
             };
-            let role = if self.cfg.roles { self.role_wanted(h, &addr) } else { vec![vec![(0, 1.0)]; self.cfg.s] };
+            let role = if self.cfg.roles {
+                self.role_wanted(h, &addr)
+            } else {
+                vec![vec![(0, 1.0)]; self.cfg.s]
+            };
             let c = self.candidates(&v, &busy, &role, &skip);
             // for learning the gate: the recall relative to how busy each content bit is
-            let vn: Vec<f32> = v.iter().zip(&busy).map(|(&x, &b)| x / (b + mean + 1e-30)).collect();
+            let vn: Vec<f32> = v
+                .iter()
+                .zip(&busy)
+                .map(|(&x, &b)| x / (b + mean + 1e-30))
+                .collect();
             vs.push(vn);
             front = c.clone();
             out.push(c);

@@ -99,7 +99,11 @@ pub fn threads() -> usize {
     std::env::var("EVOLVEHD_THREADS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1))
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        })
         .max(1)
 }
 
@@ -108,7 +112,9 @@ fn top_k(v: &[f32], k: usize, idx: &mut Vec<u32>) -> Vec<u32> {
     idx.clear();
     idx.extend((0..v.len() as u32).filter(|&i| v[i as usize] > 0.0));
     if idx.len() > k {
-        idx.select_nth_unstable_by(k - 1, |&a, &b| v[b as usize].partial_cmp(&v[a as usize]).unwrap());
+        idx.select_nth_unstable_by(k - 1, |&a, &b| {
+            v[b as usize].partial_cmp(&v[a as usize]).unwrap()
+        });
         idx.truncate(k);
     }
     idx.clone()
@@ -119,17 +125,35 @@ impl Meaning {
         let mut rng = Rng::new(cfg.seed);
         let d = cfg.d;
         let ident: Vec<Vec<u32>> = (0..nw)
-            .map(|_| rng.choose_distinct(d, 32).into_iter().map(|x| x as u32).collect())
+            .map(|_| {
+                rng.choose_distinct(d, 32)
+                    .into_iter()
+                    .map(|x| x as u32)
+                    .collect()
+            })
             .collect();
         let ident_k: Vec<Vec<u32>> = if cfg.identity {
             (0..nw)
-                .map(|_| rng.choose_distinct(d, cfg.k_word).into_iter().map(|x| x as u32).collect())
+                .map(|_| {
+                    rng.choose_distinct(d, cfg.k_word)
+                        .into_iter()
+                        .map(|x| x as u32)
+                        .collect()
+                })
                 .collect()
         } else {
             vec![]
         };
-        let m = if cfg.identity { vec![] } else { vec![0.0f32; nw * d] };
-        let wm_fade = if cfg.wm_half > 0.0 { 2f64.powf(-1.0 / cfg.wm_half) as f32 } else { 0.0 };
+        let m = if cfg.identity {
+            vec![]
+        } else {
+            vec![0.0f32; nw * d]
+        };
+        let wm_fade = if cfg.wm_half > 0.0 {
+            2f64.powf(-1.0 / cfg.wm_half) as f32
+        } else {
+            0.0
+        };
         Meaning {
             nw,
             ident,
@@ -155,7 +179,8 @@ impl Meaning {
 
     /// A word's meaning code, or its random identity code while it has none.
     pub fn code_or_ident(&mut self, w: u32) -> Vec<u32> {
-        self.mcode(w).unwrap_or_else(|| self.ident[w as usize].clone())
+        self.mcode(w)
+            .unwrap_or_else(|| self.ident[w as usize].clone())
     }
 
     /// A word's meaning code: its `k_word` most distinctive bits, or None if it has none yet.
@@ -169,7 +194,12 @@ impl Meaning {
         let inv = self.inv_busy();
         let d = self.cfg.d;
         let mut scratch = std::mem::take(&mut self.scratch);
-        let r = code_of_row(&self.m[w as usize * d..(w as usize + 1) * d], &inv, self.cfg.k_word, &mut scratch);
+        let r = code_of_row(
+            &self.m[w as usize * d..(w as usize + 1) * d],
+            &inv,
+            self.cfg.k_word,
+            &mut scratch,
+        );
         self.scratch = scratch;
         r
     }
@@ -195,7 +225,11 @@ impl Meaning {
                             best = (x, p as u16);
                         }
                     }
-                    if best.1 == u16::MAX { (crate::rng::hash2(w as u64, b as u64) % l as u64) as u16 } else { best.1 }
+                    if best.1 == u16::MAX {
+                        (crate::rng::hash2(w as u64, b as u64) % l as u64) as u16
+                    } else {
+                        best.1
+                    }
                 })
                 .collect(),
         )
@@ -205,7 +239,10 @@ impl Meaning {
     fn inv_busy(&self) -> Vec<f32> {
         let d = self.cfg.d;
         let mean = self.mcol.iter().sum::<f64>() / d as f64;
-        self.mcol.iter().map(|&c| (1.0 / (c + mean + 1e-9)) as f32).collect()
+        self.mcol
+            .iter()
+            .map(|&c| (1.0 / (c + mean + 1e-9)) as f32)
+            .collect()
     }
 
     /// Learn from word `w` (call after predicting it): occurrence counts, links, fast mapping, story state and
@@ -287,13 +324,20 @@ impl Meaning {
                 self.wm[(b as usize + d - off) % d] += add;
             }
             let mut cands: Vec<u32> = if self.cfg.wm_rot {
-                self.wm_code.iter().map(|&c| ((c as usize + 1) % d) as u32).collect()
+                self.wm_code
+                    .iter()
+                    .map(|&c| ((c as usize + 1) % d) as u32)
+                    .collect()
             } else {
                 std::mem::take(&mut self.wm_code)
             };
             cands.extend(self.ident[wi].iter().copied());
             let wm = &self.wm;
-            self.wm_code = top_of(cands, |b| wm[(b as usize + d - off) % d] as f64, self.cfg.wm_k);
+            self.wm_code = top_of(
+                cands,
+                |b| wm[(b as usize + d - off) % d] as f64,
+                self.cfg.wm_k,
+            );
         }
     }
 }
@@ -302,7 +346,11 @@ impl Meaning {
 fn top_of(mut cands: Vec<u32>, val: impl Fn(u32) -> f64, k: usize) -> Vec<u32> {
     cands.sort_unstable();
     cands.dedup();
-    let mut v: Vec<(f64, u32)> = cands.into_iter().map(|b| (val(b), b)).filter(|x| x.0 > 0.0).collect();
+    let mut v: Vec<(f64, u32)> = cands
+        .into_iter()
+        .map(|b| (val(b), b))
+        .filter(|x| x.0 > 0.0)
+        .collect();
     v.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(a.1.cmp(&b.1)));
     v.truncate(k);
     v.into_iter().map(|x| x.1).collect()
@@ -331,7 +379,11 @@ impl BitRows {
         }
     }
     fn get(&self, i: usize) -> f64 {
-        if self.rows16.is_empty() { self.rows32[i] as f64 } else { self.rows16[i] as f64 }
+        if self.rows16.is_empty() {
+            self.rows32[i] as f64
+        } else {
+            self.rows16[i] as f64
+        }
     }
     /// Probability of word w: the mean over the code's bits of (count + beta * backoff) / (total + beta).
     pub fn prob(&self, code: &[u32], w: u32, backoff: f64, beta: f64) -> f64 {
@@ -401,7 +453,9 @@ impl Snapshot {
                         for (i, slot) in part.iter_mut().enumerate() {
                             let w = j * chunk + i;
                             if fc[w] >= 1 && w as u32 >= skip {
-                                if let Some(c) = code_of_row(&m[w * d..(w + 1) * d], inv, k, &mut scratch) {
+                                if let Some(c) =
+                                    code_of_row(&m[w * d..(w + 1) * d], inv, k, &mut scratch)
+                                {
                                     *slot = c;
                                 }
                             }
@@ -420,7 +474,13 @@ impl Snapshot {
                 }
             }
         }
-        Snapshot { codes, u, big_u, big_u_oov, oov_from }
+        Snapshot {
+            codes,
+            u,
+            big_u,
+            big_u_oov,
+            oov_from,
+        }
     }
     /// The probability of word w among the words outside the vocabulary, given the lit story code: its share of
     /// the lit bits, renormalised over the outside words.
