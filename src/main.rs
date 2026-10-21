@@ -34,7 +34,7 @@ fn hippo_cfg(args: &[String]) -> evolvehd::hippo::HippoCfg {
         cue: g("--hp-cue", "4").parse().unwrap(),
         k: g("--hp-k", "8").parse().unwrap(),
         k2: g("--hp-k2", "2").parse().unwrap(),
-        khit: g("--hp-khit", "3").parse().unwrap(),
+        khit: g("--hp-khit", "0").parse().unwrap(),
         ctx: g("--hp-ctx", "0,2,3").split(',').map(|x| x.parse().unwrap()).collect(),
         seg_r: g("--hp-seg-r", "16").parse().unwrap(),
         ctx_bind: flag(args, "--hp-ctx-bind"),
@@ -42,6 +42,7 @@ fn hippo_cfg(args: &[String]) -> evolvehd::hippo::HippoCfg {
         steep: flag(args, "--hp-steep"),
         offer: g("--hp-offer", "1").parse().unwrap(),
         offer_all: flag(args, "--hp-offer-all"),
+        front_rank: flag(args, "--hp-front-rank"),
     }
 }
 

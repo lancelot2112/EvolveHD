@@ -5,13 +5,13 @@
 //! Codes. Every word has a fixed block code f(w): `s` blocks of `l` bits, one bit set per block (computed from its
 //! id by a hash, not stored).
 //!
-//! Segmentation (learned). For each word u, three pairs of bit rows hold the codes of the words seen just before
-//! u, just after u, and of the (before, after) pairs, over its last 8 to 15 occurrences (two generations, the
-//! older cleared as the newer fills). A "hit" is an item whose bits are all present already. With hit counts
-//! h_prev, h_next, h_pair over n occurrences, hit rates estimate collision entropies (rate ~ R 2^-H), and u is
-//! a boundary when what follows u carries little of what came before it:
-//!   I / min(H_prev, H_next) < 1/2   <=>   4 lo^2 hi > 3 R n h_pair^2      (lo, hi = the smaller, larger of
-//! h_prev, h_next; R the rows' capacity in items), an integer test; never when one side is nearly fixed.
+//! Segmentation (learned). For each word u, three bit rows hold the code of the word seen just before u at one
+//! earlier occurrence, just after it, and of that (before, after) pair; a row is rewritten with probability
+//! 1 / `seg_r` per occurrence (a stochastic write), so it holds a random earlier draw. A "hit" is an item whose
+//! bits are all present, i.e. the same as that draw, so over n occurrences the hit rates are collision
+//! probabilities, 2^-H2 (Rényi entropy). u is a boundary when what follows u carries little of what came before:
+//!   I / min(H_prev, H_next) < 1/3   <=>   lo^3 hi^2 > n^2 h_pair^3      (lo, hi = the smaller, larger of the
+//! before and after hit counts), an integer test; never when one side is nearly fixed.
 //!
 //! Memory. Two bit matrices (d x d, d = s l), forward (address f(earlier) -> content f(later)) and backward,
 //! each a ring of `planes` planes; the head plane takes the writes and the ring advances every `epoch` words,
@@ -54,6 +54,8 @@ pub struct HippoCfg {
     pub offer: usize,
     /// Offer every channel, each in its own slot.
     pub offer_all: bool,
+    /// Weight hop-2 fronts by their rank.
+    pub front_rank: bool,
 }
 
 struct SegRow {
@@ -223,33 +225,37 @@ impl Hippo {
             n: 0,
             boundary: false,
         });
+        // the rows are rewritten only now and then (a stochastic write, probability 1 / r), so each holds an
+        // item from a random earlier occurrence (about r back), not the last: hits are then collisions of
+        // independent draws rather than of neighbours
+        let write = hash(self.tick, u as u64 + 0x5151) % r as u64 == 0 || row.n == 0;
         for (k, cb) in codes.iter().enumerate() {
-            let hit = cb.iter().all(|&x| (row.rows[2 * k][x / 64] | row.rows[2 * k + 1][x / 64]) >> (x % 64) & 1 == 1);
+            let hit = row.n > 0 && cb.iter().all(|&x| row.rows[2 * k][x / 64] >> (x % 64) & 1 == 1);
             if hit {
                 row.hits[k] += 1;
             }
-            for &x in cb {
-                row.rows[2 * k + row.cur][x / 64] |= 1u64 << (x % 64);
+            if write {
+                row.rows[2 * k].iter_mut().for_each(|x| *x = 0);
+                for &x in cb {
+                    row.rows[2 * k][x / 64] |= 1u64 << (x % 64);
+                }
             }
         }
-        row.items += 1;
-        if row.items >= r / 2 {
-            row.cur = 1 - row.cur;
-            for k in 0..3 {
-                row.rows[2 * k + row.cur].iter_mut().for_each(|x| *x = 0);
-            }
-            row.items = 0;
-        }
+        let _ = (&mut row.cur, &mut row.items);
         row.n += 1;
         if row.n >= 4096 {
             row.n /= 2;
             row.hits.iter_mut().for_each(|h| *h /= 2);
         }
         if row.n >= 64 && row.n % 32 == 0 {
+            // with r = 2 each row holds just the last item, so a hit rate is a collision probability, 2^-H2
+            // exactly; boundary when I / min(H_prev, H_next) < 1/3:
+            //   H_pair - H_max > (2/3) H_min   <=>   lo^3 hi^2 > n^2 pair^3
             let [hp, hn, hj] = row.hits;
             let (lo, hi) = (hp.min(hn) as u128, hp.max(hn) as u128);
-            let n = row.n as u128;
-            row.boundary = 10 * hi <= 9 * n && 4 * lo * lo * hi > 3 * r as u128 * n * (hj as u128) * (hj as u128);
+            let (n, hj) = (row.n as u128, hj as u128);
+            let _ = r;
+            row.boundary = 20 * hi <= 19 * n && lo * lo * lo * hi * hi > n * n * hj * hj * hj;
         }
     }
 
@@ -308,9 +314,11 @@ impl Hippo {
                 let fronts: Vec<u32> = lists[j * 2 + d1].iter().take(self.cfg.k2).map(|x| x.0).collect();
                 for d2 in 0..2 {
                     let mut sc = vec![0u32; d];
-                    for &f in &fronts {
+                    for (r, &f) in fronts.iter().enumerate() {
                         let s1 = get(self, f, d2, &mut cache);
-                        sc.iter_mut().zip(&s1).for_each(|(o, &x)| *o += x);
+                        // fronts weighted by rank when asked (halving per place, a shift)
+                        let sh = if self.cfg.front_rank { (r as u32).min(16) } else { 0 };
+                        sc.iter_mut().zip(&s1).for_each(|(o, &x)| *o += (x << 16) >> sh);
                     }
                     lists[2 * c + j * 4 + d1 * 2 + d2] = self.rank(&sc, &cue, kk);
                 }
@@ -358,7 +366,15 @@ impl Hippo {
         // than the chosen one did, the channels that ranked it best move up and the chosen one down (8-bit
         // counters)
         if let Some((addr, lists, chosen)) = self.last.take() {
-            let rank: Vec<usize> = lists.iter().map(|l| l.iter().position(|&x| x == w).unwrap_or(usize::MAX)).collect();
+            // with `khit` set, a channel's rank only counts within its first khit words (inclusion, not order)
+            let rank: Vec<usize> = lists
+                .iter()
+                .map(|l| match l.iter().position(|&x| x == w) {
+                    Some(p) if self.cfg.khit > 0 && p < self.cfg.khit => 0,
+                    Some(p) if self.cfg.khit == 0 => p,
+                    _ => usize::MAX,
+                })
+                .collect();
             let c = self.cfg.cue;
             for (g, r) in [(0usize, 0..2 * c), (1, 2 * c..self.nch)] {
                 let b = chosen[g];
