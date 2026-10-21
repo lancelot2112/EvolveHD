@@ -43,6 +43,7 @@ fn hippo_cfg(args: &[String]) -> evolvehd::hippo::HippoCfg {
         offer: g("--hp-offer", "1").parse().unwrap(),
         offer_all: flag(args, "--hp-offer-all"),
         front_rank: flag(args, "--hp-front-rank"),
+        att_rate: flag(args, "--hp-att-rate"),
     }
 }
 

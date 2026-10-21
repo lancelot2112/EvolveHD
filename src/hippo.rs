@@ -56,6 +56,8 @@ pub struct HippoCfg {
     pub offer_all: bool,
     /// Weight hop-2 fronts by their rank.
     pub front_rank: bool,
+    /// Attention counters track each channel's hit rate (a running average) instead of moving on errors.
+    pub att_rate: bool,
 }
 
 struct SegRow {
@@ -376,7 +378,22 @@ impl Hippo {
                 })
                 .collect();
             let c = self.cfg.cue;
-            for (g, r) in [(0usize, 0..2 * c), (1, 2 * c..self.nch)] {
+            if self.cfg.att_rate {
+                // each channel's counter tracks how often its first khit words held the word that came, in this
+                // context: a running average in 8 bits, c += (255 hit - c) / 16 (a shift)
+                let hit: Vec<bool> = rank.iter().map(|&r| r != usize::MAX).collect();
+                if hit.iter().any(|&h| h) {
+                    self.att_updates += 1;
+                    for &i in &addr {
+                        for ch in 0..self.nch {
+                            let a = &mut self.att[i * self.nch + ch];
+                            let t: i32 = if hit[ch] { 255 } else { 0 };
+                            *a = (*a as i32 + ((t - *a as i32) >> 4)) as u8;
+                        }
+                    }
+                }
+            }
+            for (g, r) in [(0usize, 0..2 * c), (1, 2 * c..self.nch)].into_iter().filter(|_| !self.cfg.att_rate) {
                 let b = chosen[g];
                 let top = r.clone().map(|ch| rank[ch]).min().unwrap();
                 if top == usize::MAX || rank[b] <= top {
