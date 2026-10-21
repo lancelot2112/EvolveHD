@@ -54,6 +54,8 @@ fn hippo_cfg(args: &[String]) -> evolvehd::hippo::HippoCfg {
         holo_d: g("--hp-holo", "0").parse().unwrap(),
         holo_levels: g("--hp-holo-levels", "16").parse().unwrap(),
         holo_decay: g("--hp-holo-decay", "0").parse().unwrap(),
+        holo_mag: g("--hp-holo-mag", "1").parse().unwrap(),
+        holo_sup: g("--hp-holo-sup", "0").parse().unwrap(),
         hop2_ph: g("--hp-hop2-ph", "")
             .split(',')
             .filter(|x| !x.is_empty())

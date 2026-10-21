@@ -75,6 +75,10 @@ pub struct HippoCfg {
     pub holo_levels: usize,
     /// Halve the holographic traces every this many words (0 = never; saturation alone forgets).
     pub holo_decay: usize,
+    /// Write magnitude per binding (so halving leaves something), and the superseding threshold in percent of
+    /// a fresh binding's score (0 = off).
+    pub holo_mag: usize,
+    pub holo_sup: usize,
 }
 
 struct SegRow {
@@ -112,6 +116,7 @@ pub struct Hippo {
     pub chan_lists: Vec<Vec<u32>>,
     pub nch_pub: usize,
     holo: Option<crate::holo::Holo>,
+    pub superseded: u64,
 }
 
 fn hash(a: u64, b: u64) -> u64 {
@@ -134,6 +139,7 @@ impl Hippo {
             d,
             wpr,
             holo,
+            superseded: 0,
             mem: vec![0; if cfg.holo_d > 0 { 0 } else { 2 * cfg.planes * d * wpr }],
             busy: vec![0; d],
             tmem: vec![0; if cfg.typed { d * wpr } else { 0 }],
@@ -793,6 +799,7 @@ impl Hippo {
             self.seg_update(a, u, w);
         }
         // bind w to the words before it, back to and including the first boundary
+        let cands: Vec<u32> = if self.cfg.holo_sup > 0 { self.words.clone() } else { vec![] };
         let fw = self.code(w);
         let pw = self.cur_phase;
         let fwp = self.shift(&fw, pw);
@@ -803,8 +810,24 @@ impl Hippo {
                 let ps = self.hist_ph[self.hist_ph.len() - 1 - j];
                 let fsp = self.shift(&fs, ps);
                 if let Some(h) = self.holo.as_mut() {
-                    h.write(0, s, w, pw as usize);
-                    h.write(1, w, s, ps as usize);
+                    let mag = self.cfg.holo_mag as i16;
+                    if self.cfg.holo_sup > 0 {
+                        // supersede: the value the key held in this role, if it is held clearly and is not the
+                        // new one, is taken out (in proportion to how strongly it is still there), then the
+                        // new binding goes in
+                        let th = (h.d as i64 * mag as i64 * self.cfg.holo_sup as i64) / 100;
+                        for (dir, key, val, r) in [(0, s, w, pw as usize), (1, w, s, ps as usize)] {
+                            if let Some((u, sc)) = h.best(dir, key, r, &cands) {
+                                if u != val && sc > th {
+                                    let m = ((sc / h.d as i64) as i16).clamp(1, mag);
+                                    h.write_m(dir, key, u, r, -m);
+                                    self.superseded += 1;
+                                }
+                            }
+                        }
+                    }
+                    h.write_m(0, s, w, pw as usize, mag);
+                    h.write_m(1, w, s, ps as usize, mag);
                 } else {
                     self.write(0, &fs, &fwp);
                     self.write(1, &fw, &fsp);

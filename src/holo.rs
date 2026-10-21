@@ -64,8 +64,20 @@ impl Holo {
         }
     }
 
-    /// Bind key -> value (in role r) into direction dir's trace.
+    /// Bind key -> value (in role r) into direction dir's trace, once.
     pub fn write(&mut self, dir: usize, key: u32, val: u32, r: usize) {
+        self.write_m(dir, key, val, r, 1);
+    }
+
+    /// The value best recalled for a key in role r, among the candidates, with its score.
+    pub fn best(&self, dir: usize, key: u32, r: usize, cands: &[u32]) -> Option<(u32, i64)> {
+        let z = self.unbind(dir, key);
+        cands.iter().map(|&w| (w, self.dot(&z.0, &z.1, w, r))).max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+    }
+
+    /// Bind key -> value with magnitude m (m < 0 takes a binding out: the superseded fact cancels); only
+    /// positive writes count in the background.
+    pub fn write_m(&mut self, dir: usize, key: u32, val: u32, r: usize, m: i16) {
         let (k, v, ro) = (&self.kcodes[key as usize], &self.codes[val as usize], &self.roles[r]);
         let (lo, hi) = (self.lo, self.hi);
         let [t0, t1, t2, t3] = &mut self.tr;
@@ -75,10 +87,13 @@ impl Holo {
         for e in 0..self.d {
             let p = (k[e] + v[e] + ro[e]) & 3;
             match p {
-                0 => re[e] = (re[e] + 1).min(hi),
-                1 => im[e] = (im[e] + 1).min(hi),
-                2 => re[e] = (re[e] - 1).max(lo),
-                _ => im[e] = (im[e] - 1).max(lo),
+                0 => re[e] = (re[e] + m).clamp(lo, hi),
+                1 => im[e] = (im[e] + m).clamp(lo, hi),
+                2 => re[e] = (re[e] - m).clamp(lo, hi),
+                _ => im[e] = (im[e] - m).clamp(lo, hi),
+            }
+            if m < 0 {
+                continue;
             }
             match (v[e] + ro[e]) & 3 {
                 0 => bre[e] += 1,
