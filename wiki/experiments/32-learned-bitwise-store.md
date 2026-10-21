@@ -46,10 +46,12 @@ Here the window binds john more strongly to *bedroom* (two words before him, acr
   - Comparing with the *last* occurrence instead of a random earlier one failed: repeated questions make consecutive occurrences look predictable.
   - Learned boundaries: "." and "is" on the small set; ".", "?" and "is" on the full one. "The" and "to" are correctly left out.
 - **Memory:** two bit matrices (forward and backward), each a ring of 8 bit planes. Each word is bound to the words before it, back to and including the first boundary. A read takes each content bit from its newest plane only, so a later binding overrides an older one, with recency weights that halve per plane (shifts).
-- **Ranking:** a recalled word is ranked by how much more of this recall it takes than its share of all bindings, s·B − b·S, by subtraction. Cross-multiplying the ratio did about as well. Cancelling what all channels recall in common was worse: the holder appears in several channels and cancels against itself.
+- **Ranking:** a recalled word is ranked by how much more it is recalled here than it is bound anywhere: the ratio of its score to its baseline (how often it has been bound at all), compared by cross-multiplying, with no division. This is the default, used in the full-benchmark runs. Ranking by excess share instead, s·B − b·S by subtraction (`--hp-excess`), did about as well on the small set. Cancelling what all channels recall in common was worse: the holder appears in several channels and cancels against itself.
 - **Channels:** for each of the last 4 words and each direction, hop 1 (its partners), and hop 2 (the partners of its best partners, weighted by rank).
 - **Choosing a channel, per context:** 8-bit counters per bit of the context's address (the codes of the words 1, 3 and 4 back, bound together) and channel. Two rules were tried: errors only (move toward a channel that had the next word among its top words when the chosen one did not), or each channel's hit rate as a running average in 8 bits, c += (255·hit − c) >> 4.
-- **A learned type filter:** each context's bit rows OR in the codes of the words that followed it. Offered lists keep only words that fit; hop-2 starting words are taken before the filter.
+- **A learned type filter** (`--hp-typed`, tried on the small set only): each context's bit rows OR in the codes of the words that followed it. Offered lists keep only words that fit; hop-2 starting words are taken before the filter.
+
+The full-benchmark runs below use the parts above except the type filter, with ratio ranking; the phase roles described further down are not in them either.
 
 ### Results
 
@@ -62,7 +64,7 @@ Full benchmark, through the word level, one seed each:
 | **Bitwise, hit-rate channel choice** | 83.4% | 36.3% | 84.3% | **76.6%** | 81.1% | 75.7% |
 | Plain store (told content words, clause ends) | 99.6% | 95.9% | 98.8% | 98.9% | 99.7% | 98.9% |
 
-The bitwise store is the best fully learned one so far, and handles new phrasings at once: on the first 20 / 100 / 500 questions in the new form it scores 80% / 89% / 81%. It still trails the hand-coded store by 22 points, mostly on "where is the object".
+The bitwise store is the best fully learned one so far on this benchmark, and handles new phrasings early: on the first 20 / 100 / 500 questions in the new form, the error-driven version scores 80% / 89% / 81% and the hit-rate version 60% / 73% / 74%. It still trails the hand-coded store by 22 points. The biggest gap per question type is "where is the object" (36% against 96%), but most of the points are lost on "where is X", which is 72% of the questions.
 
 Store alone, small benchmark (300 stories, 24,659 words). The share of questions whose channel has the answer as its first candidate of the right kind: the best single channel, then the channel the store picks.
 
@@ -75,7 +77,7 @@ Store alone, small benchmark (300 stories, 24,659 words). The share of questions
 Through the word level on the same small set: plain store 84.2%, bitwise store 67.4% (no store: 12.4%). The small set understates everything: the plain store scores 98.9% on the full benchmark.
 
 What the variants showed:
-- **Phase roles:** a free-running count reset at learned boundaries is each word's role, bound by shifting its code's positions (unbound by shifting back). Alone they did not help: they spread each word's bindings over 8 roles. But hop 2 from the clause's first word (phase 0) found the holder: object → clause subject → place reached 73% on "where is the object", against 65% before.
+- **Phase roles:** a count of words since the last learned boundary (stopping at 7) is each word's role, bound by shifting its code's positions (unbound by shifting back). Alone they did not help: they spread each word's bindings over 8 roles. But hop 2 from the clause's first word (phase 0) found the holder: object → clause subject → place reached 73% on "where is the object", against 65% before.
 - **Choosing the channel is the bottleneck.** The best channel often holds the answer, but the store picks it only when its learning signal agrees with "the answer's kind". The learned type filter supplies the kind: "who has" picked correctly 91% of the time.
 
 ## Holographic memory
@@ -96,7 +98,7 @@ The same store with the bit planes replaced by a quantized complex trace (`src/h
 | 1,024 | 22 | 45 | 3 |
 | 2,048 | 29 | 79 | 81 |
 
-About elements ÷ 26 at 16 levels, or 40–60 bindings per kilobyte. With too many levels nothing saturates, and recall collapses under the pile-up (the 0 and 3). Splitting the bits into a fast trace plus a slow trace that keeps a random quarter of the writes was worse than one trace with more levels.
+About elements ÷ 17 to ÷ 26 at 16 levels, or 40–60 bindings per kilobyte. With too many levels nothing saturates, and recall collapses under the pile-up (the 0 and 3). Splitting the bits into a fast trace plus a slow trace that keeps a random quarter of the writes was worse than one trace with more levels.
 
 **Sparse writes:** each key writes and reads only K of the D elements (its active set, from its hash):
 
@@ -110,7 +112,21 @@ About elements ÷ 26 at 16 levels, or 40–60 bindings per kilobyte. With too ma
 | 65,536 | 4 | 64 | 2,798 | 1/16× |
 | 65,536 | 16 | 256 | 44 | ¼× |
 
-Depth grows with the total size and cost with the active set, but only if the levels fall with K. Few levels make each element quiet, so fewer active elements are enough. Sparsifying alone, keeping 16 levels, collapses (44).
+Depth grows with the total size and cost with the active set, but only if the levels fall with K. Few levels make each element quiet, so fewer active elements are enough. Sparsifying alone, keeping 16 levels, collapses (44). (The first three rows come from `sparse.py`, the rest from `sparse2.py`, which draws active elements with replacement and smooths recall over 100 ages instead of 20.)
+
+**Down to two and three levels** (65,536 elements, depth at 80%; `tern.py`):
+
+| Levels per part | 16 active | 64 active | 256 active |
+|---|---|---|---|
+| 2: the sign of the last write (overwrite) | **2,433** | 1,761 | 785 |
+| 3: ternary, −1, 0, +1 | 1,409 | **2,806** | 1,390 |
+| 4: −2 … +1 | 0 | 2,798 | 1,844 |
+| 5: −2 … +2 | 0 | **3,331** | 2,743 |
+| 8: −4 … +3 | 0 | 38 | **3,539** |
+
+- **Two levels is the bit memory again:** each part keeps the sign of its last write, so the newest binding wins outright, per element. It is the sparsest that works: 16 active elements give 2,433 bindings, about 150 per element read.
+- **Three levels is ternary:** agreeing writes hold at ±1, conflicting ones cancel to 0 ("don't know") instead of leaving a wrong sign. It peaks at 64 active elements.
+- **The more levels, the more active elements a binding needs;** symmetric ranges do a little better (5 levels against 4). A 0 means recall never reached 80%, even for the newest bindings.
 
 **Orthogonalizing before storing** (simulation, 1,024 elements): random codes are nearly orthogonal already, so it does not help them. When value codes share a fraction of their elements, as meaning codes do, it restores capacity. Subtracting the mean code before storing, and from the codebook on the way out, does nearly all of it (77% → 93% at 120 pairs with 60% shared, whitening 95%).
 
@@ -120,16 +136,16 @@ In the store, small set (best single channel / picked), one seed:
 |---|---|---|---|---|
 | Bit planes | 58% / 79% | 67% / 53% | 88% / 88% | 32 MB |
 | Dense trace, 4,096 elements, 64 levels, halved every 16 words | 52% / 72% | 47% / 40% | 76% / 74% | 12 KB |
-| Sparse contextified trace, slow drift | 48% / 64% | 54% / 47% | 85% / 84% | 512 KB |
-| Sparse contextified trace, faster drift | 50% / 69% | 44% / 44% | 74% / 72% | 512 KB |
+| Sparse contextified trace, slow drift | 48% / 64% | 54% / 47% | 85% / 84% | 128 KB |
+| Sparse contextified trace, faster drift | 50% / 69% | 44% / 44% | 74% / 72% | 128 KB |
 
 - **Contextified keys** (`src/ctxholo.rs`, `--hp-ctxholo`): a word is written as a key in the current context. The context is 1,024 slots, each an element offset and a phase, and a few slots are redrawn per word and more per learned boundary. Keys from another story land on other elements, so recency comes from the drift, not from fading. It helps the facts asked about long after ("who has": 76% → 85%), not a person's latest room, whose previous room sits in nearly the same context.
-- **Superseding** (`--hp-holo-sup`): before a new binding, subtract the value the key clearly held in that role. It fired on about every second word even at a 90% threshold: frequent words always "clearly hold" something. It did not help.
-- The trace uses a 60th to a 2,700th of the bit planes' memory but trails them on every question type. The bit planes' "newest plane wins" already does what superseding was meant to.
+- **Superseding** (`--hp-holo-sup`): before a new binding, subtract the value the key clearly held in that role. On a 6,000-word slice it fired on about every second word even at a 90% threshold (and 2.5 times per word at the 30% threshold used in the small-set runs): frequent words always "clearly hold" something. It did not help.
+- The traces use a 256th to a 2,700th of the bit planes' memory (sizes counted at the bits per part their levels need) but trails them on every question type. The bit planes' "newest plane wins" already does what superseding was meant to.
 
 ## Findings
 
-1. **Clause structure can be learned, with integer counters:** a word is a boundary when what follows it carries little of what came before, measured by collisions against a stochastically kept earlier draw. It finds "." and "is" and leaves "the" and "to" alone.
+1. **Clause structure can be learned, with integer counters:** a word is a boundary when what follows it carries little of what came before, measured by collisions against a stochastically kept earlier draw. It finds "." and "is" (and "?" on the full benchmark) and leaves "the" and "to" alone.
 2. **A fully learned, bitwise store answers 76.6%** on stories with held-out phrasings (the hand-coded store 98.9%; the earlier learned store 53.7%), and handles new phrasings at once.
 3. **Choosing which channel to trust is now the bottleneck,** not memory: the right channel often has the answer. A learned filter of which words follow each context helps it most.
 4. **Holographic traces store far more per bit,** most when writes are sparse and levels few (65,536 elements, 64 active, 4 levels: about 2,800 bindings deep at a 16th of the read cost). But in this store they lose to bit planes on recency.
