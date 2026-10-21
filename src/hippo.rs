@@ -67,6 +67,8 @@ pub struct HippoCfg {
     pub phase: usize,
     /// With phases: hop 2 also from these phases' hop-1 channels (besides any phase).
     pub hop2_ph: Vec<usize>,
+    /// Learn which words follow each context (a bit row per address bit) and offer only those.
+    pub typed: bool,
 }
 
 struct SegRow {
@@ -83,6 +85,8 @@ pub struct Hippo {
     d: usize,
     wpr: usize,
     mem: Vec<u64>,
+    /// Type memory: for each context address bit, the bits of the words that have come next (ORed).
+    tmem: Vec<u64>,
     /// Write counts per content bit, over the whole run.
     busy: Vec<u64>,
     head: usize,
@@ -119,6 +123,7 @@ impl Hippo {
             wpr,
             mem: vec![0; 2 * cfg.planes * d * wpr],
             busy: vec![0; d],
+            tmem: vec![0; if cfg.typed { d * wpr } else { 0 }],
             head: 0,
             tick: 0,
             seg: (0..nw).map(|_| None).collect(),
@@ -442,6 +447,30 @@ impl Hippo {
             .collect();
         let kk = self.cfg.k.max(self.cfg.khit).max(self.cfg.k2);
         let mut lists: Vec<Vec<(u32, u32)>> = vec![vec![]; self.nch];
+        // the learned type filter: words that have followed this context before (its address rows hold all
+        // of the word's bits at half of the address bits or more); offered lists keep only those, fronts for
+        // hop 2 are taken before it
+        let addr = self.ctx_addr();
+        let mut skipf = cue.clone();
+        if self.cfg.typed {
+            let plaus: Vec<u32> = self
+                .words
+                .iter()
+                .copied()
+                .filter(|&w| {
+                    let b = self.bits(&self.code(w));
+                    let n = addr
+                        .iter()
+                        .filter(|&&i| b.iter().all(|&x| self.tmem[i * self.wpr + x / 64] >> (x % 64) & 1 == 1))
+                        .count();
+                    2 * n >= addr.len()
+                })
+                .collect();
+            if !plaus.is_empty() {
+                skipf.extend(self.words.iter().copied().filter(|w| !plaus.contains(w)));
+            }
+        }
+        let mut fronts_of: Vec<Vec<u32>> = vec![vec![]; self.nch];
         let mut cache: HashMap<(u32, usize), Vec<u32>> = HashMap::new();
         let d = self.d;
         let get = |me: &Self,
@@ -484,7 +513,8 @@ impl Hippo {
                     if self.cfg.cancel {
                         scs1.push((i1, sc.clone(), ph_of(p)));
                     } else {
-                        lists[i1] = self.rank(&sc, &cue, kk, ph_of(p));
+                        fronts_of[i1] = self.rank(&sc, &cue, self.cfg.k2, ph_of(p)).into_iter().map(|x| x.0).collect();
+                        lists[i1] = self.rank(&sc, &skipf, kk, ph_of(p));
                     }
                 }
             }
@@ -504,7 +534,11 @@ impl Hippo {
         for (si, &p1) in srcs.iter().enumerate() {
             for jd in 0..cue.len() * 2 {
                 let i1 = jd * np + p1;
-                let fronts: Vec<u32> = lists[i1].iter().take(self.cfg.k2).map(|x| x.0).collect();
+                let fronts: Vec<u32> = if self.cfg.cancel {
+                    lists[i1].iter().take(self.cfg.k2).map(|x| x.0).collect()
+                } else {
+                    fronts_of[i1].clone()
+                };
                 for d2 in 0..2 {
                     let mut sc = vec![0u32; d];
                     for (r, &f) in fronts.iter().enumerate() {
@@ -524,7 +558,7 @@ impl Hippo {
                     if self.cfg.cancel {
                         scs2.push((i2, sc, any));
                     } else {
-                        lists[i2] = self.rank(&sc, &cue, kk, any);
+                        lists[i2] = self.rank(&sc, &skipf, kk, any);
                     }
                 }
             }
@@ -536,7 +570,6 @@ impl Hippo {
                 lists[i] = l;
             }
         }
-        let addr = self.ctx_addr();
         let att: Vec<u32> = (0..self.nch)
             .map(|ch| {
                 addr.iter()
@@ -616,6 +649,14 @@ impl Hippo {
         // than the chosen one did, the channels that ranked it best move up and the chosen one down (8-bit
         // counters)
         if let Some((addr, lists, chosen)) = self.last.take() {
+            if self.cfg.typed {
+                let b = self.bits(&self.code(w));
+                for &i in &addr {
+                    for &x in &b {
+                        self.tmem[i * self.wpr + x / 64] |= 1u64 << (x % 64);
+                    }
+                }
+            }
             // with `khit` set, a channel's rank only counts within its first khit words (inclusion, not order)
             let rank: Vec<usize> = lists
                 .iter()

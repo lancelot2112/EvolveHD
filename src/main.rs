@@ -50,6 +50,7 @@ fn hippo_cfg(args: &[String]) -> evolvehd::hippo::HippoCfg {
         cancel: flag(args, "--hp-cancel"),
         excess: flag(args, "--hp-excess"),
         phase: g("--hp-phase", "0").parse().unwrap(),
+        typed: flag(args, "--hp-typed"),
         hop2_ph: g("--hp-hop2-ph", "")
             .split(',')
             .filter(|x| !x.is_empty())
