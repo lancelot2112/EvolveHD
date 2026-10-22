@@ -81,6 +81,18 @@
 //!   how often the slots' answer and the window's answer were right where the two disagreed. It answers from the window where the window has been right more often
 //!   (cross-multiplied, prior 1 in 2). So the window is read for its answer only where the slots are unsure.
 //!   Both sources learn at every word.
+//! - `sq_max`: open queries, at most this many at once. An open query is a two-hop pattern ((class, kind), then
+//!   (class, kind)) kept answered for every entity while reading, in a derived slot of its own. A committed fact
+//!   that matches its first hop moves the entity's pointer and refreshes its slot. One that matches its second
+//!   hop refreshes every entity pointing to the fact's subject: "fred went to the kitchen" moves every object fred
+//!   holds. The query learner reads derived slots like any other.
+//!   - **Which open:** the two-hop patterns that held answers to questions are counted. An answer is the word
+//!     after a boundary the mood counter has learned closes a question. The most counted (at least 16) opens
+//!     when there is room.
+//!   - **Which stay:** each open query starts with a balance of 512. It loses 64 when an answer given through its
+//!     slot was wrong. It gains 32 when its slot held an answer
+//!     and pays 1 per read or write of upkeep. After 2,000 words, one whose balance falls below 0 closes. So the number open tunes itself under
+//!     the cap.
 //! - `seed`: salts the codes, keys and context.
 use crate::meaning::{Meaning, MeaningCfg};
 use std::collections::HashMap;
@@ -142,6 +154,22 @@ pub struct SitCfg {
     /// Lookback merged: the window's routes compete with the slots' routes in one pool under the same learner
     /// (no separate arbiter).
     pub merge: bool,
+    /// Open queries: the most open at once (0 = off). Each is a two-hop pattern ((class, kind) then (class, kind))
+    /// kept answered for every entity as facts arrive, into a derived slot of its own; the system opens and closes
+    /// them by their usefulness, so the number open tunes itself under this cap.
+    pub sq_max: usize,
+    /// How open queries are chosen. 0: top-down only (the patterns that held most question answers). 1: the input
+    /// proposes (every committed fact proposes the two-hop chains starting from it, counted) and the higher level
+    /// ranks (the proposals' route features scored by the learned query weights under the question codes seen
+    /// lately). 2: as 1, and the chain must also have held at least 4 answers.
+    pub sq_mode: u32,
+    /// Open queries' credit. 0: credit (+32) whenever a query's slot held the answer. 1: credit only for what the
+    /// query contributed: +32 when the answer given came through its slot and was right, +16 when the answer given
+    /// was wrong and its slot held the right one; nothing when another route answered right anyway.
+    pub sq_credit: u32,
+    /// Which open queries' derived slots an entity's reader sees (it sees at most 4): 0 the newest written, 1 the
+    /// queries with the highest balance, 2 the queries with the most credits.
+    pub sq_rank: u32,
     pub cred: u32,
     pub seed: u64,
 }
@@ -213,6 +241,21 @@ pub struct Situation {
     pub used_window: u64,                           // predictions answered from the window
     pub used_window_q: u64,                         // ... of them right after a question boundary
     pub questions_seen: u64,
+    qhops: Vec<Route>,                              // each route's hops, aligned with qcands
+    after_q: bool,                                  // the current prediction follows a learned question boundary
+    sq: Vec<OpenQuery>,                             // the open queries
+    sq_cand: HashMap<((u32, u32), (u32, u32)), u32>, // two-hop patterns that answered, counted
+    sq_in: HashMap<((u32, u32), (u32, u32)), (u32, u32)>, // chains the input proposed: (count, the last subject)
+    qring: Vec<Vec<u32>>,                           // the question codes seen lately (the higher level)
+    qring_at: usize,
+    sq_ptr: HashMap<(u32, u32), u32>,               // (query id, entity x) -> the intermediate m it points to
+    sq_rev: HashMap<(u32, u32), Vec<u32>>,          // (query id, m) -> the entities pointing to m
+    sq_next: u32,
+    pub sq_work: u64,                               // maintenance reads and writes
+    pub sq_open_sum: u64,                           // open queries summed over words (for the mean)
+    pub sq_peak: usize,                             // the most open at once
+    pub sq_opened: u64,
+    pub sq_closed: u64,
     mood: Vec<u8>,
     buf: Vec<(u32, u32, u8, u32)>,                  // buffered bindings: (entity, class, direction, value)
     stamp: HashMap<(u32, u32, u32), u64>,           // last write time per slot (entity, class, kind)
@@ -235,6 +278,19 @@ const NF: usize = 4096;         // route features (hashed)
 /// A route: one slot (class, kind), or two (the second with class != u32::MAX).
 type Route = (u32, u32, u32, u32);
 const COMP: u32 = 1 << 24; // composite class ids start here, apart from the pooled classes
+const DER: u32 = 1 << 25; // open queries' derived slots: class DER + query id
+
+/// An open query: a two-hop pattern kept answered for every entity, with its usefulness.
+#[derive(Clone, Debug)]
+pub struct OpenQuery {
+    pub id: u32,
+    pub p1: (u32, u32),
+    pub p2: (u32, u32),
+    pub util: i32,
+    pub credits: u64,
+    pub work: u64,
+    pub opened_at: u64,
+}
 const DIM: [i8; 4] = [0, 1, 0, -1];
 
 impl Situation {
@@ -294,6 +350,21 @@ impl Situation {
             used_window: 0,
             used_window_q: 0,
             questions_seen: 0,
+            qhops: vec![],
+            after_q: false,
+            sq: vec![],
+            sq_cand: HashMap::new(),
+            sq_in: HashMap::new(),
+            qring: vec![],
+            qring_at: 0,
+            sq_ptr: HashMap::new(),
+            sq_rev: HashMap::new(),
+            sq_next: 0,
+            sq_work: 0,
+            sq_open_sum: 0,
+            sq_peak: 0,
+            sq_opened: 0,
+            sq_closed: 0,
             mood: vec![0; nw],
             buf: vec![],
             stamp: HashMap::new(),
@@ -632,6 +703,21 @@ impl Situation {
                 *self.miss.entry((cx, j, (a2, ka, b2, kb))).or_insert(0) += n;
             }
         }
+        let mut closing = vec![];
+        for o in self.sq.iter_mut() {
+            match (map.get(&o.p1.0), map.get(&o.p2.0)) {
+                (Some(&a), Some(&b)) => {
+                    o.p1.0 = a;
+                    o.p2.0 = b;
+                }
+                _ => closing.push(o.id),
+            }
+        }
+        for id in closing {
+            self.sq_close(id);
+        }
+        self.sq_cand.clear();
+        self.sq_in.clear();
         let hop = std::mem::take(&mut self.hop);
         for (k, m) in hop {
             let e = self.hop.entry(k).or_default();
@@ -777,7 +863,7 @@ impl Situation {
     /// The classes of e's live slots (of kind kd, if given).
     fn live_classes(&self, e: u32, kd: Option<u32>) -> Vec<u32> {
         let mut v: Vec<u32> = vec![];
-        for dir in 0..3u8 {
+        for dir in 0..4u8 {
             if let Some(cs) = self.dcl.get(&(e, dir)) {
                 for &c in cs {
                     if !v.contains(&c) && kd.map_or(true, |k| self.occ.get(&(e, c)).map_or(false, |ks| ks.contains(&k))) {
@@ -952,11 +1038,34 @@ impl Situation {
         v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
         // the newest few of each kind, ranked within their kind (a slot's recency among the entity's values of the
         // same kind: the current holder is rank 0 even when the clause also wrote "up" or "." beside it)
+        if self.cfg.sq_rank > 0 {
+            // derived slots ranked by their query's balance or credits (stable: ties keep the newest first)
+            let val = |c: u32| -> i64 {
+                self.sq.iter().find(|o| o.id + DER == c).map_or(i64::MIN, |o| if self.cfg.sq_rank == 1 { o.util as i64 } else { o.credits as i64 })
+            };
+            let mut der: Vec<(u64, u32, u32)> = v.iter().filter(|x| x.1 >= DER).copied().collect();
+            der.sort_by(|a, b| val(b.1).cmp(&val(a.1)));
+            let mut it = der.into_iter();
+            for x in v.iter_mut() {
+                if x.1 >= DER {
+                    *x = it.next().unwrap();
+                }
+            }
+        }
         let mut seen_k: HashMap<u32, u32> = HashMap::new();
         let mut out = vec![];
+        let mut derived = 0;
         for x in v {
+            if x.1 >= DER {
+                // open queries' derived slots have a budget of their own (they must not crowd out the facts)
+                if derived < 4 {
+                    out.push((x.1, x.2, 0));
+                    derived += 1;
+                }
+                continue;
+            }
             let r = seen_k.entry(x.2).or_insert(0);
-            if *r < 2 && out.len() < n {
+            if *r < 2 && out.len() < n + derived {
                 out.push((x.1, x.2, *r));
             }
             *r += 1;
@@ -982,8 +1091,17 @@ impl Situation {
     /// The query learner's candidates: every one- and two-hop route from the cue words' newest live slots, scored.
     fn query_recall(&mut self, cue: &[u32]) -> Vec<(u32, u32)> {
         let q = self.query_bits(cue);
+        self.after_q = self.hist.last().map_or(false, |&u| self.boundary[u as usize] && self.mood[u as usize] >= 8);
+        if self.cfg.sq_max > 0 && self.cfg.sq_mode > 0 && self.after_q {
+            if self.qring.len() < 32 {
+                self.qring.push(q.clone());
+            } else {
+                self.qring[self.qring_at] = q.clone();
+            }
+            self.qring_at = (self.qring_at + 1) % 32;
+        }
         let mut cache: HashMap<u32, i64> = HashMap::new();
-        let mut cands: Vec<(Vec<u32>, u32, i64, u64)> = vec![];
+        let mut cands: Vec<(Vec<u32>, u32, i64, u64, Route)> = vec![];
         let dbg = std::env::var("SIT_QDBG").is_ok();
         let mut desc: Vec<String> = vec![];
         for (j, &e) in cue.iter().enumerate() {
@@ -997,7 +1115,7 @@ impl Situation {
                 if dbg {
                     desc.push(format!("j{}:{}>c{}k{}r{}={}", j, e, c, k, r, m));
                 }
-                cands.push((f1, m, sc, self.stamp_of(e, c, k)));
+                cands.push((f1, m, sc, self.stamp_of(e, c, k), (c, k, u32::MAX, u32::MAX)));
                 for (c2, k2, r2) in self.newest_slots(m, 8) {
                     let mut ex = cue.to_vec();
                     ex.push(m);
@@ -1007,7 +1125,7 @@ impl Situation {
                     if dbg {
                         desc.push(format!("j{}:{}>c{}k{}r{}={}>c{}k{}r{}={}", j, e, c, k, r, m, c2, k2, r2, v));
                     }
-                    cands.push((f2, v, sc, self.stamp_of(e, c, k)));
+                    cands.push((f2, v, sc, self.stamp_of(e, c, k), (c, k, c2, k2)));
                 }
             }
         }
@@ -1026,6 +1144,7 @@ impl Situation {
             eprintln!("QDBG {} n {} top {}", self.t, cands.len(), vals.join(" "));
         }
         self.qbits = q;
+        self.qhops = cands.iter().map(|x| x.4).collect();
         self.qcands = cands.into_iter().map(|x| (x.0, x.1, x.2)).collect();
         props
     }
@@ -1035,6 +1154,49 @@ impl Situation {
     fn query_learn(&mut self, w: u32) {
         let cands = std::mem::take(&mut self.qcands);
         let q = std::mem::take(&mut self.qbits);
+        let hops = std::mem::take(&mut self.qhops);
+        if self.cfg.sq_max > 0 && self.after_q {
+            // which two-hop patterns answered (candidates to open), and which open queries' slots did (credit), at
+            // the answers to questions (after a boundary the mood counter has learned closes a question)
+            let mut credited: Vec<(u32, i32)> = vec![];
+            let top_right = cands.first().map_or(false, |x| x.1 == w);
+            for (i, (cd, h)) in cands.iter().zip(&hops).enumerate() {
+                if cd.1 != w {
+                    continue;
+                }
+                if h.2 != u32::MAX && h.0 < COMP && h.2 < COMP {
+                    *self.sq_cand.entry(((h.0, h.1), (h.2, h.3))).or_insert(0) += 1;
+                }
+                if h.0 >= DER && !credited.iter().any(|c| c.0 == h.0 - DER) {
+                    let amt = if self.cfg.sq_credit == 0 {
+                        32
+                    } else if i == 0 {
+                        32 // it gave the answer, and the answer was right
+                    } else if !top_right {
+                        16 // the answer given was wrong, and it held the right one
+                    } else {
+                        0 // another route answered right anyway
+                    };
+                    if amt > 0 {
+                        credited.push((h.0 - DER, amt));
+                    }
+                }
+            }
+            for (id, amt) in credited {
+                if let Some(o) = self.sq.iter_mut().find(|o| o.id == id) {
+                    o.util = (o.util + amt).min(32768); // a credit of 32 is worth 32 reads and writes
+                    o.credits += 1;
+                }
+            }
+            // blame: the answer given came through an open query's slot and was wrong
+            if let (Some(top), Some(h)) = (cands.first(), hops.first()) {
+                if top.1 != w && h.0 >= DER {
+                    if let Some(o) = self.sq.iter_mut().find(|o| o.id == h.0 - DER) {
+                        o.util -= 64;
+                    }
+                }
+            }
+        }
         if let Some(top) = cands.first() {
             if top.1 != w {
                 if let Some(good) = cands.iter().find(|x| x.1 == w) {
@@ -1158,6 +1320,147 @@ impl Situation {
                 (64 - m.leading_zeros()).min(15)
             }
         }
+    }
+
+    // ---- open queries ----
+    /// Close the open queries that have stopped paying for their upkeep, and open the most counted candidate
+    /// pattern if there is room: so the number open tunes itself.
+    fn sq_manage(&mut self) {
+        let t = self.t;
+        let mut closing: Vec<u32> = self.sq.iter().filter(|o| o.util < 0 && t - o.opened_at >= 2000).map(|o| o.id).collect();
+        closing.sort_unstable();
+        for id in closing {
+            self.sq_close(id);
+        }
+        if self.sq.len() < self.cfg.sq_max {
+            let open: Vec<((u32, u32), (u32, u32))> = self.sq.iter().map(|o| (o.p1, o.p2)).collect();
+            let best = if self.cfg.sq_mode == 0 {
+                self.sq_cand.iter().filter(|(p, &n)| n >= 16 && !open.contains(p)).max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0))).map(|(p, _)| *p)
+            } else {
+                self.sq_pick(&open)
+            };
+            if let Some(p) = best {
+                self.sq_cand.insert(p, 0);
+                self.sq_in.remove(&p);
+                let id = self.sq_next;
+                self.sq_next += 1;
+                self.sq.push(OpenQuery { id, p1: p.0, p2: p.1, util: 512, credits: 0, work: 0, opened_at: t });
+                self.sq_opened += 1;
+            }
+        }
+    }
+    /// The input's proposals (counted at least 16 times; with mode 2, also at least 4 answers held) ranked by the
+    /// higher level: the chain's route features summed under the learned query weights, over the question codes
+    /// seen lately, at the best cue position. The best positive one, or none.
+    fn sq_pick(&mut self, open: &[((u32, u32), (u32, u32))]) -> Option<((u32, u32), (u32, u32))> {
+        if self.qring.is_empty() {
+            return None;
+        }
+        if self.sq_in.len() > 65536 {
+            // forget slowly: halve the counts and drop the ones that reach zero
+            self.sq_in.retain(|_, v| {
+                v.0 >>= 1;
+                v.0 > 0
+            });
+        }
+        let mut cands: Vec<(((u32, u32), (u32, u32)), u32)> = self
+            .sq_in
+            .iter()
+            .filter(|(p, v)| v.0 >= 16 && !open.contains(p) && (self.cfg.sq_mode < 2 || self.sq_cand.get(p).copied().unwrap_or(0) >= 4))
+            .map(|(p, v)| (*p, v.1))
+            .collect();
+        cands.sort_unstable();
+        let mut best: Option<(i64, ((u32, u32), (u32, u32)))> = None;
+        for (p, x) in cands {
+            let hops = [(p.0 .0, p.0 .1, 0), (p.1 .0, p.1 .1, 0)];
+            let mut top = i64::MIN;
+            for j in 0..4 {
+                let f = self.route_feats(j, x, &hops);
+                let mut cache: HashMap<u32, i64> = HashMap::new();
+                let mut s = 0i64;
+                for q in &self.qring {
+                    cache.clear();
+                    s += self.qscore(q, &f, &mut cache);
+                }
+                top = top.max(s);
+            }
+            if top > 0 && best.map_or(true, |b| top > b.0) {
+                best = Some((top, p));
+            }
+        }
+        best.map(|b| b.1)
+    }
+    fn sq_close(&mut self, id: u32) {
+        self.sq.retain(|o| o.id != id);
+        self.sq_ptr.retain(|k, _| k.0 != id);
+        self.sq_rev.retain(|k, _| k.0 != id);
+        self.sq_closed += 1;
+    }
+    /// A committed fact (x, class c, kind kd) = v, checked against every open query: it may move x's pointer (the
+    /// query's first hop) and refresh x's derived slot, or change an intermediate's second hop and refresh every
+    /// entity pointing to it. A fact of the first hop's kind under another class detaches x.
+    fn sq_on_fact(&mut self, x: u32, c: u32, kd: u32, v: u32) {
+        let qs: Vec<(u32, (u32, u32), (u32, u32))> = self.sq.iter().map(|o| (o.id, o.p1, o.p2)).collect();
+        for (id, p1, p2) in qs {
+            let mut work = 0u64;
+            if (c, kd) == p1 {
+                if let Some(old) = self.sq_ptr.insert((id, x), v) {
+                    if let Some(r) = self.sq_rev.get_mut(&(id, old)) {
+                        r.retain(|&y| y != x);
+                    }
+                }
+                self.sq_rev.entry((id, v)).or_default().push(x);
+                work += 1;
+                if self.live(v, p2.0, p2.1) {
+                    if let Some((z, _)) = self.read_best(v, p2.0, p2.1, &[v, x]) {
+                        self.sq_write(x, id, p2.1, z);
+                        work += 2;
+                    }
+                }
+            } else if kd == p1.1 && c < COMP {
+                // detach: x took a value of that kind under another relation
+                if let Some(old) = self.sq_ptr.remove(&(id, x)) {
+                    if let Some(r) = self.sq_rev.get_mut(&(id, old)) {
+                        r.retain(|&y| y != x);
+                    }
+                    work += 1;
+                }
+            }
+            if (c, kd) == p2 {
+                let xs: Vec<u32> = self.sq_rev.get(&(id, x)).cloned().unwrap_or_default();
+                for xx in xs {
+                    self.sq_write(xx, id, p2.1, v);
+                    work += 1;
+                }
+            }
+            if work > 0 {
+                self.sq_work += work;
+                if let Some(o) = self.sq.iter_mut().find(|o| o.id == id) {
+                    o.work += work;
+                    o.util -= work as i32; // upkeep: one unit per read or write
+                }
+            }
+        }
+    }
+    fn sq_write(&mut self, x: u32, id: u32, kd: u32, z: u32) {
+        let cs = DER + id;
+        self.write(x, cs, kd, z);
+        let ks = self.occ.entry((x, cs)).or_default();
+        if !ks.contains(&kd) {
+            ks.push(kd);
+        }
+        let cl = self.dcl.entry((x, 3)).or_default();
+        if !cl.contains(&cs) {
+            cl.push(cs);
+        }
+        self.stamp.insert((x, cs, kd), self.t);
+    }
+    pub fn words_seen(&self) -> u64 {
+        self.t
+    }
+    /// The open queries now (diagnostics).
+    pub fn open_queries(&self) -> Vec<OpenQuery> {
+        self.sq.clone()
     }
 
     fn live(&self, e: u32, c: u32, kd: u32) -> bool {
@@ -1598,6 +1901,13 @@ impl Situation {
             }
         }
         self.t += 1;
+        if self.cfg.sq_max > 0 {
+            self.sq_open_sum += self.sq.len() as u64;
+            self.sq_peak = self.sq_peak.max(self.sq.len());
+            if self.t % 64 == 0 {
+                self.sq_manage();
+            }
+        }
         if self.cfg.recluster > 0 && self.t % self.cfg.recluster as u64 == 0 {
             self.recluster();
         }
@@ -1633,6 +1943,19 @@ impl Situation {
                 cl.push(c);
             }
             self.stamp.insert((x, c, kd), self.t);
+            if self.cfg.sq_max > 0 {
+                self.sq_on_fact(x, c, kd, v);
+                if self.cfg.sq_mode > 0 && c < COMP && self.seen[v as usize] {
+                    // the input proposes: the chains that start from this fact (x, c) = v, then v's newest slots
+                    for (c2, k2, _) in self.newest_slots(v, 8) {
+                        if c2 < COMP {
+                            let e = self.sq_in.entry(((c, kd), (c2, k2))).or_insert((0, x));
+                            e.0 = e.0.saturating_add(1);
+                            e.1 = x;
+                        }
+                    }
+                }
+            }
             // data bouncing at write time: (x, c, v) and a counted pair ((c, kd), (c2, k2)) -> read v's (c2, k2)
             // slot now and keep the result in x's composite slot ("emma dropped the cup": where emma is now)
             if self.cfg.compose > 0 && c < COMP {

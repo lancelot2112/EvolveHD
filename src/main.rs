@@ -57,6 +57,10 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         fpool: flag(args, "--sit-fpool"),
         lookback: g("--sit-lookback", "0").parse().unwrap(),
         merge: flag(args, "--sit-merge"),
+        sq_max: g("--sit-sq", "0").parse().unwrap(),
+        sq_mode: g("--sit-sq-mode", "0").parse().unwrap(),
+        sq_credit: g("--sit-sq-credit", "0").parse().unwrap(),
+        sq_rank: g("--sit-sq-rank", "0").parse().unwrap(),
         cred: g("--sit-cred", "2").parse().unwrap(),
         seed: g("--sit-seed", "0").parse().unwrap(),
     }
@@ -721,6 +725,13 @@ fn main() {
                 let name = |w: u32| voc.get(w as usize).cloned().unwrap_or(w.to_string());
                 eprintln!("learned boundaries: {} | paths {} | relation classes {}", x.boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.n_paths(), x.n_classes());
                 eprintln!("question boundaries: {} | clauses committed {}, dropped {}", x.question_boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.committed, x.dropped);
+                if x.cfg.sq_max > 0 {
+                    let words = x.words_seen().max(1);
+                    eprintln!("open queries: opened {}, closed {}, mean open {:.2}, peak {}, upkeep {:.3} reads+writes per word", x.sq_opened, x.sq_closed, x.sq_open_sum as f64 / words as f64, x.sq_peak, x.sq_work as f64 / words as f64);
+                    for o in x.open_queries() {
+                        eprintln!("  open query {}: ({}, kind {}) then ({}, kind {}), usefulness {}, credited {}, upkeep {}", o.id, o.p1.0, name(o.p1.1), o.p2.0, name(o.p2.1), o.util, o.credits, o.work);
+                    }
+                }
                 if x.cfg.lookback > 0 {
                     eprintln!("lookback: answered from the window {} times; after a question boundary {} of {}", x.used_window, x.used_window_q, x.questions_seen);
                 }
