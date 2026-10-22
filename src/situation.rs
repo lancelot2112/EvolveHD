@@ -172,6 +172,19 @@ pub struct SitCfg {
     /// Every route field's symbol also carries the route's number of hops (one- and two-hop routes keep their
     /// evidence apart).
     pub qslot_hopconj: bool,
+    /// Curiosity (with `qslots` and `lookback`): answer from memory where answers like this one (same question form,
+    /// same margin bucket) have been right often enough; otherwise look it up in the lookback window (read the same
+    /// weight-free way). Answer from the source that has been right more often in this situation (question form, both
+    /// margins, whether the two agree), and answer nothing ("unknown") if that source has not been right often
+    /// enough either. "Often enough": right x den > num x n, with a prior of 1 right in 2.
+    pub curious: bool,
+    pub curious_num: u32,
+    /// The trust counts for the two sources keyed on (form, agree) only, not the margins too.
+    pub curious_coarse: bool,
+    /// The window also reads and learns at every question boundary where memory is sure (practice), not only when
+    /// memory is unsure; its answer is still used only when memory is unsure.
+    pub curious_practice: bool,
+    pub curious_den: u32,
     /// The query code also carries 4 bits hashed from the words 1 and 4 back together ("?" ... "has" against "?" ...
     /// "is": the two question forms share the words 1 and 3 back).
     pub qform14: bool,
@@ -403,6 +416,16 @@ pub struct Situation {
     wcands: Vec<(Vec<u32>, u32, i64)>,             // the window's routes for the current prediction
     arb: HashMap<(u64, u32), [u16; 4]>,             // per (question form, slot margin bucket): slot right, slot n, window right, window n
     arb_key: (u64, u32),
+    conf_s: HashMap<(u64, u32), [u16; 2]>,          // curiosity: per (form, slot margin): slot right, n
+    conf_c: HashMap<(u64, u32), [u16; 3]>,          // per (form, both margins, agree): slot right, window right, n
+    cur_ks: (u64, u32),
+    cur_kc: Option<(u64, u32)>,
+    win_top: Option<u32>,
+    practiced: bool,
+    pub cur_asked: u64,                             // predictions where memory was unsure and the window was read
+    pub cur_window: u64,                            // ... answered from the window
+    pub cur_unknown: u64,                           // ... answered "unknown"
+    pub cur_q: [u64; 4],                            // at questions: unsure, answered from the window, unknown, all
     slot_top: Option<u32>,
     pub used_window: u64,                           // predictions answered from the window
     pub used_window_q: u64,                         // ... of them right after a question boundary
@@ -521,6 +544,16 @@ impl Situation {
             wcands: vec![],
             arb: HashMap::new(),
             arb_key: (0, 0),
+            conf_s: HashMap::new(),
+            conf_c: HashMap::new(),
+            cur_ks: (0, 0),
+            cur_kc: None,
+            win_top: None,
+            practiced: false,
+            cur_asked: 0,
+            cur_window: 0,
+            cur_unknown: 0,
+            cur_q: [0; 4],
             slot_top: None,
             used_window: 0,
             used_window_q: 0,
@@ -1377,16 +1410,55 @@ impl Situation {
     }
     /// Write a symbol into a question slot, with the given phase offset (0 = Hebbian, 2 = anti-Hebbian).
     fn qslot_write(&mut self, form: u64, j: usize, ke: u32, field: u32, sym: u32, off: u8) {
-        let (idx, ph) = self.qslot_key(form, j, ke, field);
-        let (m, cl) = (self.cfg.qslot_mag, self.cfg.qslot_clamp);
-        if self.cfg.qslot_fields >> field & 1 == 0 {
+        if field < 32 && self.cfg.qslot_fields >> field & 1 == 0 {
             return;
         }
+        self.qslot_write_raw(form, j, ke, field, sym, off);
+    }
+    fn qslot_write_raw(&mut self, form: u64, j: usize, ke: u32, field: u32, sym: u32, off: u8) {
+        let (idx, ph) = self.qslot_key(form, j, ke, field);
+        let (m, cl) = (self.cfg.qslot_mag, self.cfg.qslot_clamp);
         for (&x, &kp) in idx.iter().zip(&ph) {
             let p = ((kp + self.vph(sym, x) + off) & 3) as usize;
             let x = x as usize;
             self.qre[x] = (self.qre[x] + m * DRE[p]).clamp(-cl, cl);
             self.qim[x] = (self.qim[x] + m * DIM[p]).clamp(-cl, cl);
+        }
+    }
+
+    /// A window route's score: with `qslots`, weight-free: each feature, by its index in the route's feature list,
+    /// matched against a question slot (form, "window", list length, index); otherwise the query weights.
+    fn wscore(&self, q: &[u32], f: &[u32], cache: &mut HashMap<u32, i64>, memo: &mut HashMap<(usize, usize, u32), i64>) -> i64 {
+        if !self.cfg.qslots {
+            return self.qscore(q, f, cache);
+        }
+        f.iter()
+            .enumerate()
+            .map(|(i, &fi)| {
+                *memo.entry((f.len(), i, fi)).or_insert_with(|| {
+                    let (idx, ph) = self.qslot_key(self.qform, 99, f.len() as u32, 100 + i as u32);
+                    self.qslot_sim(&idx, &ph, fi)
+                })
+            })
+            .sum()
+    }
+    /// Weight-free learning for the window, on a mistake: the route that held the answer is written into the
+    /// question's window slots, the wrong top route's differing features with opposite phase.
+    fn window_hebb(&mut self, wc: &[(Vec<u32>, u32, i64)], w: u32) {
+        let Some(top) = wc.first() else { return };
+        if top.1 == w {
+            return;
+        }
+        let Some(good) = wc.iter().find(|x| x.1 == w) else { return };
+        let (gf, tf) = (good.0.clone(), top.0.clone());
+        let form = self.qform;
+        for (i, &fi) in gf.iter().enumerate() {
+            self.qslot_write_raw(form, 99, gf.len() as u32, 100 + i as u32, fi, 0);
+        }
+        for (i, &fi) in tf.iter().enumerate() {
+            if tf.len() != gf.len() || gf[i] != fi {
+                self.qslot_write_raw(form, 99, tf.len() as u32, 100 + i as u32, fi, 2);
+            }
         }
     }
 
@@ -1652,6 +1724,7 @@ impl Situation {
             }
             v
         };
+        let mut memo: HashMap<(usize, usize, u32), i64> = HashMap::new();
         let mut cache: HashMap<u32, i64> = HashMap::new();
         let mut out: Vec<(Vec<u32>, u32, i64)> = vec![];
         for (j, &e) in cue.iter().enumerate() {
@@ -1668,7 +1741,7 @@ impl Situation {
                         Self::fid(20, j as u64, 0), Self::fid(21, ke, 0), Self::fid(22, r as u64, 0),
                         Self::fid(23, (d + 6) as u64, 0), Self::fid(24, km, 0), Self::fid(29, (d + 6) as u64, km),
                     ];
-                    let sc = self.qscore(q, &f1, &mut cache);
+                    let sc = self.wscore(q, &f1, &mut cache, &mut memo);
                     out.push((f1.clone(), m, sc));
                     if j != 1 && j != 0 {
                         continue; // two hops only from the nearest cue words (cost)
@@ -1687,7 +1760,7 @@ impl Situation {
                                 Self::fid(25, r2 as u64, 0), Self::fid(26, (d2 + 6) as u64, 0), Self::fid(27, kv, 0),
                                 Self::fid(28, (d + 6) as u64, (d2 + 6) as u64), Self::fid(30, km, kv),
                             ]);
-                            let sc = self.qscore(q, &f2, &mut cache);
+                            let sc = self.wscore(q, &f2, &mut cache, &mut memo);
                             out.push((f2, v, sc));
                         }
                     }
@@ -1951,7 +2024,63 @@ impl Situation {
         let cue: Vec<u32> = (0..self.cfg.cue.min(self.hist.len())).map(|j| self.hist[self.hist.len() - 1 - j]).collect();
         if self.cfg.query {
             let mut props = self.query_recall(&cue);
-            if self.cfg.lookback > 0 {
+            let mut given: Option<Vec<(u32, u32)>> = None; // what is answered, when it differs from props
+            let at_q = self.hist.last().map_or(false, |&u| self.boundary[u as usize] && self.mood[u as usize] >= 8);
+            if self.cfg.curious {
+                // does memory know? answers like this one (form, margin bucket) right often enough
+                let (num, den) = (self.cfg.curious_num as u64, self.cfg.curious_den as u64);
+                let often = |r: u16, n: u16| (r as u64 + 1) * den > num * (n as u64 + 2);
+                let ms = Self::margin_bucket(&self.qcands);
+                self.cur_ks = (self.qform, ms);
+                self.slot_top = self.qcands.first().map(|x| x.1);
+                self.cur_kc = None;
+                self.win_top = None;
+                if at_q {
+                    self.cur_q[3] += 1;
+                }
+                let a = *self.conf_s.get(&self.cur_ks).unwrap_or(&[0; 2]);
+                let unsure = !often(a[0], a[1]);
+                if !unsure && self.cfg.curious_practice && at_q && self.cfg.lookback > 0 {
+                    // practice: look it up anyway, to learn to look things up (the answer stays memory's)
+                    let q = self.qbits.clone();
+                    self.wcands = self.window_cands(&cue, &q);
+                    self.win_top = self.wcands.first().map(|x| x.1);
+                    self.practiced = true;
+                }
+                if unsure {
+                    // unsure: go and look it up in the window
+                    self.cur_asked += 1;
+                    let q = self.qbits.clone();
+                    self.wcands = self.window_cands(&cue, &q);
+                    self.win_top = self.wcands.first().map(|x| x.1);
+                    let mw = Self::margin_bucket(&self.wcands);
+                    let agree = self.win_top.is_some() && self.win_top == self.slot_top;
+                    let kc = if self.cfg.curious_coarse { (self.qform, agree as u32) } else { (self.qform, ms * 64 + mw * 2 + agree as u32) };
+                    self.cur_kc = Some(kc);
+                    let c = *self.conf_c.get(&kc).unwrap_or(&[0; 3]);
+                    // the source right more often here (cross-multiplied; same denominator), if often enough
+                    let win_better = self.win_top.is_some() && c[1] > c[0];
+                    let best_r = if win_better { c[1] } else { c[0] };
+                    if at_q {
+                        self.cur_q[0] += 1;
+                    }
+                    if !often(best_r, c[2]) {
+                        self.cur_unknown += 1;
+                        if at_q {
+                            self.cur_q[2] += 1;
+                        }
+                        given = Some(vec![]);
+                    } else if win_better {
+                        self.cur_window += 1;
+                        if at_q {
+                            self.cur_q[1] += 1;
+                        }
+                        let lo = self.wcands.iter().map(|x| x.2).min().unwrap_or(0);
+                        props = self.wcands.iter().map(|x| ((x.2 - lo + 1).min(u32::MAX as i64) as u32, x.1)).collect();
+                    }
+                }
+            }
+            if self.cfg.lookback > 0 && !self.cfg.curious {
                 // the slots' answer, its margin, and the question form; then the window's answer; answer from the
                 // window where, for this form and margin, the window has been right more often than the slots
                 let q = self.qbits.clone();
@@ -1991,7 +2120,11 @@ impl Situation {
                     eprintln!("WDBG {} slot {} win {} bucket {} use {}", self.t, self.slot_top.map_or(-1, |x| x as i64), self.wcands.first().map_or(-1, |x| x.1 as i64), key.1, use_win as u8);
                 }
             }
+            // the store's own prediction (for the boundaries' mood counters), and what is answered
             self.last = props.clone();
+            if let Some(g) = given {
+                props = g;
+            }
             let tot: f64 = props.iter().map(|x| x.0 as f64).sum();
             let mut out: Vec<(u32, f64)> = vec![];
             for (n, v) in props {
@@ -2167,8 +2300,37 @@ impl Situation {
                 }
             }
         }
+        if self.cfg.query && self.cfg.curious {
+            let halve = |a: &mut [u16]| {
+                if a[a.len() - 1] > 1000 {
+                    a.iter_mut().for_each(|x| *x >>= 1);
+                }
+            };
+            let sr = (self.slot_top == Some(w)) as u16;
+            if std::env::var("SIT_CDBG").is_ok() && (self.cur_kc.is_some() || self.practiced) {
+                eprintln!("CDBG {} slot {:?} win {:?} truth {} unsure {}", self.t - 1, self.slot_top, self.win_top, w, self.cur_kc.is_some() as u8);
+            }
+            let a = self.conf_s.entry(self.cur_ks).or_insert([0; 2]);
+            a[0] += sr;
+            a[1] += 1;
+            halve(a);
+            if let Some(kc) = self.cur_kc.take() {
+                let wr = (self.win_top == Some(w)) as u16;
+                let c = self.conf_c.entry(kc).or_insert([0; 3]);
+                c[0] += sr;
+                c[1] += wr;
+                c[2] += 1;
+                halve(c);
+                let wc = std::mem::take(&mut self.wcands);
+                self.window_hebb(&wc, w);
+            } else if self.practiced {
+                let wc = std::mem::take(&mut self.wcands);
+                self.window_hebb(&wc, w);
+            }
+            self.practiced = false;
+        }
         if self.cfg.query {
-            if self.cfg.lookback > 0 {
+            if self.cfg.lookback > 0 && !self.cfg.curious {
                 let wc = std::mem::take(&mut self.wcands);
                 let q = self.qbits.clone();
                 if self.cfg.merge {

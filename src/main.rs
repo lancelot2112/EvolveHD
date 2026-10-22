@@ -63,6 +63,11 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         qslot_anti: !flag(args, "--sit-qslot-noanti"),
         qslot_kforms: flag(args, "--sit-qslot-kforms"),
         qslot_hopconj: flag(args, "--sit-qslot-hopconj"),
+        curious: flag(args, "--sit-curious"),
+        curious_coarse: flag(args, "--sit-curious-coarse"),
+        curious_practice: flag(args, "--sit-curious-practice"),
+        curious_num: g("--sit-curious-bar", "1/2").split('/').next().unwrap().parse().unwrap(),
+        curious_den: g("--sit-curious-bar", "1/2").split('/').nth(1).unwrap().parse().unwrap(),
         kindfirst: flag(args, "--sit-kindfirst"),
         replay: g("--sit-replay", "0").parse().unwrap(),
         fpool: flag(args, "--sit-fpool"),
@@ -739,6 +744,9 @@ fn main() {
                 let name = |w: u32| voc.get(w as usize).cloned().unwrap_or(w.to_string());
                 eprintln!("learned boundaries: {} | paths {} | relation classes {}", x.boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.n_paths(), x.n_classes());
                 eprintln!("question boundaries: {} | clauses committed {}, dropped {}", x.question_boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.committed, x.dropped);
+                if x.cfg.curious {
+                    eprintln!("curiosity: unsure at {} predictions, answered {} from the window, {} unknown; at questions: {} of {} unsure, {} from the window, {} unknown", x.cur_asked, x.cur_window, x.cur_unknown, x.cur_q[0], x.cur_q[3], x.cur_q[1], x.cur_q[2]);
+                }
                 if x.cfg.query {
                     let (n, nz, sat, bytes) = x.qw_census();
                     eprintln!("query weights: {} stored, {} nonzero, {} at or beyond the 8-bit limit, {} bytes", n, nz, sat, bytes);
