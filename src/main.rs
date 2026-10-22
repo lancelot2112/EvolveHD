@@ -42,6 +42,13 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         sense_mix: g("--sit-sense-mix", "1").parse().unwrap(),
         nsenses: g("--sit-nsenses", "3").parse().unwrap(),
         sense_new: g("--sit-sense-new", "0.3").parse().unwrap(),
+        kinds: flag(args, "--sit-kinds"),
+        mood: flag(args, "--sit-mood"),
+        recency: flag(args, "--sit-recency"),
+        bounce: flag(args, "--sit-bounce"),
+        supersede: flag(args, "--sit-supersede"),
+        compose: g("--sit-compose", "0").parse().unwrap(),
+        seed: g("--sit-seed", "0").parse().unwrap(),
     }
 }
 
@@ -703,6 +710,10 @@ fn main() {
                 let voc: Vec<String> = arg(&args, "--vocab").map(|p| std::fs::read_to_string(p).unwrap().lines().map(String::from).collect()).unwrap_or_default();
                 let name = |w: u32| voc.get(w as usize).cloned().unwrap_or(w.to_string());
                 eprintln!("learned boundaries: {} | paths {} | relation classes {}", x.boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.n_paths(), x.n_classes());
+                eprintln!("question boundaries: {} | clauses committed {}, dropped {}", x.question_boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.committed, x.dropped);
+                if x.cfg.kinds {
+                    eprintln!("kinds: {}", x.kind_groups().iter().map(|g| g.iter().map(|&w| name(w)).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join(" | "));
+                }
                 for cl in x.classes(8) {
                     let ps: Vec<String> = cl.iter().map(|p| format!("{} {}", if p[0] == 0 { "f" } else { "b" }, p[1..].iter().rev().map(|&w| name(w)).collect::<Vec<_>>().join(" "))).collect();
                     eprintln!("  class: {}", ps.join(" | "));

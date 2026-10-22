@@ -19,6 +19,32 @@
 //!    word w arrives, each cue word's slots for the most frequent classes are read; a class whose slot ranks w
 //!    first earns a count for that context. Hop 2 goes through the best value of each of the 10 most frequent
 //!    classes. Prediction reads the slots of the context's best-counted classes.
+//!
+//! Experiment 36 (the expert forum's changes), each behind a switch, all integer:
+//! - `kinds`: learned value kinds. Each word has 8-bit counters over its frames (the word before, the two words
+//!   before, the word after), halved together when one saturates. (4-bit counters split the people into two
+//!   kinds: a frame is a noisy observation, and a short window follows which verb a person used last.) Words are leader-clustered by the Jaccard
+//!   overlap of their frame codes (counters at a quarter of their maximum or more), at least 2/5 by
+//!   cross-multiplication, every `recluster` words. A kind keeps its name (a word id) across reclusterings.
+//!   Slots are keyed on (entity, class, kind of the value), and C1/C2 count (class, kind).
+//! - `mood`: questions do not write. A clause's bindings are buffered until the boundary that closes it. Each word
+//!   has a 4-bit counter of "after this boundary, the store's top proposal was the next word": up by 1 when it
+//!   was, down by 1 on half the misses (a stochastic decrement from a hash bit, so it climbs above a third). A
+//!   clause closed by a boundary whose counter is 8 or more is a cue, and its buffer is dropped.
+//! - `recency`: among one cue word's proposals of one kind, those with at least half the best count go newest first
+//!   (the slot's last write time, compared within the entity).
+//! - `bounce`: reasoning as a loop of reads instead of the C1/C2 tables. At each step (at most 3) it either stops
+//!   or reads one of the current entity's live slots and moves to the value read.
+//!   - The slot is chosen by success counts per (context, cue position, step).
+//!   - The stop is a 4-bit up/down counter per (context, kind of the current entity, step), stepped up where the
+//!     answer was reached and down at an intermediate.
+//! - `supersede`: when x's slot of kind k is written under one class, its other live slots of kind k in the same
+//!   direction get the reserved NONE value (never proposed), so an entity keeps one live value per (direction,
+//!   kind).
+//! - `compose`: data bouncing at write time. When a fact (x, c, v) is committed and ((c, k), (c2, k2)) is among
+//!   the `compose` most counted two-hop pairs, v's (c2, k2) slot is read then and written to x's composite slot,
+//!   which C1 can learn like any class: "emma dropped the cup" also stores where emma is at that moment.
+//! - `seed`: salts the codes, keys and context.
 use crate::meaning::{Meaning, MeaningCfg};
 use std::collections::HashMap;
 
@@ -49,6 +75,14 @@ pub struct SitCfg {
     /// Learned senses per word (at most), and the match below which a context starts a new one.
     pub nsenses: usize,
     pub sense_new: f64,
+    pub kinds: bool,
+    pub mood: bool,
+    pub recency: bool,
+    pub bounce: bool,
+    pub supersede: bool,
+    /// Write-time composition: the number of most-counted two-hop pairs composed when a fact is committed (0 = off).
+    pub compose: usize,
+    pub seed: u64,
 }
 
 /// A learned sense of a word: a prototype of the contexts it is used in (counts over the identity bits of the
@@ -87,18 +121,37 @@ pub struct Situation {
     class_count: Vec<u64>,
     senses: HashMap<u32, Vec<Sense>>,
     // slow memory
-    c1: HashMap<(u64, usize), HashMap<u32, u32>>,
-    c2: HashMap<(u64, usize), HashMap<(u32, u32), u32>>,
+    c1: HashMap<(u64, usize), HashMap<(u32, u32), u32>>,
+    c2: HashMap<(u64, usize), HashMap<((u32, u32), (u32, u32)), u32>>,
     hist: Vec<u32>,
     clause: Vec<u32>,
     seen: Vec<bool>,
     words: Vec<u32>,
     t: u64,
-    pub last: Vec<(u32, u32)>, // the last prediction's proposals: (value, weight)
+    pub last: Vec<(u32, u32)>, // the last prediction's proposals: (weight, value)
     learning: bool,
+    // experiment 36
+    pool_pm: u64,                                   // the pooling threshold in thousandths (integer compare)
+    frame: Vec<Vec<u16>>,                           // 8-bit frame counters per word
+    wcount: Vec<u64>,
+    kind: Vec<u32>,                                 // each word's kind (a word id); kn = none yet
+    kn: u32,
+    mood: Vec<u8>,
+    buf: Vec<(u32, u32, u8, u32)>,                  // buffered bindings: (entity, class, direction, value)
+    stamp: HashMap<(u32, u32, u32), u64>,           // last write time per slot (entity, class, kind)
+    occ: HashMap<(u32, u32), Vec<u32>>,             // live kinds per (entity, class): the slots' valid bits
+    dcl: HashMap<(u32, u8), Vec<u32>>,              // classes written per (entity, direction)
+    hop: HashMap<(u64, usize, u8), HashMap<(u32, u32), u32>>,
+    g2: HashMap<((u32, u32), (u32, u32)), u32>,       // two-hop pairs counted over all contexts
+    comp: HashMap<((u32, u32), (u32, u32)), u32>,     // composite classes, numbered from COMP
+    halt: HashMap<(u64, u32, u8), u8>,
+    pub committed: u64,
+    pub dropped: u64,
 }
 
 const DRE: [i8; 4] = [1, 0, -1, 0];
+const FB: usize = 512;
+const COMP: u32 = 1 << 24; // composite class ids start here, apart from the pooled classes
 const DIM: [i8; 4] = [0, 1, 0, -1];
 
 impl Situation {
@@ -110,13 +163,14 @@ impl Situation {
         mc.seed = 21;
         let mut mn = Meaning::new(mc, nw);
         mn.sense_mix = cfg.sense_mix;
+        let sd = cfg.seed.wrapping_mul(0x9E37_79B9);
         Situation {
             nw,
             re: vec![0; cfg.d],
             im: vec![0; cfg.d],
-            bg: vec![0; nw],
-            ctx_off: (0..cfg.k).map(|i| (hash(91, i as u64) % cfg.d as u64) as u32).collect(),
-            ctx_ph: (0..cfg.k).map(|i| (hash(92, i as u64) & 3) as u8).collect(),
+            bg: vec![0; nw + 1],
+            ctx_off: (0..cfg.k).map(|i| (hash(91 + sd, i as u64) % cfg.d as u64) as u32).collect(),
+            ctx_ph: (0..cfg.k).map(|i| (hash(92 + sd, i as u64) & 3) as u8).collect(),
             seg_draw: HashMap::new(),
             seg_hits: HashMap::new(),
             seg_n: HashMap::new(),
@@ -136,6 +190,22 @@ impl Situation {
             t: 0,
             last: vec![],
             learning: true,
+            pool_pm: (cfg.pool * 1000.0).round() as u64,
+            frame: vec![vec![0; FB]; nw],
+            wcount: vec![0; nw],
+            kind: vec![nw as u32; nw + 1],
+            kn: nw as u32,
+            mood: vec![0; nw],
+            buf: vec![],
+            stamp: HashMap::new(),
+            occ: HashMap::new(),
+            dcl: HashMap::new(),
+            hop: HashMap::new(),
+            g2: HashMap::new(),
+            comp: HashMap::new(),
+            halt: HashMap::new(),
+            committed: 0,
+            dropped: 0,
             cfg,
         }
     }
@@ -315,8 +385,10 @@ impl Situation {
         let dir = path[0] as u8;
         let bare = if self.cfg.sense { 2 } else { 1 };
         let code = if path.len() <= bare { vec![] } else { self.path_code(path) };
-        let mut best = (0.0f64, usize::MAX);
-        if !code.is_empty() && self.cfg.pool > 0.0 {
+        // the best overlap (shared bits over the larger size), as a fraction (shared, size), compared by
+        // cross-multiplication: no floats, no division
+        let mut best = (0u64, 1u64, usize::MAX);
+        if !code.is_empty() && self.pool_pm > 0 {
             for (i, p) in self.protos.iter().enumerate() {
                 if p.dir != dir || p.bits.is_empty() {
                     continue;
@@ -334,18 +406,18 @@ impl Situation {
                         b += 1;
                     }
                 }
-                let ov = sh as f64 / code.len().max(p.bits.len()) as f64;
-                if ov >= self.cfg.pool && ov > best.0 {
-                    best = (ov, i);
+                let (sh, den) = (sh as u64, code.len().max(p.bits.len()) as u64);
+                if sh * 1000 >= self.pool_pm * den && (best.2 == usize::MAX || sh * best.1 > best.0 * den) {
+                    best = (sh, den, i);
                 }
             }
         }
-        let c = if best.1 == usize::MAX {
+        let c = if best.2 == usize::MAX {
             self.protos.push(Proto { counts: vec![0; self.cfg.mdim], bits: code.clone(), dir, n: 0 });
             self.class_count.push(0);
             self.protos.len() - 1
         } else {
-            best.1
+            best.2
         };
         let p = &mut self.protos[c];
         p.n += 1;
@@ -392,44 +464,158 @@ impl Situation {
         let c1 = std::mem::take(&mut self.c1);
         for (k, m) in c1 {
             let e = self.c1.entry(k).or_default();
-            for (c, n) in m {
+            for ((c, kd), n) in m {
                 if let Some(&c2) = map.get(&c) {
-                    *e.entry(c2).or_insert(0) += n;
+                    *e.entry((c2, kd)).or_insert(0) += n;
                 }
             }
         }
         let c2 = std::mem::take(&mut self.c2);
         for (k, m) in c2 {
             let e = self.c2.entry(k).or_default();
-            for ((a, b), n) in m {
+            for (((a, ka), (b, kb)), n) in m {
                 if let (Some(&a2), Some(&b2)) = (map.get(&a), map.get(&b)) {
-                    *e.entry((a2, b2)).or_insert(0) += n;
+                    *e.entry(((a2, ka), (b2, kb))).or_insert(0) += n;
                 }
             }
         }
+        let hop = std::mem::take(&mut self.hop);
+        for (k, m) in hop {
+            let e = self.hop.entry(k).or_default();
+            for ((c, kd), n) in m {
+                if let Some(&c2) = map.get(&c) {
+                    *e.entry((c2, kd)).or_insert(0) += n;
+                }
+            }
+        }
+        let g2 = std::mem::take(&mut self.g2);
+        for (((a, ka), (b, kb)), n) in g2 {
+            if let (Some(&a2), Some(&b2)) = (map.get(&a), map.get(&b)) {
+                *self.g2.entry(((a2, ka), (b2, kb))).or_insert(0) += n;
+            }
+        }
+        let comp = std::mem::take(&mut self.comp);
+        for (((a, ka), (b, kb)), id) in comp {
+            if let (Some(&a2), Some(&b2)) = (map.get(&a), map.get(&b)) {
+                self.comp.entry(((a2, ka), (b2, kb))).or_insert(id);
+            }
+        }
+        // the slots written under the old class numbers are no longer addressed: forget their valid bits
+        self.occ.clear();
+        self.dcl.clear();
+        self.stamp.clear();
+        if self.cfg.kinds {
+            self.recluster_kinds();
+        }
+    }
+
+    // ---- kinds ----
+    fn fb(a: u64, b: u64) -> usize {
+        (hash(a, b) % FB as u64) as usize
+    }
+    fn frame_bump(&mut self, w: u32, f: usize) {
+        let r = &mut self.frame[w as usize];
+        r[f] += 1;
+        if r[f] > 255 {
+            r.iter_mut().for_each(|x| *x >>= 1); // 8-bit: halve together when one saturates
+        }
+    }
+    fn frame_code(&self, w: u32) -> Vec<bool> {
+        let r = &self.frame[w as usize];
+        let th = (*r.iter().max().unwrap_or(&0) >> 2).max(1);
+        r.iter().map(|&x| x >= th).collect()
+    }
+    /// Leader clustering of the words by their frame codes (Jaccard >= 2/5, cross-multiplied), most frequent first;
+    /// each new cluster takes the old kind name most of its members had, so slots and counts keep their meaning.
+    fn recluster_kinds(&mut self) {
+        let mut order: Vec<u32> = (0..self.nw as u32).filter(|&w| self.wcount[w as usize] > 0).collect();
+        order.sort_by(|a, b| self.wcount[*b as usize].cmp(&self.wcount[*a as usize]).then(a.cmp(b)));
+        let mut leaders: Vec<(u32, Vec<bool>, Vec<u32>)> = vec![];
+        for &w in &order {
+            let c = self.frame_code(w);
+            let mut placed = false;
+            for l in leaders.iter_mut() {
+                let (mut inter, mut uni) = (0u64, 0u64);
+                for (x, y) in c.iter().zip(&l.1) {
+                    inter += (*x && *y) as u64;
+                    uni += (*x || *y) as u64;
+                }
+                if uni > 0 && 5 * inter >= 2 * uni {
+                    l.2.push(w);
+                    placed = true;
+                    break;
+                }
+            }
+            if !placed {
+                leaders.push((w, c, vec![w]));
+            }
+        }
+        leaders.sort_by(|a, b| b.2.len().cmp(&a.2.len()).then(a.0.cmp(&b.0)));
+        let mut used: Vec<u32> = vec![];
+        let mut newk = self.kind.clone();
+        for (lw, _, ms) in &leaders {
+            let mut votes: HashMap<u32, u32> = HashMap::new();
+            for &w in ms {
+                if self.kind[w as usize] != self.kn {
+                    *votes.entry(self.kind[w as usize]).or_insert(0) += 1;
+                }
+            }
+            let mut v: Vec<(u32, u32)> = votes.into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            let name = v.iter().map(|x| x.0).find(|o| !used.contains(o)).unwrap_or_else(|| {
+                if !used.contains(lw) { *lw } else { (0..self.nw as u32).find(|x| !used.contains(x)).unwrap() }
+            });
+            used.push(name);
+            for &w in ms {
+                newk[w as usize] = name;
+            }
+        }
+        self.kind = newk;
+    }
+    fn kk(&self, v: u32) -> u32 {
+        if self.cfg.kinds { self.kind[v as usize] } else { self.kn }
+    }
+    /// The kinds, as groups of words (diagnostics).
+    pub fn kind_groups(&self) -> Vec<Vec<u32>> {
+        let mut by: HashMap<u32, Vec<u32>> = HashMap::new();
+        for w in 0..self.nw as u32 {
+            if self.wcount[w as usize] > 0 {
+                by.entry(self.kind[w as usize]).or_default().push(w);
+            }
+        }
+        let mut v: Vec<Vec<u32>> = by.into_values().collect();
+        v.sort_by(|a, b| b.len().cmp(&a.len()).then(a[0].cmp(&b[0])));
+        v
+    }
+    /// The boundaries whose mood counter marks them as closing questions.
+    pub fn question_boundaries(&self) -> Vec<u32> {
+        (0..self.nw as u32).filter(|&w| self.boundary[w as usize] && self.mood[w as usize] >= 8).collect()
     }
 
     // ---- fast ternary memory ----
-    fn key(&self, e: u32, c: u32) -> (Vec<u32>, Vec<u8>) {
+    /// The slot (entity e, class c, value kind kd): K elements and phases, offset by the context.
+    fn key(&self, e: u32, c: u32, kd: u32) -> (Vec<u32>, Vec<u8>) {
         let (d, k) = (self.cfg.d as u64, self.cfg.k);
         let mut idx = Vec::with_capacity(k);
         let mut ph = Vec::with_capacity(k);
+        let sc = if kd == self.kn { c as u64 } else { c as u64 * (self.nw as u64 + 1) + kd as u64 + (1 << 40) };
+        let salt = self.cfg.seed.wrapping_mul(0x5851_F42D);
         for i in 0..k {
-            let h = hash(e as u64 * 1_000_003 + c as u64, i as u64);
+            let h = hash(e as u64 * 1_000_003 + sc + salt, i as u64);
             idx.push(((h % d) as u32 + self.ctx_off[i]) % d as u32);
             ph.push(((h >> 40) as u8 + self.ctx_ph[i]) & 3);
         }
         (idx, ph)
     }
     #[inline]
-    fn vph(v: u32, e: u32) -> u8 {
-        (hash(v as u64 + 0x7777, e as u64) & 3) as u8
+    fn vph(&self, v: u32, e: u32) -> u8 {
+        (hash(v as u64 + 0x7777 + self.cfg.seed.wrapping_mul(0x1000_0001), e as u64) & 3) as u8
     }
-    fn write(&mut self, e: u32, c: u32, v: u32) {
-        let (idx, ph) = self.key(e, c);
+    fn write(&mut self, e: u32, c: u32, kd: u32, v: u32) {
+        let (idx, ph) = self.key(e, c, kd);
         let m = self.cfg.mag;
         for (&x, &kp) in idx.iter().zip(&ph) {
-            let p = ((kp + Self::vph(v, x)) & 3) as usize;
+            let p = ((kp + self.vph(v, x)) & 3) as usize;
             let x = x as usize;
             self.re[x] = (self.re[x] + m * DRE[p]).clamp(-1, 1);
             self.im[x] = (self.im[x] + m * DIM[p]).clamp(-1, 1);
@@ -437,8 +623,8 @@ impl Situation {
         self.bg[v as usize] += 1;
     }
     /// The best value in e's slot for class c (by excess over its background, by subtraction), and its excess.
-    fn read_best(&self, e: u32, c: u32, excl: &[u32]) -> Option<(u32, i128)> {
-        let (idx, ph) = self.key(e, c);
+    fn read_best(&self, e: u32, c: u32, kd: u32, excl: &[u32]) -> Option<(u32, i128)> {
+        let (idx, ph) = self.key(e, c, kd);
         let z: Vec<(i32, i32)> = idx
             .iter()
             .zip(&ph)
@@ -460,7 +646,7 @@ impl Situation {
                 let s: i64 = idx
                     .iter()
                     .zip(&z)
-                    .map(|(&x, &(zr, zi))| match Self::vph(v, x) {
+                    .map(|(&x, &(zr, zi))| match self.vph(v, x) {
                         0 => zr,
                         1 => zi,
                         2 => -zr,
@@ -485,31 +671,90 @@ impl Situation {
         hash(hash(at(0), at(2)), at(3))
     }
 
+    fn live(&self, e: u32, c: u32, kd: u32) -> bool {
+        !self.cfg.kinds || self.occ.get(&(e, c)).map(|v| v.contains(&kd)).unwrap_or(false)
+    }
+    fn stamp_of(&self, e: u32, c: u32, kd: u32) -> u64 {
+        self.stamp.get(&(e, c, kd)).copied().unwrap_or(0)
+    }
+
     /// The candidates for the next word: (value, weight), best first.
     pub fn recall(&mut self) -> Vec<(u32, f64)> {
         let ctx = self.ctx_key();
         let cue: Vec<u32> = (0..self.cfg.cue.min(self.hist.len())).map(|j| self.hist[self.hist.len() - 1 - j]).collect();
         let mut props: Vec<(u32, u32, i128)> = vec![];
         for (j, &e) in cue.iter().enumerate() {
+            if self.cfg.bounce {
+                // a loop of reads: stop, or follow the best-counted live slot of the current entity
+                let (mut cur, mut lastc) = (e, 0u32);
+                for step in 0..3u8 {
+                    if step > 0 && *self.halt.get(&(ctx, self.kk(cur), step)).unwrap_or(&7) >= 8 {
+                        props.push((lastc, cur, 0));
+                        break;
+                    }
+                    let Some(h) = self.hop.get(&(ctx, j, step)) else { break };
+                    let mut v: Vec<((u32, u32), u32)> = h.iter().map(|(&c, &n)| (c, n)).filter(|x| x.1 >= 2 && self.live(cur, x.0 .0, x.0 .1)).collect();
+                    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                    v.truncate(6);
+                    if v.is_empty() {
+                        break;
+                    }
+                    if self.cfg.recency {
+                        let maxn = v[0].1;
+                        v.retain(|x| 2 * x.1 >= maxn);
+                        v.sort_by(|a, b| self.stamp_of(cur, b.0 .0, b.0 .1).cmp(&self.stamp_of(cur, a.0 .0, a.0 .1)).then(b.1.cmp(&a.1)));
+                    }
+                    let ((c, kd), n) = v[0];
+                    lastc = n;
+                    let mut ex = cue.clone();
+                    ex.push(cur);
+                    match self.read_best(cur, c, kd, &ex) {
+                        Some((val, _)) => cur = val,
+                        None => break,
+                    }
+                }
+                continue;
+            }
+            // (kind, first-slot recency, count, value)
+            let mut cand: Vec<(u32, u64, u32, u32)> = vec![];
             if let Some(c1) = self.c1.get(&(ctx, j)) {
-                let mut v: Vec<(u32, u32)> = c1.iter().map(|(&c, &n)| (c, n)).filter(|x| x.1 >= 2).collect();
+                let mut v: Vec<((u32, u32), u32)> = c1.iter().map(|(&c, &n)| (c, n)).filter(|x| x.1 >= 2).collect();
                 v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-                for &(c, n) in v.iter().take(3) {
-                    if let Some((val, x)) = self.read_best(e, c, &cue) {
-                        props.push((n, val, x));
+                for &((c, kd), n) in v.iter().take(3) {
+                    if let Some((val, _)) = self.read_best(e, c, kd, &cue) {
+                        cand.push((kd, self.stamp_of(e, c, kd), n, val));
                     }
                 }
             }
             if let Some(c2) = self.c2.get(&(ctx, j)) {
-                let mut v: Vec<((u32, u32), u32)> = c2.iter().map(|(&c, &n)| (c, n)).filter(|x| x.1 >= 2).collect();
+                let mut v: Vec<(((u32, u32), (u32, u32)), u32)> = c2.iter().map(|(&c, &n)| (c, n)).filter(|x| x.1 >= 2).collect();
                 v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-                for &((c1_, c2_), n) in v.iter().take(2) {
-                    if let Some((m, _)) = self.read_best(e, c1_, &[e]) {
-                        if let Some((val, x)) = self.read_best(m, c2_, &cue) {
-                            props.push((n, val, x));
+                for &(((c1_, k1), (c2_, k2)), n) in v.iter().take(2) {
+                    if let Some((m, _)) = self.read_best(e, c1_, k1, &[e]) {
+                        if let Some((val, _)) = self.read_best(m, c2_, k2, &cue) {
+                            cand.push((k2, self.stamp_of(e, c1_, k1), n, val));
                         }
                     }
                 }
+            }
+            if self.cfg.recency && !cand.is_empty() {
+                // per kind: credible proposals (at least half the cue word's best count), the newest first
+                let maxn = cand.iter().map(|x| x.2).max().unwrap();
+                cand.retain(|x| 2 * x.2 >= maxn);
+                let mut kinds: Vec<u32> = cand.iter().map(|x| x.0).collect();
+                kinds.sort_unstable();
+                kinds.dedup();
+                for kd in kinds {
+                    let mut g: Vec<&(u32, u64, u32, u32)> = cand.iter().filter(|x| x.0 == kd).collect();
+                    g.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+                    let top = g.iter().map(|x| x.2).max().unwrap();
+                    // the group ranks by its best count; inside it, newest first (the order is kept by a stable sort)
+                    for x in g {
+                        props.push((top, x.3, 0));
+                    }
+                }
+            } else {
+                props.extend(cand.into_iter().map(|x| (x.2, x.3, 0)));
             }
         }
         // routes reliable enough (counts at least half the best), then the freshest (strongest) reading first
@@ -526,8 +771,8 @@ impl Situation {
         let mut out: Vec<(u32, f64)> = vec![];
         for (n, v) in props {
             match out.iter_mut().find(|x| x.0 == v) {
-                Some(x) => x.1 += n as f64 / tot,
-                None => out.push((v, n as f64 / tot)),
+                Some(x) => x.1 += n as f64 / tot.max(1.0),
+                None => out.push((v, n as f64 / tot.max(1.0))),
             }
         }
         out
@@ -537,45 +782,89 @@ impl Situation {
     pub fn observe(&mut self, w: u32) {
         let ctx = self.ctx_key();
         let cue: Vec<u32> = (0..self.cfg.cue.min(self.hist.len())).map(|j| self.hist[self.hist.len() - 1 - j]).collect();
+        self.wcount[w as usize] += 1;
+        // mood: after a boundary, was the store's top proposal this word? (up on a hit, down on half the misses)
+        if let Some(&u) = self.hist.last() {
+            if self.boundary[u as usize] {
+                let ok = self.last.first().map(|x| x.1) == Some(w);
+                let m = &mut self.mood[u as usize];
+                if ok {
+                    *m = (*m + 1).min(15);
+                } else if hash(self.t, u as u64 + 777) & 1 == 0 {
+                    *m = m.saturating_sub(1);
+                }
+            }
+        }
         // which classes answer this context: those whose slot (of a cue word) holds w
         if self.seen[w as usize] && !self.class_count.is_empty() {
             let mut top: Vec<(u64, u32)> = self.class_count.iter().enumerate().map(|(i, &c)| (c, i as u32)).collect();
             top.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-            let top: Vec<u32> = top.into_iter().take(self.cfg.ntop).map(|x| x.1).collect();
+            let mut top: Vec<u32> = top.into_iter().take(self.cfg.ntop).map(|x| x.1).collect();
+            top.extend(self.comp.values().copied());
+            let kw = self.kk(w);
             for (j, &e) in cue.iter().enumerate() {
                 if e == w || !self.seen[e as usize] {
                     continue;
                 }
-                let reads: Vec<Option<(u32, i128)>> = top.iter().map(|&c| self.read_best(e, c, &[e])).collect();
-                let hits: Vec<u32> = top.iter().zip(&reads).filter(|(_, r)| r.map(|x| x.0) == Some(w)).map(|(&c, _)| c).collect();
+                let hits: Vec<u32> = top.iter().copied().filter(|&c| self.read_best(e, c, kw, &[e]).map(|x| x.0) == Some(w)).collect();
                 if !hits.is_empty() {
                     let m = self.c1.entry((ctx, j)).or_default();
-                    for c in hits {
-                        *m.entry(c).or_insert(0) += 1;
+                    for &c in &hits {
+                        *m.entry((c, kw)).or_insert(0) += 1;
+                    }
+                    if self.cfg.bounce {
+                        let h = self.hop.entry((ctx, j, 0)).or_default();
+                        for &c in &hits {
+                            *h.entry((c, kw)).or_insert(0) += 1;
+                        }
+                        let x = self.halt.entry((ctx, kw, 1)).or_insert(7);
+                        *x = (*x + 1).min(15);
                     }
                 } else {
                     let t10: Vec<u32> = top.iter().take(10).copied().collect();
-                    for (r, &c1_) in t10.iter().enumerate() {
-                        let Some((m, _)) = reads[r] else { continue };
-                        if m == w {
-                            continue;
-                        }
-                        for &c2_ in &t10 {
-                            if self.read_best(m, c2_, &[m]).map(|x| x.0) == Some(w) {
-                                *self.c2.entry((ctx, j)).or_default().entry((c1_, c2_)).or_insert(0) += 1;
+                    for &c1_ in &t10 {
+                        let k1s: Vec<u32> = if self.cfg.kinds { self.occ.get(&(e, c1_)).cloned().unwrap_or_default() } else { vec![self.kn] };
+                        for k1 in k1s {
+                            let Some((m, _)) = self.read_best(e, c1_, k1, &[e]) else { continue };
+                            if m == w {
+                                continue;
+                            }
+                            for &c2_ in &t10 {
+                                if self.read_best(m, c2_, kw, &[m]).map(|x| x.0) == Some(w) {
+                                    *self.c2.entry((ctx, j)).or_default().entry(((c1_, k1), (c2_, kw))).or_insert(0) += 1;
+                                    *self.g2.entry(((c1_, k1), (c2_, kw))).or_insert(0) += 1;
+                                    if self.cfg.bounce {
+                                        *self.hop.entry((ctx, j, 0)).or_default().entry((c1_, k1)).or_insert(0) += 1;
+                                        *self.hop.entry((ctx, j, 1)).or_default().entry((c2_, kw)).or_insert(0) += 1;
+                                        let km = self.kk(m);
+                                        let x = self.halt.entry((ctx, km, 1)).or_insert(7);
+                                        *x = x.saturating_sub(1); // m was not the answer
+                                        let x = self.halt.entry((ctx, kw, 2)).or_insert(7);
+                                        *x = (*x + 1).min(15);
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        // segmentation, meaning, then the facts of w's clause, each in its (entity, class) slot
+        // segmentation, meaning, kinds' frames, then the facts of w's clause (buffered until its boundary)
         let n = self.hist.len();
         if n >= 2 {
             let (x, u) = (self.hist[n - 2], self.hist[n - 1]);
             self.seg_update(x, u, w);
         }
         self.mn.observe(w);
+        if self.cfg.kinds && n >= 1 {
+            let u = self.hist[n - 1];
+            self.frame_bump(w, Self::fb(1, u as u64));
+            if n >= 2 {
+                let f = Self::fb(2, self.hist[n - 2] as u64 * 100_003 + u as u64);
+                self.frame_bump(w, f);
+            }
+            self.frame_bump(u, Self::fb(3, w as u64));
+        }
         let mut path: Vec<u32> = vec![];
         let back: Vec<u32> = self.clause.iter().rev().take(self.cfg.win).copied().collect();
         for s in back {
@@ -583,8 +872,6 @@ impl Situation {
                 for dir in 0..2u32 {
                     let mut p = vec![dir];
                     if self.cfg.sense {
-                        // the key holds which sense each path word took (picked by the clause: both ends and the
-                        // other path words), not the ends themselves, so a relation does not split by its entities
                         p.push(path.len() as u32);
                         p.extend(&path);
                         for (pi, &pw) in path.iter().enumerate() {
@@ -599,15 +886,24 @@ impl Situation {
                     let c = self.class_of(&p);
                     self.class_count[c as usize] += 1;
                     if dir == 0 {
-                        self.write(s, c, w);
+                        self.buf.push((s, c, 0, w));
                     } else {
-                        self.write(w, c, s);
+                        self.buf.push((w, c, 1, s));
                     }
                 }
             }
             path.push(s);
             if self.boundary[s as usize] {
                 break;
+            }
+        }
+        if self.boundary[w as usize] || self.buf.len() > 64 {
+            if self.cfg.mood && self.boundary[w as usize] && self.mood[w as usize] >= 8 {
+                self.buf.clear(); // a question: a cue, not a fact
+                self.dropped += 1;
+            } else {
+                self.commit();
+                self.committed += 1;
             }
         }
         self.clause.push(w);
@@ -643,6 +939,60 @@ impl Situation {
         self.t += 1;
         if self.cfg.recluster > 0 && self.t % self.cfg.recluster as u64 == 0 {
             self.recluster();
+        }
+    }
+
+    /// Write the buffered bindings of a clause into their slots.
+    fn commit(&mut self) {
+        let buf = std::mem::take(&mut self.buf);
+        for (x, c, dir, v) in buf {
+            let kd = self.kk(v);
+            if self.cfg.supersede {
+                let others: Vec<u32> = self.dcl.get(&(x, dir as u8)).cloned().unwrap_or_default();
+                for c2 in others {
+                    if c2 == c {
+                        continue;
+                    }
+                    if let Some(ks) = self.occ.get_mut(&(x, c2)) {
+                        if let Some(pos) = ks.iter().position(|&q| q == kd) {
+                            ks.remove(pos);
+                            let none = self.nw as u32;
+                            self.write(x, c2, kd, none); // detach: the old relation now reads as nothing
+                        }
+                    }
+                }
+            }
+            self.write(x, c, kd, v);
+            let ks = self.occ.entry((x, c)).or_default();
+            if !ks.contains(&kd) {
+                ks.push(kd);
+            }
+            let cl = self.dcl.entry((x, dir as u8)).or_default();
+            if !cl.contains(&c) {
+                cl.push(c);
+            }
+            self.stamp.insert((x, c, kd), self.t);
+            // data bouncing at write time: (x, c, v) and a counted pair ((c, kd), (c2, k2)) -> read v's (c2, k2)
+            // slot now and keep the result in x's composite slot ("emma dropped the cup": where emma is now)
+            if self.cfg.compose > 0 && c < COMP {
+                let mut pairs: Vec<(((u32, u32), (u32, u32)), u32)> = self.g2.iter().map(|(&p, &n)| (p, n)).collect();
+                pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                for &((p1, p2), _) in pairs.iter().take(self.cfg.compose) {
+                    if p1 != (c, kd) {
+                        continue;
+                    }
+                    if let Some((z, _)) = self.read_best(v, p2.0, p2.1, &[v, x]) {
+                        let next = COMP + self.comp.len() as u32;
+                        let cs = *self.comp.entry((p1, p2)).or_insert(next);
+                        self.write(x, cs, p2.1, z);
+                        let ks = self.occ.entry((x, cs)).or_default();
+                        if !ks.contains(&p2.1) {
+                            ks.push(p2.1);
+                        }
+                        self.stamp.insert((x, cs, p2.1), self.t);
+                    }
+                }
+            }
         }
     }
 }
