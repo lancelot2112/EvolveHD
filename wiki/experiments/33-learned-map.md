@@ -1,6 +1,6 @@
 # 33 · A learned map: place codes and direction codes (2026-10-21)
 
-*[All experiments](README.md)* · [← 32](32-learned-bitwise-store.md)
+*[All experiments](README.md)* · [← 32](32-learned-bitwise-store.md) · [35 →](35-axes-of-memory.md)
 
 **Concepts:** [Shift-bind](../concepts/shift-bind.md)
 
