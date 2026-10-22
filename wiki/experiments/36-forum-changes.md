@@ -2,7 +2,7 @@
 
 *[All experiments](README.md)* · [← 35](35-axes-of-memory.md)
 
-**Concepts:** [Go/NoGo selection](../concepts/go-nogo-selection.md) · [Sparse codes](../concepts/sparse-codes.md)
+**Concepts:** [Go/NoGo selection](../concepts/go-nogo-selection.md) · [Sparse codes](../concepts/sparse-codes.md) · [Credit without backprop](../concepts/credit-without-backprop.md)
 
 Question: do the changes the expert forum agreed on (the document "The composite model: a forum's consensus") lift the situation model on the comprehension stories, and which of them matter? Each change is a switch in `src/situation.rs`. Inside the store everything is integer: counters, shifts and comparisons by cross-multiplication. The class pooling's float division was removed too. Learning is local, and the only teacher is the next word.
 
@@ -65,3 +65,29 @@ The second half's new verbs and question form are untrained embeddings for the t
 - **Single seed** except where three are listed.
 - **The small set only.**
 - **The machinery is designed.** Every learner fills in statistics inside a structure someone chose: clause bindings, slot keys, the mood gate, the frame features, recency within an entity, the thresholds. Discussed in the conversation: the next step is a general query learner, a bitwise W_QK trained by a three-factor rule.
+
+## The general query learner and an integer pooler (`--sit-query`, `--sit-fpool`)
+
+**The query learner** replaces the route tables, the context hash, the cue positions, the entity-cue rule, the recency rule and the credibility thresholds with one learned map, a bitwise W_QK:
+- **The query code** is built from the last 4 words: their frame codes, each in its position's block; identity bits; and 4 bits hashed from the words 1 and 3 back.
+- **The candidate routes** are every one- and two-hop route from the cue words' newest live slots. Each route is a set of features: the cue position, the cue word's kind, and per hop the class, the kind and the slot's recency rank among the entity's values of the same kind, plus cross-hop conjunctions.
+- **The weights** are signed integers per (query bit, feature). A route's score is the sum of its weights under the query, and the best route is read.
+- **Learning** is mistake-driven and three-factor: when the top route was wrong, the best-scored route that held the next word steps up and the top route steps down.
+
+**The frame-code pooler** pools relations by the words' 8-bit frame counters, the same counters the kinds use, instead of the meaning module, whose codes are float inside. Only distinctive features count: those in at most an eighth of the words' codes. The meaning module then does not run.
+
+| Configuration (with `--sit-kinds --sit-mood`) | Where-person | Where-object | Who-has | All, seeds 0 / 1 / 2 |
+|---|---|---|---|---|
+| hand-built routes (best row above) | 93.3% | 49–56% | 83–85% | 85.9 / 87.1 / 86.1% |
+| query learner, recency rank over all slots | 92–94% | 31–37% | 63–71% | 82.0 / 80.7 / 81.9% |
+| query learner, recency rank within the value's kind | 92–94% | 42–46% | 78–91% | 84.4 / 86.9 / 84.1% |
+| **query learner + frame-code pooler (Jaccard ≥ 0.7)** | **96.8–97.0%** | **46–58%** | **81–88%** | **90.3 / 87.9 / 88.4%** |
+
+- **The hand rules are learned now.** The learner finds that "the" and "?" are not worth reading from, and when the newest slot matters. It only needed the recency rank counted among values of the same kind. A clause like "fred picked up the cup" also writes "up", "picked" and "." into the cup's slots, and those had taken the top ranks.
+- **The integer pooler is better with the learner than the meaning module was.** It keeps "went / moved / walked / travelled to the" together. It needs a stricter threshold (0.7, giving 1,048 classes; 0.65 gives 84.6%, 0.5 gives 77.9% with the hand-built routes) so that the one-word paths do not swallow the longer ones. So it compresses less: 9,590 paths into 1,048 classes, against 144.
+- **What did not help:**
+  - replaying kept mistakes: 81.4% and 80.5% with 2 and 4 per word, before the rank fix; 88.6% against 90.3% after it;
+  - 16-bit weights: no change, so nothing was saturating;
+  - crediting every route that held the answer: 52%, as the frequent routes swamp the rest.
+- **It is faster:** a run takes 40 s, against 54 s with the hand-built routes and 350 s for the base.
+- **What is still not integer:** the store's output weights handed to the engine, as before. Everything inside the store is integer now, including the pooling.
