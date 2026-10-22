@@ -279,10 +279,12 @@ Also tried, seed 0:
 With the question slots (`--sit-qslots`), the margin of the winning answer is a usable confidence signal. The margin is the winner's match minus that of the best different answer. Seed 0, by margin quintile from lowest to highest: 79%, 90%, 96%, 99% and 100% right. With the weight table, nearly every answer had a large margin, right or wrong.
 
 The policy, all integer counts with a prior of 1 right in 2:
-1. **Does memory know?** Per (question form, margin bucket), count how often memory's answer was right. If it was right more than half the time, answer from memory.
+1. **Does memory know?** Per (question form, margin bucket), count how often memory's answer was right. The margin bucket is the bit length of the margin, 0 to 15, with 15 when there is no other value. If it was right more than half the time, answer from memory.
 2. **If not, look it up.** Read the lookback window (128 words), scored and learned the weight-free way. Each window route feature, by its index, is matched against a question slot (form, "window", list length, index). On a mistake, Hebbian and anti-Hebbian writes as for the routes.
-3. **Answer from whichever source has been right more often here**, per (question form, whether the two agree) with `--sit-curious-coarse`. If neither has been right more than half the time, answer nothing: "unknown".
+3. **Answer from whichever source has been right more often here.** This is counted per (question form, both margin buckets, whether the two agree), or per (question form, whether the two agree) with `--sit-curious-coarse`. Ties go to memory. If neither has been right more than half the time, answer nothing: "unknown". Counts are halved once they pass 1,000.
 4. **Practice** (`--sit-curious-practice`): at question boundaries where memory is sure, the window also reads and learns. Its answer is not used.
+
+The policy runs at every predicted word, not only at questions; the scores below are on questions only.
 
 Scored with `scripts/exp36/score_unknown.py`; "unknown" is written as no candidate. Shares of the 596 questions:
 
@@ -294,14 +296,14 @@ Scored with `scripts/exp36/score_unknown.py`; "unknown" is written as no candida
 | + curiosity, seed 0 | 91.6% | 3.0% | 5.4% | 96.8% |
 
 - **Wrong answers fall by about 40%** (mean 9.5% to 5.5%). About 7.6% of questions are answered "unknown", at a cost of 3.6 points of right answers.
-- **The window checks; it does not find.** At questions, memory was unsure 44–81 times per seed, and the window's answer was never the one given. On the 48 scored questions where memory was unsure (seed 0, a run with `SIT_CDBG=1`):
+- **The window checks; it does not find.** At the question boundaries the model detected (490–520 per seed, over the whole run), memory was unsure 44–81 times. The window was never chosen as the source; it only served as a check. Among the scored benchmark questions, memory was unsure on 48 (seed 0, a run with `SIT_CDBG=1`):
   - memory was right on 58% and the window on 44%;
   - where the two agreed (38% of them), the answer was right 89% of the time;
-  - where they disagreed, memory was right about 40% of the time, so "unknown" is the better answer there.
+  - where they disagreed, memory was right about 40% of the time and the window 17%, so "unknown" is the better answer there.
 
   The learned policy is "when unsure, look it up; answer if the window agrees, otherwise say unknown".
 - **Variants, seed 0:**
-  - trust counts keyed on the margins too: 88.8% right, 3.5% wrong, 7.7% unknown;
+  - the default trust key (with both margins): 88.8% right, 3.5% wrong, 7.7% unknown;
   - coarse keys: 89.4 / 3.9 / 6.7%;
   - coarse keys with practice: 90.6 / 3.7 / 5.7%.
 - **What would make the lookup find answers:** a better window reader. When memory is sure, the window is right 73% of the time; when memory is unsure, only 44%.
