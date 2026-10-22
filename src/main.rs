@@ -44,6 +44,8 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         sense_new: g("--sit-sense-new", "0.3").parse().unwrap(),
         kinds: flag(args, "--sit-kinds"),
         mood: flag(args, "--sit-mood"),
+        mood2: flag(args, "--sit-mood2"),
+        bnd2: flag(args, "--sit-bnd2"),
         recency: flag(args, "--sit-recency"),
         bounce: flag(args, "--sit-bounce"),
         supersede: flag(args, "--sit-supersede"),

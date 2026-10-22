@@ -126,6 +126,15 @@ pub struct SitCfg {
     pub sense_new: f64,
     pub kinds: bool,
     pub mood: bool,
+    /// The mood counter credits memory only beyond local statistics: it moves only when the boundary word's most
+    /// frequent successor (a bigram count) would have missed the next word; then up if the store predicted it, down
+    /// (half the time) if not. After "?" the answer is retrieval; after "apple" the "." is just the bigram.
+    pub mood2: bool,
+    /// Clause boundaries by open contexts on both sides: for each word, the number of distinct successors covering
+    /// 90% of its uses, and the same for predecessors (from bigram counts); a word is a boundary when the smaller of
+    /// the two is at least half the largest such value over all words. Replaces the independence test. Recomputed
+    /// every `recluster` words.
+    pub bnd2: bool,
     pub recency: bool,
     pub bounce: bool,
     pub supersede: bool,
@@ -459,6 +468,8 @@ pub struct Situation {
     pub sq_opened: u64,
     pub sq_closed: u64,
     mood: Vec<u8>,
+    succ: HashMap<(u32, u32), u32>,                 // bigram counts (word, next word), for mood2
+    succ_top: HashMap<u32, (u32, u32)>,             // per word: its most frequent successor and that count
     buf: Vec<(u32, u32, u8, u32)>,                  // buffered bindings: (entity, class, direction, value)
     stamp: HashMap<(u32, u32, u32), u64>,           // last write time per slot (entity, class, kind)
     occ: HashMap<(u32, u32), Vec<u32>>,             // live kinds per (entity, class): the slots' valid bits
@@ -589,6 +600,8 @@ impl Situation {
             sq_opened: 0,
             sq_closed: 0,
             mood: vec![0; nw],
+            succ: HashMap::new(),
+            succ_top: HashMap::new(),
             buf: vec![],
             stamp: HashMap::new(),
             occ: HashMap::new(),
@@ -672,7 +685,9 @@ impl Situation {
             if nb != self.boundary[u as usize] && std::env::var("SIT_DEBUG_BND").is_ok() {
                 eprintln!("BND {} word {} -> {}", self.t, u, nb);
             }
-            self.boundary[u as usize] = nb;
+            if !self.cfg.bnd2 {
+                self.boundary[u as usize] = nb;
+            }
         }
         if n >= 4096 {
             self.seg_n.insert(u, n / 2);
@@ -990,6 +1005,47 @@ impl Situation {
         }
         if self.cfg.kinds {
             self.recluster_kinds();
+        }
+    }
+
+    /// bnd2: boundaries as the words open on both sides (see the config field).
+    fn open_boundaries(&mut self) {
+        let mut sc: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut pc: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (&(a, b), &c) in &self.succ {
+            sc.entry(a).or_default().push(c);
+            pc.entry(b).or_default().push(c);
+        }
+        // the number of the largest counts that cover 90% of the total (integer compare)
+        let k90 = |v: &mut Vec<u32>| -> u32 {
+            v.sort_unstable_by(|a, b| b.cmp(a));
+            let tot: u64 = v.iter().map(|&x| x as u64).sum();
+            let mut s = 0u64;
+            for (i, &x) in v.iter().enumerate() {
+                s += x as u64;
+                if 10 * s >= 9 * tot {
+                    return i as u32 + 1;
+                }
+            }
+            v.len() as u32
+        };
+        let mut open: Vec<(u32, u32)> = vec![];
+        for (w, mut v) in sc {
+            if let Some(mut p) = pc.remove(&w) {
+                let (a, b) = (k90(&mut v), k90(&mut p));
+                open.push((w, a.min(b)));
+            }
+        }
+        let mx = open.iter().map(|x| x.1).max().unwrap_or(0);
+        if mx < 4 {
+            return; // too early to tell
+        }
+        for (w, m) in open {
+            let nb = 2 * m >= mx;
+            if nb != self.boundary[w as usize] && std::env::var("SIT_DEBUG_BND").is_ok() {
+                eprintln!("BND2 {} word {} -> {} (open {} of max {})", self.t, w, nb, m, mx);
+            }
+            self.boundary[w as usize] = nb;
         }
     }
 
@@ -2385,11 +2441,26 @@ impl Situation {
         if let Some(&u) = self.hist.last() {
             if self.boundary[u as usize] {
                 let ok = self.last.first().map(|x| x.1) == Some(w);
+                let trivial = self.cfg.mood2 && self.succ_top.get(&u).map_or(false, |t| t.0 == w);
                 let m = &mut self.mood[u as usize];
-                if ok {
+                if trivial {
+                    // the bigram alone predicts it: no evidence about memory either way
+                } else if ok {
                     *m = (*m + 1).min(15);
                 } else if hash(self.t, u as u64 + 777) & 1 == 0 {
                     *m = m.saturating_sub(1);
+                }
+            }
+        }
+        // the bigram counts behind mood2 and bnd2 (after the mood update, so they hold only the words before this one)
+        if self.cfg.mood2 || self.cfg.bnd2 {
+            if let Some(&u) = self.hist.last() {
+                let c = self.succ.entry((u, w)).or_insert(0);
+                *c += 1;
+                let c = *c;
+                let t = self.succ_top.entry(u).or_insert((w, 0));
+                if c > t.1 {
+                    *t = (w, c);
                 }
             }
         }
@@ -2638,6 +2709,9 @@ impl Situation {
             if self.t % 64 == 0 {
                 self.sq_manage();
             }
+        }
+        if self.cfg.bnd2 && self.cfg.recluster > 0 && self.t % self.cfg.recluster as u64 == 0 {
+            self.open_boundaries();
         }
         if self.cfg.recluster > 0 && self.t % self.cfg.recluster as u64 == 0 {
             self.recluster();
