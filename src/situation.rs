@@ -184,6 +184,10 @@ pub struct SitCfg {
     /// Slow merges: two established kinds (each with at least 2 members) merge only after `kslow` reclusters in a row
     /// propose it; until then the proposed cluster is split back by the old kinds (0 = merge at once). Splits are free.
     pub kslow: u32,
+    /// The cut for the kinds' clustering codes: a frame feature counts at max >> kshift or more (2 = a quarter, the
+    /// codes used elsewhere). A lower cut (3 = an eighth) keeps features that synonyms dilute, so objects keep the
+    /// frames that tell them from places.
+    pub kshift: u32,
     pub curious_num: u32,
     /// The trust counts for the two sources keyed on (form, agree) only, not the margins too.
     pub curious_coarse: bool,
@@ -1030,6 +1034,12 @@ impl Situation {
         self.fdf = df;
         self.fseen = nseen;
     }
+    /// The code the kinds are clustered on: frame features at max >> kshift or more.
+    fn kind_code(&self, w: u32) -> Vec<bool> {
+        let r = &self.frame[w as usize];
+        let th = (*r.iter().max().unwrap_or(&0) >> self.cfg.kshift).max(1);
+        r.iter().map(|&x| x >= th).collect()
+    }
     fn frame_code(&self, w: u32) -> Vec<bool> {
         let r = &self.frame[w as usize];
         let th = (*r.iter().max().unwrap_or(&0) >> 2).max(1);
@@ -1042,7 +1052,7 @@ impl Situation {
         order.sort_by(|a, b| self.wcount[*b as usize].cmp(&self.wcount[*a as usize]).then(a.cmp(b)));
         let mut leaders: Vec<(u32, Vec<bool>, Vec<u32>)> = vec![];
         for &w in &order {
-            let c = self.frame_code(w);
+            let c = self.kind_code(w);
             let mut placed = false;
             for l in leaders.iter_mut() {
                 let (mut inter, mut uni) = (0u64, 0u64);
