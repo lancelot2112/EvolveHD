@@ -26,7 +26,9 @@
 //!   kinds: a frame is a noisy observation, and a short window follows which verb a person used last.) Words are leader-clustered by the Jaccard
 //!   overlap of their frame codes (counters at a quarter of their maximum or more), at least 2/5 by
 //!   cross-multiplication, every `recluster` words. A kind keeps its name (a word id) across reclusterings.
-//!   Slots are keyed on (entity, class, kind of the value), and C1/C2 count (class, kind).
+//!   Slots are keyed on (entity, class, kind of the value), and C1/C2 count (class, kind). A slot of kind k is read
+//!   against the words of kind k only (a typed clean-up), so an empty or noisy slot cannot return a word of
+//!   another kind.
 //! - `mood`: questions do not write. A clause's bindings are buffered until the boundary that closes it. Each word
 //!   has a 4-bit counter of "after this boundary, the store's top proposal was the next word": up by 1 when it
 //!   was, down by 1 on half the misses (a stochastic decrement from a hash bit, so it climbs above a third). A
@@ -44,6 +46,17 @@
 //! - `compose`: data bouncing at write time. When a fact (x, c, v) is committed and ((c, k), (c2, k2)) is among
 //!   the `compose` most counted two-hop pairs, v's (c2, k2) slot is read then and written to x's composite slot,
 //!   which C1 can learn like any class: "emma dropped the cup" also stores where emma is at that moment.
+//! - `precision`: rank routes by Go minus NoGo, hits minus misses (a precision ranking, (hits + 1) / (hits + misses
+//!   + 2), let rare lucky routes beat well-tested ones: where-person fell from 91% to 61-73%). A miss is
+//!   counted for the routes behind the answer actually given (the top proposal) when the next word was something
+//!   else: Go and NoGo, the forum's three-factor rule, credited like Select (only the taken action is seen). Ranking by hits alone lets a route through a function word win, because it lands on the
+//!   most recent place by chance a third of the time and is never penalized.
+//! - `entity_cues`: only words of the larger learned kinds (at least 3 members) are read from as cue entities. A
+//!   function word's slots hold whatever was written next to it last ("the" -> the latest place), a recency
+//!   buffer that wins by luck a third of the time.
+//! - `live`: learn over the cue entity's live slots (two hops: the intermediate's too) instead of the most
+//!   frequent classes. The two-hop search over the 10 most frequent classes never saw "the apple was got by",
+//!   whose class is rarer.
 //! - `seed`: salts the codes, keys and context.
 use crate::meaning::{Meaning, MeaningCfg};
 use std::collections::HashMap;
@@ -82,6 +95,18 @@ pub struct SitCfg {
     pub supersede: bool,
     /// Write-time composition: the number of most-counted two-hop pairs composed when a fact is committed (0 = off).
     pub compose: usize,
+    /// Rank a route by its precision (hits over hits plus misses when it was proposed), not by its hit count.
+    pub precision: bool,
+    /// Only words of the larger kinds (at least 3 members: people, places, objects) act as cue entities; function
+    /// words, each its own kind, are not read from.
+    pub entity_cues: bool,
+    /// Learn over the cue entity's live slots (and, for two hops, the intermediate's) instead of the most frequent
+    /// classes: every relation an entity actually has is searched, however rare its class.
+    pub live: bool,
+    /// Routes proposed per cue word (most counted live first), and the credibility share: a route competes on
+    /// recency if its count times `cred` reaches the best count.
+    pub nroutes: usize,
+    pub cred: u32,
     pub seed: u64,
 }
 
@@ -136,6 +161,7 @@ pub struct Situation {
     wcount: Vec<u64>,
     kind: Vec<u32>,                                 // each word's kind (a word id); kn = none yet
     kn: u32,
+    ksize: HashMap<u32, u32>,                      // members per kind
     mood: Vec<u8>,
     buf: Vec<(u32, u32, u8, u32)>,                  // buffered bindings: (entity, class, direction, value)
     stamp: HashMap<(u32, u32, u32), u64>,           // last write time per slot (entity, class, kind)
@@ -144,6 +170,8 @@ pub struct Situation {
     hop: HashMap<(u64, usize, u8), HashMap<(u32, u32), u32>>,
     g2: HashMap<((u32, u32), (u32, u32)), u32>,       // two-hop pairs counted over all contexts
     comp: HashMap<((u32, u32), (u32, u32)), u32>,     // composite classes, numbered from COMP
+    miss: HashMap<(u64, usize, Route), u32>,          // NoGo: times a route was proposed and wrong
+    routes: Vec<(u64, usize, Route, u32)>,            // the last prediction's routes: (context, cue, route, value)
     halt: HashMap<(u64, u32, u8), u8>,
     pub committed: u64,
     pub dropped: u64,
@@ -151,6 +179,8 @@ pub struct Situation {
 
 const DRE: [i8; 4] = [1, 0, -1, 0];
 const FB: usize = 512;
+/// A route: one slot (class, kind), or two (the second with class != u32::MAX).
+type Route = (u32, u32, u32, u32);
 const COMP: u32 = 1 << 24; // composite class ids start here, apart from the pooled classes
 const DIM: [i8; 4] = [0, 1, 0, -1];
 
@@ -195,6 +225,7 @@ impl Situation {
             wcount: vec![0; nw],
             kind: vec![nw as u32; nw + 1],
             kn: nw as u32,
+            ksize: HashMap::new(),
             mood: vec![0; nw],
             buf: vec![],
             stamp: HashMap::new(),
@@ -203,6 +234,8 @@ impl Situation {
             hop: HashMap::new(),
             g2: HashMap::new(),
             comp: HashMap::new(),
+            miss: HashMap::new(),
+            routes: vec![],
             halt: HashMap::new(),
             committed: 0,
             dropped: 0,
@@ -273,7 +306,11 @@ impl Situation {
             let [hp, hn, hj] = *self.seg_hits.get(&u).unwrap_or(&[0; 3]);
             let (lo, hi) = (hp.min(hn) as u128, hp.max(hn) as u128);
             let (n, hj) = (n as u128, hj as u128);
-            self.boundary[u as usize] = 20 * hi <= 19 * n && lo * lo * lo * hi * hi > n * n * hj * hj * hj;
+            let nb = 20 * hi <= 19 * n && lo * lo * lo * hi * hi > n * n * hj * hj * hj;
+            if nb != self.boundary[u as usize] && std::env::var("SIT_DEBUG_BND").is_ok() {
+                eprintln!("BND {} word {} -> {}", self.t, u, nb);
+            }
+            self.boundary[u as usize] = nb;
         }
         if n >= 4096 {
             self.seg_n.insert(u, n / 2);
@@ -460,7 +497,44 @@ impl Situation {
             self.class_count[k] += c;
         }
         self.learning = true;
-        let map: HashMap<u32, u32> = rep.into_iter().map(|(old, p)| (old, self.path_class[&p])).collect();
+        let raw: HashMap<u32, u32> = rep.into_iter().map(|(old, p)| (old, self.path_class[&p])).collect();
+        // keep class numbers stable: a new class takes the number of the (lowest) old class whose most used path
+        // landed in it, so slots written before the re-assignment stay addressed; the rest get unused numbers
+        let nnew = self.protos.len();
+        let mut fin: Vec<Option<u32>> = vec![None; nnew];
+        let mut olds: Vec<(u32, u32)> = raw.iter().map(|(&o, &k)| (o, k)).collect();
+        olds.sort_unstable();
+        let mut used: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for &(o, k) in &olds {
+            if fin[k as usize].is_none() && !used.contains(&o) {
+                fin[k as usize] = Some(o);
+                used.insert(o);
+            }
+        }
+        let mut next = 0u32;
+        for f in fin.iter_mut() {
+            if f.is_none() {
+                while used.contains(&next) {
+                    next += 1;
+                }
+                *f = Some(next);
+                used.insert(next);
+            }
+        }
+        let fin: Vec<u32> = fin.into_iter().map(|x| x.unwrap()).collect();
+        let size = fin.iter().copied().max().map_or(0, |m| m as usize + 1);
+        let mut protos: Vec<Proto> = (0..size).map(|_| Proto { counts: vec![], bits: vec![], dir: 255, n: 0 }).collect();
+        let mut counts = vec![0u64; size];
+        for (k, p) in std::mem::take(&mut self.protos).into_iter().enumerate() {
+            counts[fin[k] as usize] = self.class_count[k];
+            protos[fin[k] as usize] = p;
+        }
+        self.protos = protos;
+        self.class_count = counts;
+        for v in self.path_class.values_mut() {
+            *v = fin[*v as usize];
+        }
+        let map: HashMap<u32, u32> = raw.into_iter().map(|(o, k)| (o, fin[k as usize])).collect();
         let c1 = std::mem::take(&mut self.c1);
         for (k, m) in c1 {
             let e = self.c1.entry(k).or_default();
@@ -477,6 +551,13 @@ impl Situation {
                 if let (Some(&a2), Some(&b2)) = (map.get(&a), map.get(&b)) {
                     *e.entry(((a2, ka), (b2, kb))).or_insert(0) += n;
                 }
+            }
+        }
+        let miss = std::mem::take(&mut self.miss);
+        for ((cx, j, (a, ka, b, kb)), n) in miss {
+            let b2 = if b == u32::MAX { Some(b) } else { map.get(&b).copied() };
+            if let (Some(&a2), Some(b2)) = (map.get(&a), b2) {
+                *self.miss.entry((cx, j, (a2, ka, b2, kb))).or_insert(0) += n;
             }
         }
         let hop = std::mem::take(&mut self.hop);
@@ -500,10 +581,23 @@ impl Situation {
                 self.comp.entry(((a2, ka), (b2, kb))).or_insert(id);
             }
         }
-        // the slots written under the old class numbers are no longer addressed: forget their valid bits
-        self.occ.clear();
-        self.dcl.clear();
-        self.stamp.clear();
+        // the valid bits and write times follow their classes (numbers mostly unchanged); classes merged into
+        // another number lose their slots
+        let occ = std::mem::take(&mut self.occ);
+        for ((e, c), ks) in occ {
+            if c >= COMP || map.get(&c) == Some(&c) {
+                self.occ.insert((e, c), ks);
+            }
+        }
+        let stamp = std::mem::take(&mut self.stamp);
+        for ((e, c, k), t) in stamp {
+            if c >= COMP || map.get(&c) == Some(&c) {
+                self.stamp.insert((e, c, k), t);
+            }
+        }
+        for cs in self.dcl.values_mut() {
+            cs.retain(|c| *c >= COMP || map.get(c) == Some(c));
+        }
         if self.cfg.kinds {
             self.recluster_kinds();
         }
@@ -571,6 +665,30 @@ impl Situation {
             }
         }
         self.kind = newk;
+        self.ksize.clear();
+        for w in 0..self.nw {
+            if self.wcount[w] > 0 {
+                *self.ksize.entry(self.kind[w]).or_insert(0) += 1;
+            }
+        }
+    }
+    /// The classes of e's live slots (of kind kd, if given).
+    fn live_classes(&self, e: u32, kd: Option<u32>) -> Vec<u32> {
+        let mut v: Vec<u32> = vec![];
+        for dir in 0..3u8 {
+            if let Some(cs) = self.dcl.get(&(e, dir)) {
+                for &c in cs {
+                    if !v.contains(&c) && kd.map_or(true, |k| self.occ.get(&(e, c)).map_or(false, |ks| ks.contains(&k))) {
+                        v.push(c);
+                    }
+                }
+            }
+        }
+        v
+    }
+    /// Whether w may act as a cue entity (with --sit-entity-cues: a word of a kind with at least 3 members).
+    fn is_entity(&self, w: u32) -> bool {
+        !self.cfg.entity_cues || self.ksize.get(&self.kind[w as usize]).copied().unwrap_or(0) >= 3
     }
     fn kk(&self, v: u32) -> u32 {
         if self.cfg.kinds { self.kind[v as usize] } else { self.kn }
@@ -638,10 +756,12 @@ impl Situation {
                 }
             })
             .collect();
+        // with kinds, a slot of kind kd is cleaned up against the words of that kind only
+        let typed = self.cfg.kinds && kd != self.kn;
         let sc: Vec<(u32, i64)> = self
             .words
             .iter()
-            .filter(|w| !excl.contains(w))
+            .filter(|w| !excl.contains(w) && (!typed || self.kind[**w as usize] == kd))
             .map(|&v| {
                 let s: i64 = idx
                     .iter()
@@ -683,7 +803,11 @@ impl Situation {
         let ctx = self.ctx_key();
         let cue: Vec<u32> = (0..self.cfg.cue.min(self.hist.len())).map(|j| self.hist[self.hist.len() - 1 - j]).collect();
         let mut props: Vec<(u32, u32, i128)> = vec![];
+        self.routes.clear();
         for (j, &e) in cue.iter().enumerate() {
+            if !self.is_entity(e) {
+                continue;
+            }
             if self.cfg.bounce {
                 // a loop of reads: stop, or follow the best-counted live slot of the current entity
                 let (mut cur, mut lastc) = (e, 0u32);
@@ -715,53 +839,92 @@ impl Situation {
                 }
                 continue;
             }
-            // (kind, first-slot recency, count, value)
-            let mut cand: Vec<(u32, u64, u32, u32)> = vec![];
+            // (kind, first-slot recency, hits, value, misses, route)
+            let mut cand: Vec<(u32, u64, u32, u32, u32, Route)> = vec![];
             if let Some(c1) = self.c1.get(&(ctx, j)) {
                 let mut v: Vec<((u32, u32), u32)> = c1.iter().map(|(&c, &n)| (c, n)).filter(|x| x.1 >= 2).collect();
                 v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-                for &((c, kd), n) in v.iter().take(3) {
+                for &((c, kd), n) in v.iter().filter(|x| self.live(e, x.0 .0, x.0 .1)).take(self.cfg.nroutes.max(3)) {
                     if let Some((val, _)) = self.read_best(e, c, kd, &cue) {
-                        cand.push((kd, self.stamp_of(e, c, kd), n, val));
+                        let r: Route = (c, kd, u32::MAX, u32::MAX);
+                        cand.push((kd, self.stamp_of(e, c, kd), n, val, *self.miss.get(&(ctx, j, r)).unwrap_or(&0), r));
                     }
                 }
             }
             if let Some(c2) = self.c2.get(&(ctx, j)) {
                 let mut v: Vec<(((u32, u32), (u32, u32)), u32)> = c2.iter().map(|(&c, &n)| (c, n)).filter(|x| x.1 >= 2).collect();
                 v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-                for &(((c1_, k1), (c2_, k2)), n) in v.iter().take(2) {
+                for &(((c1_, k1), (c2_, k2)), n) in v.iter().filter(|x| self.live(e, x.0 .0 .0, x.0 .0 .1)).take(self.cfg.nroutes.max(2)) {
                     if let Some((m, _)) = self.read_best(e, c1_, k1, &[e]) {
+                        if !self.live(m, c2_, k2) {
+                            continue;
+                        }
                         if let Some((val, _)) = self.read_best(m, c2_, k2, &cue) {
-                            cand.push((k2, self.stamp_of(e, c1_, k1), n, val));
+                            let r: Route = (c1_, k1, c2_, k2);
+                            cand.push((k2, self.stamp_of(e, c1_, k1), n, val, *self.miss.get(&(ctx, j, r)).unwrap_or(&0), r));
                         }
                     }
                 }
             }
+            for x in &cand {
+                self.routes.push((ctx, j, x.5, x.3));
+            }
+            if let Ok(from) = std::env::var("SIT_DEBUG_FROM") {
+                let last = *self.hist.last().unwrap_or(&0) as usize;
+                if self.t >= from.parse::<u64>().unwrap_or(u64::MAX) && self.boundary[last] {
+                    for x in &cand {
+                        eprintln!("DBG {} j{} e{} route {:?} hits {} misses {} -> {} stamp {}", self.t, j, e, x.5, x.2, x.4, x.3, x.1);
+                    }
+                }
+            }
+            // a route's weight: its hits and misses; with --sit-precision ranked by hits / (hits + misses) (compared by
+            // cross-multiplication), else by hits
+            let better = |a: (u32, u32), b: (u32, u32), prec: bool| -> bool {
+                // Go minus NoGo: hits minus misses (the striatal rule); a precision ranking let rare, lucky
+                // routes win over well-tested ones
+                if prec { (a.0 as i64 - a.1 as i64) > (b.0 as i64 - b.1 as i64) } else { a.0 > b.0 }
+            };
+            let prec = self.cfg.precision;
             if self.cfg.recency && !cand.is_empty() {
-                // per kind: credible proposals (at least half the cue word's best count), the newest first
-                let maxn = cand.iter().map(|x| x.2).max().unwrap();
-                cand.retain(|x| 2 * x.2 >= maxn);
+                // per kind: credible proposals (at least half the best), the newest first
+                let mut bestw = (cand[0].2, cand[0].4);
+                for x in &cand {
+                    if better((x.2, x.4), bestw, prec) {
+                        bestw = (x.2, x.4);
+                    }
+                }
+                let half = |x: (u32, u32)| -> bool {
+                    if prec { 2 * (x.0 as i64 - x.1 as i64) >= (bestw.0 as i64 - bestw.1 as i64) } else { self.cfg.cred * x.0 >= bestw.0 }
+                };
+                cand.retain(|x| half((x.2, x.4)));
                 let mut kinds: Vec<u32> = cand.iter().map(|x| x.0).collect();
                 kinds.sort_unstable();
                 kinds.dedup();
                 for kd in kinds {
-                    let mut g: Vec<&(u32, u64, u32, u32)> = cand.iter().filter(|x| x.0 == kd).collect();
+                    let mut g: Vec<&(u32, u64, u32, u32, u32, Route)> = cand.iter().filter(|x| x.0 == kd).collect();
                     g.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
-                    let top = g.iter().map(|x| x.2).max().unwrap();
-                    // the group ranks by its best count; inside it, newest first (the order is kept by a stable sort)
+                    let mut gw = (g[0].2, g[0].4);
+                    for x in &g {
+                        if better((x.2, x.4), gw, prec) {
+                            gw = (x.2, x.4);
+                        }
+                    }
+                    // the group ranks by its best weight; inside it, newest first (kept by the stable sort)
                     for x in g {
-                        props.push((top, x.3, 0));
+                        props.push((gw.0, x.3, gw.1 as i128));
                     }
                 }
             } else {
-                props.extend(cand.into_iter().map(|x| (x.2, x.3, 0)));
+                props.extend(cand.into_iter().map(|x| (x.2, x.3, x.4 as i128)));
             }
         }
         // routes reliable enough (counts at least half the best), then the freshest (strongest) reading first
-        let maxc = props.iter().map(|x| x.0).max().unwrap_or(0);
-        if self.cfg.clock > 0 {
-            props.retain(|x| 2 * x.0 >= maxc);
-            props.sort_by(|a, b| b.2.cmp(&a.2));
+        if self.cfg.precision {
+            // the third field holds the misses: best precision first, compared by cross-multiplication
+            props.sort_by(|a, b| {
+                let (ha, ma, hb, mb) = (a.0 as i128, a.2, b.0 as i128, b.2);
+                (hb - mb).cmp(&(ha - ma)).then(b.0.cmp(&a.0))
+            });
         } else {
             props.sort_by(|a, b| b.0.cmp(&a.0));
         }
@@ -783,6 +946,15 @@ impl Situation {
         let ctx = self.ctx_key();
         let cue: Vec<u32> = (0..self.cfg.cue.min(self.hist.len())).map(|j| self.hist[self.hist.len() - 1 - j]).collect();
         self.wcount[w as usize] += 1;
+        // NoGo: every route proposed for this word that was wrong
+        // (only the routes behind the answer actually given, the top proposal, are blamed: the bandit's rule,
+        // only the taken action's outcome is seen)
+        let given = self.last.first().map(|x| x.1);
+        for &(cx, j, r, v) in &std::mem::take(&mut self.routes) {
+            if Some(v) == given && v != w {
+                *self.miss.entry((cx, j, r)).or_insert(0) += 1;
+            }
+        }
         // mood: after a boundary, was the store's top proposal this word? (up on a hit, down on half the misses)
         if let Some(&u) = self.hist.last() {
             if self.boundary[u as usize] {
@@ -803,10 +975,11 @@ impl Situation {
             top.extend(self.comp.values().copied());
             let kw = self.kk(w);
             for (j, &e) in cue.iter().enumerate() {
-                if e == w || !self.seen[e as usize] {
+                if e == w || !self.seen[e as usize] || !self.is_entity(e) {
                     continue;
                 }
-                let hits: Vec<u32> = top.iter().copied().filter(|&c| self.read_best(e, c, kw, &[e]).map(|x| x.0) == Some(w)).collect();
+                let pool1: Vec<u32> = if self.cfg.live { self.live_classes(e, Some(kw)) } else { top.clone() };
+                let hits: Vec<u32> = pool1.iter().copied().filter(|&c| self.read_best(e, c, kw, &[e]).map(|x| x.0) == Some(w)).collect();
                 if !hits.is_empty() {
                     let m = self.c1.entry((ctx, j)).or_default();
                     for &c in &hits {
@@ -821,7 +994,7 @@ impl Situation {
                         *x = (*x + 1).min(15);
                     }
                 } else {
-                    let t10: Vec<u32> = top.iter().take(10).copied().collect();
+                    let t10: Vec<u32> = if self.cfg.live { self.live_classes(e, None) } else { top.iter().take(10).copied().collect() };
                     for &c1_ in &t10 {
                         let k1s: Vec<u32> = if self.cfg.kinds { self.occ.get(&(e, c1_)).cloned().unwrap_or_default() } else { vec![self.kn] };
                         for k1 in k1s {
@@ -829,7 +1002,8 @@ impl Situation {
                             if m == w {
                                 continue;
                             }
-                            for &c2_ in &t10 {
+                            let t2: Vec<u32> = if self.cfg.live { self.live_classes(m, Some(kw)) } else { t10.clone() };
+                            for &c2_ in &t2 {
                                 if self.read_best(m, c2_, kw, &[m]).map(|x| x.0) == Some(w) {
                                     *self.c2.entry((ctx, j)).or_default().entry(((c1_, k1), (c2_, kw))).or_insert(0) += 1;
                                     *self.g2.entry(((c1_, k1), (c2_, kw))).or_insert(0) += 1;
@@ -988,6 +1162,10 @@ impl Situation {
                         let ks = self.occ.entry((x, cs)).or_default();
                         if !ks.contains(&p2.1) {
                             ks.push(p2.1);
+                        }
+                        let cl = self.dcl.entry((x, 2)).or_default();
+                        if !cl.contains(&cs) {
+                            cl.push(cs);
                         }
                         self.stamp.insert((x, cs, p2.1), self.t);
                     }

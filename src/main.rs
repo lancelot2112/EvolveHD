@@ -48,6 +48,11 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         bounce: flag(args, "--sit-bounce"),
         supersede: flag(args, "--sit-supersede"),
         compose: g("--sit-compose", "0").parse().unwrap(),
+        precision: flag(args, "--sit-precision"),
+        entity_cues: flag(args, "--sit-entity-cues"),
+        live: flag(args, "--sit-live"),
+        nroutes: g("--sit-nroutes", "0").parse().unwrap(),
+        cred: g("--sit-cred", "2").parse().unwrap(),
         seed: g("--sit-seed", "0").parse().unwrap(),
     }
 }
