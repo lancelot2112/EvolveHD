@@ -91,3 +91,20 @@ The second half's new verbs and question form are untrained embeddings for the t
   - crediting every route that held the answer: 52%, as the frequent routes swamp the rest.
 - **It is faster:** a run takes 40 s, against 54 s with the hand-built routes and 350 s for the base.
 - **What is still not integer:** the store's output weights handed to the engine, as before. Everything inside the store is integer now, including the pooling.
+
+## Knowing when it doesn't know, and looking it up (`--sit-lookback 128`)
+
+The transformer reads its whole 128-word context exactly every time. The fair counterpart here is a lookback window of the last 128 words, read by the same query learner. Its routes start from a cue word's latest occurrences (up to 3) in the window and take the word at an offset of −6 to +6; from that word's latest 2 occurrences, they take the word at an offset again (two hops). The features are the cue position, the cue word's kind, the occurrence rank, the offset and the value's kind. Both the slots and the window learn at every word.
+
+An arbiter decides which answer to give. It counts, per (question form, both sources' margin buckets), which source was right where the two disagreed, and answers from the window where the window has been right more often. Three seeds, `scripts/exp36/agree.py` on `SIT_WDBG=1` logs:
+
+| Seed | Slots alone | Window alone | Given (arbiter) | Agree: share of questions | Agree: right | Disagree: slots right | Disagree: window right |
+|---|---|---|---|---|---|---|---|
+| 0 | 87.2% | 79.4% | 88.4% | 73.7% | 97.7% | 58.0% | 28.0% |
+| 1 | 89.4% | 57.4% | 89.3% | 55.9% | 96.7% | 80.2% | 7.6% |
+| 2 | 86.2% | 83.9% | 86.7% | 78.9% | 97.7% | 43.7% | 32.5% |
+
+- **Agreement is the "I know" signal.** When the slots and the window give the same answer, 96.7–97.7% of those answers are right, over 56–79% of the questions. The score margin is not a usable signal: nearly every answer, right or wrong, has a large margin. For where-object, the agreeing answers are 74–86% right; overall they are 30–38% of the where-object questions.
+- **Looking it up is only as good as the reader of the window, and that reader is weak.** Alone it gets 57–84%. It must learn offsets in raw text, which is slow: the transformer needed 2.5M training positions to reach 41%. Where the two disagree, the slots are right more often in all three seeds. The window helps only on where-object, and only on seed 0: 50% right against the slots' 19% there.
+- **So the net effect is small:** +0.5 to −1.7 points over the slots alone, across arbiter variants. A first arbiter keyed on the slots' margin and a two-word question form (90.8 / 88.8 / 86.2%) mixed up "who has the X ?" with "where is the X ?". One pool scored by the shared weights overused the window (85.1 / 83.6%).
+- **What would make it pay:** a better window reader (the next step), or answering "unknown" on disagreement. Answering only when the two agree would give about 97% right on 56–79% of the questions.

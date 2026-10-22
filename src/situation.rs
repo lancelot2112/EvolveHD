@@ -75,6 +75,12 @@
 //!   instead of the meaning module's codes (float inside); the meaning module is then not run. Only distinctive
 //!   frame features count: those in at most an eighth of the words' codes (recounted at each recluster), so
 //!   "went" and "got" (both after a name) differ by what follows them.
+//! - `lookback` N: a window of the last N words (the transformer's context, made explicit). The same query
+//!   learner scores routes over it: from a cue word's latest occurrences, the word at an offset, and again from
+//!   there (two hops). An arbiter keeps, per (question form: the words 1, 3 and 4 back; both sources' margin buckets),
+//!   how often the slots' answer and the window's answer were right where the two disagreed. It answers from the window where the window has been right more often
+//!   (cross-multiplied, prior 1 in 2). So the window is read for its answer only where the slots are unsure.
+//!   Both sources learn at every word.
 //! - `seed`: salts the codes, keys and context.
 use crate::meaning::{Meaning, MeaningCfg};
 use std::collections::HashMap;
@@ -130,6 +136,12 @@ pub struct SitCfg {
     pub replay: usize,
     /// Pool relations by the words' frame codes (8-bit frame counters, integer) instead of the meaning module.
     pub fpool: bool,
+    /// Lookback: a window of the last `lookback` words, searched by the same query learner when the slots are unsure
+    /// (0 = off).
+    pub lookback: usize,
+    /// Lookback merged: the window's routes compete with the slots' routes in one pool under the same learner
+    /// (no separate arbiter).
+    pub merge: bool,
     pub cred: u32,
     pub seed: u64,
 }
@@ -193,6 +205,14 @@ pub struct Situation {
     qcands: Vec<(Vec<u32>, u32, i64)>,             // its routes: (features, value, score), best first
     ring: Vec<(Vec<u32>, Vec<(Vec<u32>, u32)>, u32)>, // replayed mistakes: (query, routes (features, value), answer)
     ring_at: usize,
+    win: Vec<u32>,                                  // the lookback window: the last `lookback` words
+    wcands: Vec<(Vec<u32>, u32, i64)>,             // the window's routes for the current prediction
+    arb: HashMap<(u64, u32), [u16; 4]>,             // per (question form, slot margin bucket): slot right, slot n, window right, window n
+    arb_key: (u64, u32),
+    slot_top: Option<u32>,
+    pub used_window: u64,                           // predictions answered from the window
+    pub used_window_q: u64,                         // ... of them right after a question boundary
+    pub questions_seen: u64,
     mood: Vec<u8>,
     buf: Vec<(u32, u32, u8, u32)>,                  // buffered bindings: (entity, class, direction, value)
     stamp: HashMap<(u32, u32, u32), u64>,           // last write time per slot (entity, class, kind)
@@ -266,6 +286,14 @@ impl Situation {
             qcands: vec![],
             ring: vec![],
             ring_at: 0,
+            win: vec![],
+            wcands: vec![],
+            arb: HashMap::new(),
+            arb_key: (0, 0),
+            slot_top: None,
+            used_window: 0,
+            used_window_q: 0,
+            questions_seen: 0,
             mood: vec![0; nw],
             buf: vec![],
             stamp: HashMap::new(),
@@ -1055,6 +1083,83 @@ impl Situation {
         }
     }
 
+    /// The window's routes: from each cue word's latest occurrences (up to 3) in the lookback window, the word at
+    /// an offset of -6..+6 (one hop), and from that word's latest 2 occurrences, the word at an offset again (two
+    /// hops). Features: cue position, the cue word's kind, the occurrence rank, the offset, the value's kind, and for
+    /// two hops the second occurrence rank, offset, the intermediate's kind and the pair of offsets.
+    fn window_cands(&self, cue: &[u32], q: &[u32]) -> Vec<(Vec<u32>, u32, i64)> {
+        let n = self.win.len();
+        let occ = |x: u32, k: usize| -> Vec<usize> {
+            let mut v = vec![];
+            for i in (0..n).rev() {
+                if self.win[i] == x {
+                    v.push(i);
+                    if v.len() >= k {
+                        break;
+                    }
+                }
+            }
+            v
+        };
+        let mut cache: HashMap<u32, i64> = HashMap::new();
+        let mut out: Vec<(Vec<u32>, u32, i64)> = vec![];
+        for (j, &e) in cue.iter().enumerate() {
+            let ke = self.kk(e) as u64;
+            for (r, &i) in occ(e, 3).iter().enumerate() {
+                for d in -6i64..=6 {
+                    let p = i as i64 + d;
+                    if d == 0 || p < 0 || p >= n as i64 {
+                        continue;
+                    }
+                    let m = self.win[p as usize];
+                    let km = self.kk(m) as u64;
+                    let f1 = vec![
+                        Self::fid(20, j as u64, 0), Self::fid(21, ke, 0), Self::fid(22, r as u64, 0),
+                        Self::fid(23, (d + 6) as u64, 0), Self::fid(24, km, 0), Self::fid(29, (d + 6) as u64, km),
+                    ];
+                    let sc = self.qscore(q, &f1, &mut cache);
+                    out.push((f1.clone(), m, sc));
+                    if j != 1 && j != 0 {
+                        continue; // two hops only from the nearest cue words (cost)
+                    }
+                    for (r2, &i2) in occ(m, 2).iter().enumerate() {
+                        for d2 in -6i64..=6 {
+                            let p2 = i2 as i64 + d2;
+                            if d2 == 0 || p2 < 0 || p2 >= n as i64 {
+                                continue;
+                            }
+                            let v = self.win[p2 as usize];
+                            let kv = self.kk(v) as u64;
+                            let mut f2 = f1.clone();
+                            f2.pop();
+                            f2.extend([
+                                Self::fid(25, r2 as u64, 0), Self::fid(26, (d2 + 6) as u64, 0), Self::fid(27, kv, 0),
+                                Self::fid(28, (d + 6) as u64, (d2 + 6) as u64), Self::fid(30, km, kv),
+                            ]);
+                            let sc = self.qscore(q, &f2, &mut cache);
+                            out.push((f2, v, sc));
+                        }
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| b.2.cmp(&a.2));
+        out
+    }
+    /// The margin of a ranked candidate list: how far the top score is above the best score for another value,
+    /// as a bucket (0 = no margin, else the bit length of the margin, up to 15).
+    fn margin_bucket(c: &[(Vec<u32>, u32, i64)]) -> u32 {
+        let Some(top) = c.first() else { return 0 };
+        let other = c.iter().find(|x| x.1 != top.1).map(|x| x.2);
+        match other {
+            None => 15,
+            Some(o) => {
+                let m = (top.2 - o).max(0) as u64;
+                (64 - m.leading_zeros()).min(15)
+            }
+        }
+    }
+
     fn live(&self, e: u32, c: u32, kd: u32) -> bool {
         !self.cfg.kinds || self.occ.get(&(e, c)).map(|v| v.contains(&kd)).unwrap_or(false)
     }
@@ -1067,7 +1172,47 @@ impl Situation {
         let ctx = self.ctx_key();
         let cue: Vec<u32> = (0..self.cfg.cue.min(self.hist.len())).map(|j| self.hist[self.hist.len() - 1 - j]).collect();
         if self.cfg.query {
-            let props = self.query_recall(&cue);
+            let mut props = self.query_recall(&cue);
+            if self.cfg.lookback > 0 {
+                // the slots' answer, its margin, and the question form; then the window's answer; answer from the
+                // window where, for this form and margin, the window has been right more often than the slots
+                let q = self.qbits.clone();
+                self.wcands = self.window_cands(&cue, &q);
+                let w0 = cue.first().copied().unwrap_or(u32::MAX) as u64;
+                let w2 = cue.get(2).copied().unwrap_or(u32::MAX) as u64;
+                let w3 = cue.get(3).copied().unwrap_or(u32::MAX) as u64;
+                // the key: the question form, and both sources' margin buckets
+                let key = (hash(hash(hash(w0, 7), w2), w3), Self::margin_bucket(&self.qcands) * 16 + Self::margin_bucket(&self.wcands));
+                self.arb_key = key;
+                self.slot_top = self.qcands.first().map(|x| x.1);
+                let a = *self.arb.get(&key).unwrap_or(&[0; 4]);
+                // window accuracy > slot accuracy, by cross-multiplication, with a prior of 1 right in 2; merged:
+                // the window wins where its best route outscores the slots' best under the shared weights
+                let use_win = !self.wcands.is_empty()
+                    && if self.cfg.merge {
+                        self.qcands.first().map_or(true, |s0| self.wcands[0].2 > s0.2)
+                    } else {
+                        (a[2] as u64 + 1) * (a[1] as u64 + 2) > (a[0] as u64 + 1) * (a[3] as u64 + 2)
+                    };
+                if use_win {
+                    self.used_window += 1;
+                    if let Some(&u) = self.hist.last() {
+                        if self.boundary[u as usize] && self.mood[u as usize] >= 8 {
+                            self.used_window_q += 1;
+                        }
+                    }
+                    let lo = self.wcands.iter().map(|x| x.2).min().unwrap_or(0);
+                    props = self.wcands.iter().map(|x| ((x.2 - lo + 1).min(u32::MAX as i64) as u32, x.1)).collect();
+                }
+                if let Some(&u) = self.hist.last() {
+                    if self.boundary[u as usize] && self.mood[u as usize] >= 8 {
+                        self.questions_seen += 1;
+                    }
+                }
+                if std::env::var("SIT_WDBG").is_ok() {
+                    eprintln!("WDBG {} slot {} win {} bucket {} use {}", self.t, self.slot_top.map_or(-1, |x| x as i64), self.wcands.first().map_or(-1, |x| x.1 as i64), key.1, use_win as u8);
+                }
+            }
             self.last = props.clone();
             let tot: f64 = props.iter().map(|x| x.0 as f64).sum();
             let mut out: Vec<(u32, f64)> = vec![];
@@ -1245,6 +1390,60 @@ impl Situation {
             }
         }
         if self.cfg.query {
+            if self.cfg.lookback > 0 {
+                let wc = std::mem::take(&mut self.wcands);
+                let q = self.qbits.clone();
+                if self.cfg.merge {
+                    // one pool: when the answer given was wrong, the best-scored route of either source that held w
+                    // steps up and the given route steps down; the slots' own update then follows as usual
+                    let given_win = self.last.first().map(|x| x.1) == wc.first().map(|x| x.1)
+                        && wc.first().map_or(false, |t| self.qcands.first().map_or(true, |s0| t.2 > s0.2));
+                    if given_win {
+                        let top = wc[0].clone();
+                        if top.1 != w {
+                            let gw = wc.iter().find(|x| x.1 == w).map(|x| (x.0.clone(), x.2));
+                            let gs = self.qcands.iter().find(|x| x.1 == w).map(|x| (x.0.clone(), x.2));
+                            let good = match (gw, gs) {
+                                (Some(a), Some(b)) => Some(if a.1 >= b.1 { a.0 } else { b.0 }),
+                                (Some(a), None) => Some(a.0),
+                                (None, Some(b)) => Some(b.0),
+                                _ => None,
+                            };
+                            if let Some(gf) = good {
+                                self.qupdate(&q, &gf, 1);
+                                self.qupdate(&q, &top.0, -1);
+                            }
+                        }
+                    } else if self.slot_top != Some(w) {
+                        // the slots answered wrong: if the window held w, step its best such route up
+                        if let Some(g) = wc.iter().find(|x| x.1 == w) {
+                            let gf = g.0.clone();
+                            self.qupdate(&q, &gf, 1);
+                        }
+                    }
+                } else if let Some(top) = wc.first() {
+                    if top.1 != w {
+                        if let Some(good) = wc.iter().find(|x| x.1 == w) {
+                            let (gf, tf) = (good.0.clone(), top.0.clone());
+                            self.qupdate(&q, &gf, 1);
+                            self.qupdate(&q, &tf, -1);
+                        }
+                    }
+                }
+                // the arbiter's counts: was each source right here?
+                // (only where the two disagree: elsewhere the choice does not matter)
+                let wt = wc.first().map(|x| x.1);
+                if wt.is_some() && wt != self.slot_top {
+                    let a = self.arb.entry(self.arb_key).or_insert([0; 4]);
+                    a[0] += (self.slot_top == Some(w)) as u16;
+                    a[1] += 1;
+                    a[2] += (wt == Some(w)) as u16;
+                    a[3] += 1;
+                    if a[1] > 1000 {
+                        a.iter_mut().for_each(|x| *x >>= 1);
+                    }
+                }
+            }
             self.query_learn(w);
         }
         // which classes answer this context: those whose slot (of a cue word) holds w
@@ -1367,6 +1566,12 @@ impl Situation {
             self.clause.drain(..8);
         }
         self.hist.push(w);
+        if self.cfg.lookback > 0 {
+            self.win.push(w);
+            if self.win.len() > self.cfg.lookback {
+                self.win.remove(0);
+            }
+        }
         if self.hist.len() > 64 {
             self.hist.drain(..32);
         }

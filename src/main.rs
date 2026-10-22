@@ -55,6 +55,8 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         query: flag(args, "--sit-query"),
         replay: g("--sit-replay", "0").parse().unwrap(),
         fpool: flag(args, "--sit-fpool"),
+        lookback: g("--sit-lookback", "0").parse().unwrap(),
+        merge: flag(args, "--sit-merge"),
         cred: g("--sit-cred", "2").parse().unwrap(),
         seed: g("--sit-seed", "0").parse().unwrap(),
     }
@@ -719,6 +721,9 @@ fn main() {
                 let name = |w: u32| voc.get(w as usize).cloned().unwrap_or(w.to_string());
                 eprintln!("learned boundaries: {} | paths {} | relation classes {}", x.boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.n_paths(), x.n_classes());
                 eprintln!("question boundaries: {} | clauses committed {}, dropped {}", x.question_boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.committed, x.dropped);
+                if x.cfg.lookback > 0 {
+                    eprintln!("lookback: answered from the window {} times; after a question boundary {} of {}", x.used_window, x.used_window_q, x.questions_seen);
+                }
                 if x.cfg.kinds {
                     eprintln!("kinds: {}", x.kind_groups().iter().map(|g| g.iter().map(|&w| name(w)).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join(" | "));
                 }
