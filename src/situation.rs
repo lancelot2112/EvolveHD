@@ -57,6 +57,17 @@
 //! - `live`: learn over the cue entity's live slots (two hops: the intermediate's too) instead of the most
 //!   frequent classes. The two-hop search over the 10 most frequent classes never saw "the apple was got by",
 //!   whose class is rarer.
+//! - `query`: the general query learner, in place of the C1/C2 tables, the context hash, the cue positions, the
+//!   entity-cue rule and the recency rule. A bitwise W_QK:
+//!   - the query code is the last 4 words' frame codes, each in its position's block, plus identity bits;
+//!   - a route's key is a set of features: cue position, the cue word's kind, per hop the class, the kind and the
+//!     slot's recency rank within its entity, and the number of hops;
+//!   - W holds signed 8-bit weights per (query bit, feature);
+//!   - every one- and two-hop route from the cue words' 8 newest live slots is scored by the sum of its weights
+//!     under the query, and the best is read;
+//!   - learning is mistake-driven and three-factor (a perceptron): when the top route was wrong, the best-scored
+//!     route that held the next word is stepped up and the top route down. (Stepping up every route that held it
+//!     instead fell to 52%: the frequent routes' weights swamp the rest.)
 //! - `seed`: salts the codes, keys and context.
 use crate::meaning::{Meaning, MeaningCfg};
 use std::collections::HashMap;
@@ -106,6 +117,8 @@ pub struct SitCfg {
     /// Routes proposed per cue word (most counted live first), and the credibility share: a route competes on
     /// recency if its count times `cred` reaches the best count.
     pub nroutes: usize,
+    /// The general query learner (see the module docs) instead of the C1/C2 tables.
+    pub query: bool,
     pub cred: u32,
     pub seed: u64,
 }
@@ -162,6 +175,9 @@ pub struct Situation {
     kind: Vec<u32>,                                 // each word's kind (a word id); kn = none yet
     kn: u32,
     ksize: HashMap<u32, u32>,                      // members per kind
+    qw: Vec<i8>,                                    // the query learner: QD x NF signed 8-bit weights
+    qbits: Vec<u32>,                                // the query code of the current prediction
+    qcands: Vec<(Vec<u32>, u32, i64)>,             // its routes: (features, value, score), best first
     mood: Vec<u8>,
     buf: Vec<(u32, u32, u8, u32)>,                  // buffered bindings: (entity, class, direction, value)
     stamp: HashMap<(u32, u32, u32), u64>,           // last write time per slot (entity, class, kind)
@@ -179,6 +195,8 @@ pub struct Situation {
 
 const DRE: [i8; 4] = [1, 0, -1, 0];
 const FB: usize = 512;
+const QD: usize = 4 * FB + 256; // query bits: 4 positions x frame code, plus 4 positions x 64 identity bits
+const NF: usize = 4096;         // route features (hashed)
 /// A route: one slot (class, kind), or two (the second with class != u32::MAX).
 type Route = (u32, u32, u32, u32);
 const COMP: u32 = 1 << 24; // composite class ids start here, apart from the pooled classes
@@ -226,6 +244,9 @@ impl Situation {
             kind: vec![nw as u32; nw + 1],
             kn: nw as u32,
             ksize: HashMap::new(),
+            qw: if cfg.query { vec![0; QD * NF] } else { vec![] },
+            qbits: vec![],
+            qcands: vec![],
             mood: vec![0; nw],
             buf: vec![],
             stamp: HashMap::new(),
@@ -791,6 +812,122 @@ impl Situation {
         hash(hash(at(0), at(2)), at(3))
     }
 
+    // ---- the general query learner ----
+    /// The query code: the cue words' frame codes (8-bit frame counters at a quarter of their max), each in the
+    /// block of its position, plus 4 identity bits per position.
+    fn query_bits(&self, cue: &[u32]) -> Vec<u32> {
+        let mut q = vec![];
+        for (j, &u) in cue.iter().enumerate().take(4) {
+            for (b, on) in self.frame_code(u).into_iter().enumerate() {
+                if on {
+                    q.push((j * FB + b) as u32);
+                }
+            }
+            for i in 0..4u64 {
+                q.push((4 * FB + j * 64 + (hash(u as u64 + 31, i) % 64) as usize) as u32);
+            }
+        }
+        q
+    }
+    fn fid(tag: u64, a: u64, b: u64) -> u32 {
+        (hash(hash(tag, a), b) % NF as u64) as u32
+    }
+    /// A route's features: the cue position, the cue word's kind, and per hop its class, its kind, its recency rank
+    /// within the entity, plus the number of hops.
+    fn route_feats(&self, j: usize, e: u32, hops: &[(u32, u32, u32)]) -> Vec<u32> {
+        let mut f = vec![Self::fid(1, j as u64, 0), Self::fid(2, self.kk(e) as u64, 0), Self::fid(6, hops.len() as u64, 0)];
+        for (s, &(c, k, r)) in hops.iter().enumerate() {
+            f.push(Self::fid(3, s as u64, c as u64));
+            f.push(Self::fid(4, s as u64, k as u64));
+            f.push(Self::fid(5, s as u64, r.min(3) as u64));
+            f.push(Self::fid(7, s as u64 * 1_000_003 + c as u64, k as u64));
+        }
+        if hops.len() == 2 {
+            // conjunctions across the two hops: the pair of classes, the pair of kinds, the pair of ranks
+            f.push(Self::fid(8, hops[0].0 as u64 * 1_000_003 + hops[1].0 as u64, hops[0].1 as u64 * 1009 + hops[1].1 as u64));
+            f.push(Self::fid(9, hops[0].1 as u64, hops[1].1 as u64));
+            f.push(Self::fid(10, hops[0].2.min(3) as u64, hops[1].2.min(3) as u64));
+        }
+        f
+    }
+    /// e's live slots, newest first (at most n): (class, kind, rank).
+    fn newest_slots(&self, e: u32, n: usize) -> Vec<(u32, u32, u32)> {
+        let mut v: Vec<(u64, u32, u32)> = vec![];
+        for c in self.live_classes(e, None) {
+            if let Some(ks) = self.occ.get(&(e, c)) {
+                for &k in ks {
+                    v.push((self.stamp_of(e, c, k), c, k));
+                }
+            }
+        }
+        v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        v.into_iter().take(n).enumerate().map(|(i, x)| (x.1, x.2, i as u32)).collect()
+    }
+    /// Score features against the current query: the sum of W[q bit, feature].
+    fn qscore(&self, q: &[u32], f: &[u32], cache: &mut HashMap<u32, i64>) -> i64 {
+        f.iter()
+            .map(|&fi| {
+                *cache.entry(fi).or_insert_with(|| q.iter().map(|&b| self.qw[b as usize * NF + fi as usize] as i64).sum())
+            })
+            .sum()
+    }
+    fn qupdate(&mut self, q: &[u32], f: &[u32], d: i8) {
+        for &b in q {
+            for &fi in f {
+                let x = &mut self.qw[b as usize * NF + fi as usize];
+                *x = x.saturating_add(d);
+            }
+        }
+    }
+    /// The query learner's candidates: every one- and two-hop route from the cue words' newest live slots, scored.
+    fn query_recall(&mut self, cue: &[u32]) -> Vec<(u32, u32)> {
+        let q = self.query_bits(cue);
+        let mut cache: HashMap<u32, i64> = HashMap::new();
+        let mut cands: Vec<(Vec<u32>, u32, i64, u64)> = vec![];
+        for (j, &e) in cue.iter().enumerate() {
+            if !self.seen[e as usize] {
+                continue;
+            }
+            for (c, k, r) in self.newest_slots(e, 8) {
+                let Some((m, _)) = self.read_best(e, c, k, cue) else { continue };
+                let f1 = self.route_feats(j, e, &[(c, k, r)]);
+                let sc = self.qscore(&q, &f1, &mut cache);
+                cands.push((f1, m, sc, self.stamp_of(e, c, k)));
+                for (c2, k2, r2) in self.newest_slots(m, 8) {
+                    let mut ex = cue.to_vec();
+                    ex.push(m);
+                    let Some((v, _)) = self.read_best(m, c2, k2, &ex) else { continue };
+                    let f2 = self.route_feats(j, e, &[(c, k, r), (c2, k2, r2)]);
+                    let sc = self.qscore(&q, &f2, &mut cache);
+                    cands.push((f2, v, sc, self.stamp_of(e, c, k)));
+                }
+            }
+        }
+        // best score first; ties: the newest first slot, then the shorter route (stable sort keeps one-hop first)
+        cands.sort_by(|a, b| b.2.cmp(&a.2).then(b.3.cmp(&a.3)));
+        let lo = cands.iter().map(|x| x.2).min().unwrap_or(0);
+        let props: Vec<(u32, u32)> = cands.iter().map(|x| ((x.2 - lo + 1).min(u32::MAX as i64) as u32, x.1)).collect();
+        self.qbits = q;
+        self.qcands = cands.into_iter().map(|x| (x.0, x.1, x.2)).collect();
+        props
+    }
+    /// Learn the query from word w: a mistake-driven (perceptron) three-factor update. When the top route was
+    /// wrong, the best-scored route that held w is stepped up (Go) and the top route down (NoGo), for every
+    /// (query bit, route feature) pair: pre-synaptic the query, post-synaptic the route, the modulator right or wrong.
+    fn query_learn(&mut self, w: u32) {
+        let cands = std::mem::take(&mut self.qcands);
+        let q = std::mem::take(&mut self.qbits);
+        let Some(top) = cands.first() else { return };
+        if top.1 == w {
+            return;
+        }
+        if let Some(good) = cands.iter().find(|x| x.1 == w) {
+            let (gf, tf) = (good.0.clone(), top.0.clone());
+            self.qupdate(&q, &gf, 1);
+            self.qupdate(&q, &tf, -1);
+        }
+    }
+
     fn live(&self, e: u32, c: u32, kd: u32) -> bool {
         !self.cfg.kinds || self.occ.get(&(e, c)).map(|v| v.contains(&kd)).unwrap_or(false)
     }
@@ -802,6 +939,19 @@ impl Situation {
     pub fn recall(&mut self) -> Vec<(u32, f64)> {
         let ctx = self.ctx_key();
         let cue: Vec<u32> = (0..self.cfg.cue.min(self.hist.len())).map(|j| self.hist[self.hist.len() - 1 - j]).collect();
+        if self.cfg.query {
+            let props = self.query_recall(&cue);
+            self.last = props.clone();
+            let tot: f64 = props.iter().map(|x| x.0 as f64).sum();
+            let mut out: Vec<(u32, f64)> = vec![];
+            for (n, v) in props {
+                match out.iter_mut().find(|x| x.0 == v) {
+                    Some(x) => x.1 += n as f64 / tot.max(1.0),
+                    None => out.push((v, n as f64 / tot.max(1.0))),
+                }
+            }
+            return out;
+        }
         let mut props: Vec<(u32, u32, i128)> = vec![];
         self.routes.clear();
         for (j, &e) in cue.iter().enumerate() {
@@ -967,8 +1117,11 @@ impl Situation {
                 }
             }
         }
+        if self.cfg.query {
+            self.query_learn(w);
+        }
         // which classes answer this context: those whose slot (of a cue word) holds w
-        if self.seen[w as usize] && !self.class_count.is_empty() {
+        if !self.cfg.query && self.seen[w as usize] && !self.class_count.is_empty() {
             let mut top: Vec<(u64, u32)> = self.class_count.iter().enumerate().map(|(i, &c)| (c, i as u32)).collect();
             top.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
             let mut top: Vec<u32> = top.into_iter().take(self.cfg.ntop).map(|x| x.1).collect();

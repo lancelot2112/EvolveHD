@@ -52,6 +52,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         entity_cues: flag(args, "--sit-entity-cues"),
         live: flag(args, "--sit-live"),
         nroutes: g("--sit-nroutes", "0").parse().unwrap(),
+        query: flag(args, "--sit-query"),
         cred: g("--sit-cred", "2").parse().unwrap(),
         seed: g("--sit-seed", "0").parse().unwrap(),
     }
