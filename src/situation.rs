@@ -144,6 +144,12 @@ pub struct SitCfg {
     pub nroutes: usize,
     /// The general query learner (see the module docs) instead of the C1/C2 tables.
     pub query: bool,
+    /// The query code also carries 4 bits hashed from the words 1 and 4 back together ("?" ... "has" against "?" ...
+    /// "is": the two question forms share the words 1 and 3 back).
+    pub qform14: bool,
+    /// An entity's read list takes each kind's newest value before any kind's second newest (the list is short: 8
+    /// slots; without this a clause's function words push an older place out of it).
+    pub kindfirst: bool,
     /// Query learner: mistakes kept in a ring of 512 and re-learned, this many per word (0 = off).
     pub replay: usize,
     /// Pool relations by the words' frame codes (8-bit frame counters, integer) instead of the meaning module.
@@ -170,6 +176,18 @@ pub struct SitCfg {
     /// Which open queries' derived slots an entity's reader sees (it sees at most 4): 0 the newest written, 1 the
     /// queries with the highest balance, 2 the queries with the most credits.
     pub sq_rank: u32,
+    /// Open queries by kinds: also count the chains in which both hops were the entity's newest value of their kind,
+    /// as a pattern over the kinds alone (any relation, then any relation): "the newest person, then that person's
+    /// newest place". The counts of all the relations that reach a person pool into one.
+    pub sq_kinds: bool,
+    /// The price of staying open. 0: a query closes when its balance is below 0 after its trial. 1: relative: when its
+    /// net payoff per word since opening is below the average of the open queries past their trial (cross-multiplied).
+    /// 2: either.
+    pub sq_price: u32,
+    /// Which answers count toward opening a pattern. 0: every answer it held. 1: only the answers it held when the
+    /// answer given was wrong (it would have fixed a mistake): patterns that hold what is already answered right add
+    /// nothing.
+    pub sq_open: u32,
     pub cred: u32,
     pub seed: u64,
 }
@@ -242,6 +260,7 @@ pub struct Situation {
     pub used_window_q: u64,                         // ... of them right after a question boundary
     pub questions_seen: u64,
     qhops: Vec<Route>,                              // each route's hops, aligned with qcands
+    qranks: Vec<(u32, u32)>,                        // each route's recency ranks within kind, aligned with qcands
     after_q: bool,                                  // the current prediction follows a learned question boundary
     sq: Vec<OpenQuery>,                             // the open queries
     sq_cand: HashMap<((u32, u32), (u32, u32)), u32>, // two-hop patterns that answered, counted
@@ -273,12 +292,13 @@ pub struct Situation {
 
 const DRE: [i8; 4] = [1, 0, -1, 0];
 const FB: usize = 512;
-const QD: usize = 4 * FB + 512; // query bits: 4 positions x frame code, 4 positions x 64 identity bits, 256 context bits
+const QD: usize = 4 * FB + 768; // query bits: 4 positions x frame code, 4 positions x 64 identity bits, 2 x 256 context bits
 const NF: usize = 4096;         // route features (hashed)
 /// A route: one slot (class, kind), or two (the second with class != u32::MAX).
 type Route = (u32, u32, u32, u32);
 const COMP: u32 = 1 << 24; // composite class ids start here, apart from the pooled classes
 const DER: u32 = 1 << 25; // open queries' derived slots: class DER + query id
+const ANY: u32 = u32::MAX - 1; // an open query's hop of any relation: the entity's newest value of that kind
 
 /// An open query: a two-hop pattern kept answered for every entity, with its usefulness.
 #[derive(Clone, Debug)]
@@ -351,6 +371,7 @@ impl Situation {
             used_window_q: 0,
             questions_seen: 0,
             qhops: vec![],
+            qranks: vec![],
             after_q: false,
             sq: vec![],
             sq_cand: HashMap::new(),
@@ -705,8 +726,9 @@ impl Situation {
         }
         let mut closing = vec![];
         for o in self.sq.iter_mut() {
-            match (map.get(&o.p1.0), map.get(&o.p2.0)) {
-                (Some(&a), Some(&b)) => {
+            let mp = |c: u32| if c == ANY { Some(ANY) } else { map.get(&c).copied() };
+            match (mp(o.p1.0), mp(o.p2.0)) {
+                (Some(a), Some(b)) => {
                     o.p1.0 = a;
                     o.p2.0 = b;
                 }
@@ -716,7 +738,7 @@ impl Situation {
         for id in closing {
             self.sq_close(id);
         }
-        self.sq_cand.clear();
+        self.sq_cand.retain(|p, _| p.0 .0 == ANY);
         self.sq_in.clear();
         let hop = std::mem::take(&mut self.hop);
         for (k, m) in hop {
@@ -1002,6 +1024,13 @@ impl Situation {
         for i in 0..4u64 {
             q.push((4 * FB + 256 + (hash(cx, i) % 256) as usize) as u32);
         }
+        if self.cfg.qform14 {
+            let w3 = cue.get(3).copied().unwrap_or(u32::MAX) as u64;
+            let cy = hash(hash(w0, 11), w3);
+            for i in 0..4u64 {
+                q.push((4 * FB + 512 + (hash(cy, i) % 256) as usize) as u32);
+            }
+        }
         q
     }
     fn fid(tag: u64, a: u64, b: u64) -> u32 {
@@ -1052,6 +1081,23 @@ impl Situation {
                 }
             }
         }
+        if self.cfg.kindfirst {
+            // each kind's newest first, then the second newest of each (stable: newest first within a rank)
+            let mut rk: HashMap<u32, u32> = HashMap::new();
+            let mut tagged: Vec<(u32, (u64, u32, u32))> = v
+                .iter()
+                .map(|x| {
+                    if x.1 >= DER {
+                        return (0, *x);
+                    }
+                    let r = rk.entry(x.2).or_insert(0);
+                    *r += 1;
+                    (*r - 1, *x)
+                })
+                .collect();
+            tagged.sort_by_key(|t| t.0);
+            v = tagged.into_iter().map(|t| t.1).collect();
+        }
         let mut seen_k: HashMap<u32, u32> = HashMap::new();
         let mut out = vec![];
         let mut derived = 0;
@@ -1100,8 +1146,20 @@ impl Situation {
             }
             self.qring_at = (self.qring_at + 1) % 32;
         }
+        if let Ok(at) = std::env::var("SIT_SQDBG") {
+            if at.split(',').any(|x| x.parse::<u64>().ok() == Some(self.t)) {
+                for o in &self.sq {
+                    for &e in cue.iter().take(3) {
+                        let m = self.sq_ptr.get(&(o.id, e)).copied();
+                        let d = self.read_best(e, DER + o.id, o.p2.1, &[]);
+                        let ms = m.map(|m| format!("{:?}", self.newest_slots(m, 8))).unwrap_or_default();
+                        eprintln!("SQDBG t {} q{} cue {} ptr {:?} derived {:?} | ptr's newest slots {}", self.t, o.id, e, m, d, ms);
+                    }
+                }
+            }
+        }
         let mut cache: HashMap<u32, i64> = HashMap::new();
-        let mut cands: Vec<(Vec<u32>, u32, i64, u64, Route)> = vec![];
+        let mut cands: Vec<(Vec<u32>, u32, i64, u64, Route, (u32, u32))> = vec![];
         let dbg = std::env::var("SIT_QDBG").is_ok();
         let mut desc: Vec<String> = vec![];
         for (j, &e) in cue.iter().enumerate() {
@@ -1115,7 +1173,7 @@ impl Situation {
                 if dbg {
                     desc.push(format!("j{}:{}>c{}k{}r{}={}", j, e, c, k, r, m));
                 }
-                cands.push((f1, m, sc, self.stamp_of(e, c, k), (c, k, u32::MAX, u32::MAX)));
+                cands.push((f1, m, sc, self.stamp_of(e, c, k), (c, k, u32::MAX, u32::MAX), (r, u32::MAX)));
                 for (c2, k2, r2) in self.newest_slots(m, 8) {
                     let mut ex = cue.to_vec();
                     ex.push(m);
@@ -1125,7 +1183,7 @@ impl Situation {
                     if dbg {
                         desc.push(format!("j{}:{}>c{}k{}r{}={}>c{}k{}r{}={}", j, e, c, k, r, m, c2, k2, r2, v));
                     }
-                    cands.push((f2, v, sc, self.stamp_of(e, c, k), (c, k, c2, k2)));
+                    cands.push((f2, v, sc, self.stamp_of(e, c, k), (c, k, c2, k2), (r, r2)));
                 }
             }
         }
@@ -1145,6 +1203,7 @@ impl Situation {
         }
         self.qbits = q;
         self.qhops = cands.iter().map(|x| x.4).collect();
+        self.qranks = cands.iter().map(|x| x.5).collect();
         self.qcands = cands.into_iter().map(|x| (x.0, x.1, x.2)).collect();
         props
     }
@@ -1155,6 +1214,7 @@ impl Situation {
         let cands = std::mem::take(&mut self.qcands);
         let q = std::mem::take(&mut self.qbits);
         let hops = std::mem::take(&mut self.qhops);
+        let ranks = std::mem::take(&mut self.qranks);
         if self.cfg.sq_max > 0 && self.after_q {
             // which two-hop patterns answered (candidates to open), and which open queries' slots did (credit), at
             // the answers to questions (after a boundary the mood counter has learned closes a question)
@@ -1164,8 +1224,11 @@ impl Situation {
                 if cd.1 != w {
                     continue;
                 }
-                if h.2 != u32::MAX && h.0 < COMP && h.2 < COMP {
+                if h.2 != u32::MAX && h.0 < COMP && h.2 < COMP && (self.cfg.sq_open == 0 || !top_right) {
                     *self.sq_cand.entry(((h.0, h.1), (h.2, h.3))).or_insert(0) += 1;
+                    if self.cfg.sq_kinds && ranks.get(i) == Some(&(0, 0)) {
+                        *self.sq_cand.entry(((ANY, h.1), (ANY, h.3))).or_insert(0) += 1;
+                    }
                 }
                 if h.0 >= DER && !credited.iter().any(|c| c.0 == h.0 - DER) {
                     let amt = if self.cfg.sq_credit == 0 {
@@ -1327,7 +1390,42 @@ impl Situation {
     /// pattern if there is room: so the number open tunes itself.
     fn sq_manage(&mut self) {
         let t = self.t;
-        let mut closing: Vec<u32> = self.sq.iter().filter(|o| o.util < 0 && t - o.opened_at >= 2000).map(|o| o.id).collect();
+        // diagnostics: SIT_SQ_FORCE=a,b holds the kind-level chain (any, kind of a) then (any, kind of b) open from
+        // word 2,048 on, and never closes it (a test of what the chain is worth once open)
+        if let Ok(fw) = std::env::var("SIT_SQ_FORCE") {
+            let w: Vec<u32> = fw.split(',').filter_map(|x| x.parse().ok()).collect();
+            if w.len() == 2 && t == 2048 {
+                let id = self.sq_next;
+                self.sq_next += 1;
+                let (ka, kb) = (self.kk(w[0]), self.kk(w[1]));
+                self.sq.push(OpenQuery { id, p1: (ANY, ka), p2: (ANY, kb), util: 1 << 30, credits: 0, work: 0, opened_at: t });
+                self.sq_opened += 1;
+            }
+        }
+        // the open set's net payoff and age, over the queries past their trial (for the relative price)
+        let (mut sn, mut sa) = (0i64, 0i64);
+        for o in self.sq.iter().filter(|o| t - o.opened_at >= 2000) {
+            sn += o.util as i64 - 512;
+            sa += (t - o.opened_at) as i64;
+        }
+        let price = self.cfg.sq_price;
+        let mut closing: Vec<u32> = self
+            .sq
+            .iter()
+            .filter(|o| {
+                let age = (t - o.opened_at) as i64;
+                if age < 2000 {
+                    return false;
+                }
+                let below_avg = (o.util as i64 - 512) * sa < sn * age; // its payoff per word below the set's
+                match price {
+                    0 => o.util < 0,
+                    1 => below_avg,
+                    _ => o.util < 0 || below_avg,
+                }
+            })
+            .map(|o| o.id)
+            .collect();
         closing.sort_unstable();
         for id in closing {
             self.sq_close(id);
@@ -1401,9 +1499,10 @@ impl Situation {
     /// entity pointing to it. A fact of the first hop's kind under another class detaches x.
     fn sq_on_fact(&mut self, x: u32, c: u32, kd: u32, v: u32) {
         let qs: Vec<(u32, (u32, u32), (u32, u32))> = self.sq.iter().map(|o| (o.id, o.p1, o.p2)).collect();
+        let hit = |p: (u32, u32)| kd == p.1 && c < COMP && (p.0 == ANY || p.0 == c);
         for (id, p1, p2) in qs {
             let mut work = 0u64;
-            if (c, kd) == p1 {
+            if hit(p1) {
                 if let Some(old) = self.sq_ptr.insert((id, x), v) {
                     if let Some(r) = self.sq_rev.get_mut(&(id, old)) {
                         r.retain(|&y| y != x);
@@ -1411,13 +1510,11 @@ impl Situation {
                 }
                 self.sq_rev.entry((id, v)).or_default().push(x);
                 work += 1;
-                if self.live(v, p2.0, p2.1) {
-                    if let Some((z, _)) = self.read_best(v, p2.0, p2.1, &[v, x]) {
-                        self.sq_write(x, id, p2.1, z);
-                        work += 2;
-                    }
+                if let Some(z) = self.sq_hop2(v, p2, &[v, x]) {
+                    self.sq_write(x, id, p2.1, z);
+                    work += 2;
                 }
-            } else if kd == p1.1 && c < COMP {
+            } else if kd == p1.1 && c < COMP && p1.0 != ANY {
                 // detach: x took a value of that kind under another relation
                 if let Some(old) = self.sq_ptr.remove(&(id, x)) {
                     if let Some(r) = self.sq_rev.get_mut(&(id, old)) {
@@ -1426,7 +1523,7 @@ impl Situation {
                     work += 1;
                 }
             }
-            if (c, kd) == p2 {
+            if hit(p2) {
                 let xs: Vec<u32> = self.sq_rev.get(&(id, x)).cloned().unwrap_or_default();
                 for xx in xs {
                     self.sq_write(xx, id, p2.1, v);
@@ -1442,6 +1539,32 @@ impl Situation {
             }
         }
     }
+    /// An open query's second hop from the intermediate m: its slot (class, kind), or for a hop of any relation, m's
+    /// newest value of that kind.
+    fn sq_hop2(&self, m: u32, p2: (u32, u32), excl: &[u32]) -> Option<u32> {
+        if p2.0 == ANY {
+            // m's newest value of that kind, over all its live slots (not only the newest few: "daniel picked up the
+            // key ." writes four values into daniel's slots and would push his place out of a short list)
+            let mut best: Option<(u64, u32)> = None;
+            for c in self.live_classes(m, None) {
+                if c >= COMP {
+                    continue;
+                }
+                if self.occ.get(&(m, c)).map_or(false, |ks| ks.contains(&p2.1)) {
+                    let st = self.stamp_of(m, c, p2.1);
+                    if best.map_or(true, |b| st > b.0) {
+                        best = Some((st, c));
+                    }
+                }
+            }
+            let (_, c2) = best?;
+            self.read_best(m, c2, p2.1, excl).map(|x| x.0)
+        } else if self.live(m, p2.0, p2.1) {
+            self.read_best(m, p2.0, p2.1, excl).map(|x| x.0)
+        } else {
+            None
+        }
+    }
     fn sq_write(&mut self, x: u32, id: u32, kd: u32, z: u32) {
         let cs = DER + id;
         self.write(x, cs, kd, z);
@@ -1454,6 +1577,13 @@ impl Situation {
             cl.push(cs);
         }
         self.stamp.insert((x, cs, kd), self.t);
+    }
+    /// The most counted candidate patterns (diagnostics): (pattern, count).
+    pub fn sq_top_cands(&self, n: usize) -> Vec<(((u32, u32), (u32, u32)), u32)> {
+        let mut v: Vec<_> = self.sq_cand.iter().map(|(p, c)| (*p, *c)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v.truncate(n);
+        v
     }
     pub fn words_seen(&self) -> u64 {
         self.t

@@ -1,4 +1,4 @@
-# 36 · The forum's changes, in Rust: from 70% to 92% on the stories (2026-10-22)
+# 36 · The forum's changes, in Rust: from 70% to 95% on the stories (2026-10-22)
 
 *[All experiments](README.md)* · [← 35](35-axes-of-memory.md)
 
@@ -154,3 +154,36 @@ All of it is integer, and the judge is the next word.
 **What the open queries are:** many go through function-word or verb intermediates. Examples are "(class 929, kind .) then (class 1, kind office)" and "(class 0, kind moved) then (class 28, kind office)": "the latest place written after this word". They are paid only for what they contribute, so they earn their place. But they are recency buffers, not the clean "object → holder → place" chain.
 
 **Caveats:** the small set only. The constants are designed: the amounts, the 2,000-word trial, the opening count of 16, and the read budget of 4. A self-scaling price, staying open while a query's payoff per word beats the open set's average, would remove most of them.
+
+## A relative price, and letting the chain query through
+
+**The chain query.** The clean two-hop question is "object → its holder → the holder's place". The open queries seldom held it, so `SIT_SQ_FORCE=a,b` (a test switch) held one open from word 2,048. It is a pattern over the kinds of its values only: (any relation, kind person) then (any relation, kind place). With it open, two blocks showed up:
+- **The reader saw only the 8 newest slots.** The second hop from the holder read the person's 8 newest slots, and so did the query learner's own two-hop routes. "daniel picked up the key ." writes "picked", "up", "." and "key" into daniel's slots and pushes "office" out of the list, so the chain kept a stale place.
+  - **Fix for open queries:** the second hop of an open query finds the newest value of its kind over all the intermediate's slots.
+  - **Fix for the reader (`--sit-kindfirst`):** the read list takes each kind's newest value before any kind's second newest.
+- **Two question forms gave the same question-form bits.** "who has the X ?" and "where is the X ?" share the words 1 and 3 back, so once the chain answered "where is the X ?" the learner used it for "who has" too: who-has fell from 87.5% to 65%. The fix, `--sit-qform14`, adds 4 query bits hashed from the words 1 and 4 back.
+
+| Seed 0 | All | Where-object | Who-has |
+|---|---|---|---|
+| chain forced open, before the fixes | 89.9% | 59.3% | 83.8% |
+| + second hop over all slots | 89.4% | 74.1% | 65.0% |
+| + `--sit-qform14` | **93.3%** | 74.1% | 92.5% |
+
+**With the reader fixed, the system finds the chain by itself.** The query learner's two-hop route reaches the holder's place once it is in view. Self-tuned open queries (cap 64) then add the cases where the holder moved since. Three seeds:
+
+| Configuration (query learner + frame-code pooler) | All, seeds 0 / 1 / 2 | Mean | Where-object | Mean open | Upkeep per word |
+|---|---|---|---|---|---|
+| open queries, before (previous section) | 91.8 / 91.4 / 92.6% | 91.9% | 60–64% | 4.5–4.8 | 2.7 |
+| `--sit-kindfirst`, no open queries | 92.1 / 91.8 / 93.6% | 92.5% | 68–74% | — | — |
+| `--sit-kindfirst --sit-qform14`, no open queries | 91.4 / 93.1 / 93.0% | 92.5% | 69–73% | — | — |
+| `--sit-kindfirst` + open queries | 94.0 / 94.5 / 96.0% | 94.8% | 73–83% | 2.6–2.7 | 1.5 |
+| **`--sit-kindfirst --sit-qform14` + open queries** | **93.6 / 95.8 / 95.8%** | **95.1%** | **77–83%** | **2.5–2.8** | **1.5** |
+| the same, relative price (`--sit-sq-price 1`) | 94.1 / 95.0 / 95.5% | 94.9% | 78–79% | 2.5–2.7 | 1.5 |
+| the same, either price (`--sit-sq-price 2`) | 94.0 / 95.5 / 96.1% | 95.2% | 77–83% | 2.4–2.7 | 1.5 |
+
+Open queries are `--sit-sq 64 --sit-sq-credit 1 --sit-sq-rank 1`. On seed 0, the where-object cases (`wo_cases.py`) went from 62% (previous section's cap 64) to 74% when the holder has not moved, and from 71% to 94% when the holder moved since.
+
+- **The read budget was the block, not the query machinery.** Fixing the reader alone gains 0.6 points over the best open-query result. Open queries on top add 2.3–2.6 points more, now with fewer open (about 2.6, against 4.8) and half the upkeep (1.5 per word, against 2.7).
+- **The relative price works as well as the fixed one.** With `--sit-sq-price 1`, a query past its trial closes when its net payoff per word is below the open set's average, compared by cross-multiplication. It reaches 94.9% against 95.1%, and the number open is the same. That removes the "below 0" threshold. The start balance, the credit amounts relative to upkeep, and the 2,000-word trial are still set by hand.
+- **`--sit-qform14` is within noise here** (+0.3 points with open queries, 0.0 without). It was needed when the chain was forced open.
+- **Kind-level open queries chosen by count do not work yet** (`--sit-sq-kinds`, which counts the chains whose two hops were both the newest of their kind as a pattern over kinds). Seed 0 gave 90.9% with the reader fixed, with 7 open on average and 17 upkeep per word. The kind patterns that count the most answers run through function words: "(any, kind .) then (any, kind place)" is the latest place written anywhere. Their first hop matches nearly every fact, so each costs about 1 read or write per word. They open first, before the clean person → place chain, which only opened at word 23,104 of 24,659. Counting only the answers a pattern would have fixed (`--sit-sq-open 1`) is data-starved on this set: 2 to 10 counts per pattern, so almost nothing opens.

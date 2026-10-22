@@ -53,6 +53,8 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         live: flag(args, "--sit-live"),
         nroutes: g("--sit-nroutes", "0").parse().unwrap(),
         query: flag(args, "--sit-query"),
+        qform14: flag(args, "--sit-qform14"),
+        kindfirst: flag(args, "--sit-kindfirst"),
         replay: g("--sit-replay", "0").parse().unwrap(),
         fpool: flag(args, "--sit-fpool"),
         lookback: g("--sit-lookback", "0").parse().unwrap(),
@@ -61,6 +63,9 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         sq_mode: g("--sit-sq-mode", "0").parse().unwrap(),
         sq_credit: g("--sit-sq-credit", "0").parse().unwrap(),
         sq_rank: g("--sit-sq-rank", "0").parse().unwrap(),
+        sq_kinds: flag(args, "--sit-sq-kinds"),
+        sq_price: g("--sit-sq-price", "0").parse().unwrap(),
+        sq_open: g("--sit-sq-open", "0").parse().unwrap(),
         cred: g("--sit-cred", "2").parse().unwrap(),
         seed: g("--sit-seed", "0").parse().unwrap(),
     }
@@ -729,7 +734,12 @@ fn main() {
                     let words = x.words_seen().max(1);
                     eprintln!("open queries: opened {}, closed {}, mean open {:.2}, peak {}, upkeep {:.3} reads+writes per word", x.sq_opened, x.sq_closed, x.sq_open_sum as f64 / words as f64, x.sq_peak, x.sq_work as f64 / words as f64);
                     for o in x.open_queries() {
-                        eprintln!("  open query {}: ({}, kind {}) then ({}, kind {}), usefulness {}, credited {}, upkeep {}", o.id, o.p1.0, name(o.p1.1), o.p2.0, name(o.p2.1), o.util, o.credits, o.work);
+                        let cl = |c: u32| if c == u32::MAX - 1 { "any".to_string() } else { c.to_string() };
+                        eprintln!("  open query {}: ({}, kind {}) then ({}, kind {}), usefulness {}, credited {}, upkeep {}, opened at word {}", o.id, cl(o.p1.0), name(o.p1.1), cl(o.p2.0), name(o.p2.1), o.util, o.credits, o.work, o.opened_at);
+                    }
+                    for (p, n) in x.sq_top_cands(12) {
+                        let cl = |c: u32| if c == u32::MAX - 1 { "any".to_string() } else { c.to_string() };
+                        eprintln!("  candidate ({}, kind {}) then ({}, kind {}): held {} answers since last opened", cl(p.0 .0), name(p.0 .1), cl(p.1 .0), name(p.1 .1), n);
                     }
                 }
                 if x.cfg.lookback > 0 {
