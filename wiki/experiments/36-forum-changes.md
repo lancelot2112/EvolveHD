@@ -193,3 +193,79 @@ With 17 cases, the attribution of the moved cases is weak.
 - **The relative price works as well as the fixed one.** With `--sit-sq-price 1`, a query past its trial closes when its net payoff per word is below the pooled payoff per word of the open queries past their trial (their total net over their total age), compared by cross-multiplication. It reaches 94.9% against 95.1%, with about the same number open (2.6 against 2.7). That removes the "below 0" threshold. The start balance, the credit amounts relative to upkeep, and the 2,000-word trial are still set by hand.
 - **`--sit-qform14` is within noise here** (+0.2 points with open queries, per seed −0.4, +1.3 and −0.2; 0.0 without). It was needed when the chain was forced open.
 - **Kind-level open queries chosen by count do not work yet** (`--sit-sq-kinds`, which counts the chains whose two hops were both the newest of their kind as a pattern over kinds). Seed 0 gave 90.9% with the reader fixed, with 7 open on average and 17 upkeep per word. The kind patterns that count the most answers run through function words. The most counted is "the newest '.' value, then its newest place": the latest place written anywhere. Their first hop matches nearly every fact, so each costs about 13 reads and writes per word while open. They open first, before the clean person → place chain, which only opened at word 23,104 of 24,659. Counting only the answers a pattern would have fixed (`--sit-sq-open 1`) is data-starved on this set: at most 2 counts per relation pattern and 10 per kind pattern. Almost nothing opens: three kind patterns, all after word 24,192.
+
+## The full benchmark, a smaller weight table, and route choice without weights
+
+### The full benchmark
+
+`runs/exp36/full/syn10k` has 817,666 words, with 19,084 questions scored in the second half: 13,665 where-person, 2,813 where-object and 2,606 who-has. The best small-set configuration ran on seed 0 (`--sit-qform14 --sit-kindfirst --sit-sq 64 --sit-sq-credit 1 --sit-sq-rank 1`, script `runs/exp36/rqfull.sh`):
+
+| | Where-person | Where-object | Who-has | All | Wall time | Per word |
+|---|---|---|---|---|---|---|
+| full set, seed 0 | 96.2% | 51.4% | 95.7% | **89.5%** | 4,284 s (one core) | 5.2 ms |
+| small set, seed 0 (same configuration) | 97.9% | 76.5% | 87.5% | 93.6% | 40–60 s | about 2 ms |
+
+- **Where-object falls on the long stream** (51.4% against 77–83% on the small set). Where-person and who-has hold up.
+- **Open queries churn:** 1,642 opened and 1,627 closed, with 8.4 open on average (peak 22) and 3.7 upkeep per word.
+- **The per-word cost grows along the stream:** 5.2 ms against about 2 ms. Not yet profiled.
+- **The transformer's one-pass run on the full set was stopped** before it reported anything. The full-set comparison with a transformer is still open.
+
+### The query weights at 8 bits, sparse
+
+Only 3.8% of the dense 16-bit table (2,816 query bits × 4,096 features = 11.5M weights) is ever nonzero: 435,557 on seed 0. None ever leaves the 8-bit range. `--sit-qsparse` stores them three other ways (seed 0, open queries on):
+
+| `--sit-qsparse` | Layout | Bytes | All |
+|---|---|---|---|
+| 0 | dense, 16-bit | 23.1 MB | 93.6% |
+| 1 | hash table: 32-bit key, 8-bit weight, grown at 3/4 full | 5.2 MB | 93.6% (identical) |
+| 2 | per feature, a list of (query bit as 16 bits, weight as 8 bits); zero weights dropped | **2.2 MB** | 93.6% (identical) |
+| 3, 2^20 cells | superposed: every (query bit, feature) pair bound by a hash to one cell and a sign in one vector of 8-bit cells | 1 MB | 94.3% |
+| 3, 2^18 | the same | 256 KB | 93.6% |
+| 3, 2^16 | the same | 64 KB | 93.1% |
+| 3, 2^14 | the same | 16 KB | 91.3% |
+
+- **The list layout is bit-identical to the dense table.** Its predictions match byte for byte. A first version counted a query bit that two hashes land on only once; that scored 94.1 / 93.6 / 94.6% against 93.6 / 95.8 / 95.8%, so the double count matters.
+- **The superposed vector degrades slowly.** At 64 KB, 360 times smaller than the dense table, it loses half a point on seed 0. That is the association memory written holographically, with crosstalk between pairs that share a cell.
+- **For comparison,** the transformer has 426k float weights: 1.7 MB, or about 7 MB with Adam's state.
+
+### Route choice without weights: the question as a key in the store (`--sit-qslots`)
+
+- **The question is an entity.** It is keyed on its form, and its slots are keyed on (cue position, the cue word's kind, a route field). They hold route symbols the way a fact's slots hold words.
+- **The fields:** the number of hops; per hop the relation class, the value's kind and the recency rank; and three conjunctions (the two kinds together, and each hop's class with its kind).
+- **Choosing a route:** each candidate route's fields are matched against the slots by a phase-aligned dot product (unbinding), and the best total wins.
+- **Learning, only on a mistake:** the fields of the route that held the answer are written into the slots (Hebbian). The wrong route's differing fields are written with opposite phase (anti-Hebbian).
+- **No weight table is involved.** The question memory is its own ternary-phasor area of 65,536 cells, with each component clamped to ±7.
+
+Getting there, seed 0, without open queries (`--sit-qform14 --sit-kindfirst`; the weight table scores 91.4% here):
+
+| Change | All |
+|---|---|
+| question slots in the facts' own cells | 47.1% |
+| an area of their own | 54.0% |
+| keys that do not drift | 75.2% (78.5% with cells clamped at ±7) |
+| + conjunction fields | 81.9% |
+| **+ the form from the learned kinds of the last 4 words** (`--sit-qslot-kforms`) | **93.0%** |
+
+Three things made it work:
+- **Its own area.** Learning happens on every mispredicted word, and each mistake writes about 900 cells. Sharing the facts' cells overwrote the facts within a few hundred words.
+- **Keys that do not drift.** The store's keys drift on purpose: at every clause boundary, one of a key's 64 positions moves. That is how the episodic facts fade. The question slots are long-term memory and lost what they learned.
+- **The form from kinds.** The form was first the words 1, 3 and 4 back. In "what place is mary in ?" those are "?", "mary" and "is", so each person was a separate question learned from scratch. Built from the kinds of the last 4 words, it is one question. Function words are kinds of their own, so they keep their identity.
+
+Also tried, seed 0:
+- **No anti-Hebbian writes:** 75.2% against 81.9%.
+- **Cells clamped at ±31:** the same as ±7.
+- **Leaving out the class fields:** 83.7% before the kind forms, but 87.1% against 93.0% after.
+
+**Three seeds:**
+
+| Route choice | Open queries | All, seeds 0 / 1 / 2 | Mean | Who-has |
+|---|---|---|---|---|
+| weight table | no | 91.4 / 93.1 / 93.0% | 92.5% | 88–91% |
+| question slots | no | 93.0 / 86.9 / 91.6% | 90.5% | 60–96% |
+| weight table | yes | 93.6 / 95.8 / 95.8% | 95.1% | 88–96% |
+| question slots | yes | 95.0 / 88.8 / 91.3% | 91.7% | 58–96% |
+
+- **Without weights, it is close on two seeds and fails on who-has on the third.** On seed 1, who-has is 57.5–60%. The slots there settled on a verb-mediated route, "apple → the verb 'took' → the latest person who took anything", instead of the object's holder. A two-hop route has more fields than a one-hop one to collect positive evidence in, so a field-sum score favours it. Where-person is 94–98% in every seed.
+- **Next:** score each route by its fields relative to the route's length, or write the hop count as a conjunction with every field, so that one- and two-hop routes compete on equal terms.
+
+**Caveats:** seed 0 only, except the three-seed tables. The full benchmark is one seed of one configuration.

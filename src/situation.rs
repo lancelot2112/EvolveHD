@@ -148,6 +148,27 @@ pub struct SitCfg {
     /// 32-bit keys and 8-bit saturating weights (grown at 3/4 full). 2: per feature, a list of (query bit as 16 bits,
     /// weight as 8 bits), 3 bytes per nonzero weight; a weight that returns to 0 is dropped.
     pub qsparse: u32,
+    /// With --sit-qsparse 3: the query weights superposed in one vector of 2^qholo 8-bit cells. A (query bit, feature)
+    /// pair is bound to a cell and a sign by a hash; pairs that land together share the cell (crosstalk).
+    pub qholo: u32,
+    /// Route choice without weights: the question form (the words 1, 3 and 4 back) is an entity in the same store as
+    /// the facts. Its slots, keyed on (cue position, the cue word's kind, a route field), hold route symbols (number of
+    /// hops; per hop the relation class, the value's kind and the recency rank). A route is scored by how well its
+    /// fields match what the question's slots hold. On a mistake, the route that held the answer is written into the
+    /// slots (Hebbian) and the wrong route's differing fields are written with opposite phase (anti-Hebbian).
+    pub qslots: bool,
+    /// The write magnitude of the question slots (the facts use `mag`).
+    pub qslot_mag: i8,
+    /// The question slots' cell depth: each component is clamped to -c..c (1 = ternary, as the facts).
+    pub qslot_clamp: i8,
+    /// Which route fields the question slots use (bit i = field i: 0 hops, 1/4 class, 2/5 kind, 3/6 rank; 7 the two
+    /// kinds together, 8/9 each hop's class with its kind).
+    pub qslot_fields: u32,
+    /// Anti-Hebbian writes for the wrong route's differing fields.
+    pub qslot_anti: bool,
+    /// The question form from the learned kinds of the last 4 words (instead of the identities of the words 1, 3
+    /// and 4 back): "what place is mary in ?" and "what place is john in ?" are one question.
+    pub qslot_kforms: bool,
     /// The query code also carries 4 bits hashed from the words 1 and 4 back together ("?" ... "has" against "?" ...
     /// "is": the two question forms share the words 1 and 3 back).
     pub qform14: bool,
@@ -366,6 +387,11 @@ pub struct Situation {
     qw: Vec<i16>,                                   // the query learner: QD x NF signed 16-bit weights (dense)
     qs: SparseW,                                    // ... or the same weights sparse, 8-bit (--sit-qsparse 1)
     qr: RowW,                                       // ... or per feature, (bit, weight) lists (--sit-qsparse 2)
+    qh: Vec<i8>,                                    // ... or superposed in one vector of 8-bit cells (--sit-qsparse 3)
+    qform: u64,                                     // the current question form (--sit-qslots)
+    qre: Vec<i8>,                                   // the question slots' own ternary phasor store (an area of its own)
+    qim: Vec<i8>,
+    qroute: Vec<(usize, u32)>,                      // each route's (cue position, cue word's kind), aligned with qcands
     qbits: Vec<u32>,                                // the query code of the current prediction
     qcands: Vec<(Vec<u32>, u32, i64)>,             // its routes: (features, value, score), best first
     ring: Vec<(Vec<u32>, Vec<(Vec<u32>, u32)>, u32)>, // replayed mistakes: (query, routes (features, value), answer)
@@ -479,6 +505,11 @@ impl Situation {
             qw: if cfg.query && cfg.qsparse == 0 { vec![0; QD * NF] } else { vec![] },
             qs: SparseW::new(),
             qr: RowW::new(if cfg.query && cfg.qsparse == 2 { NF } else { 0 }),
+            qh: if cfg.query && cfg.qsparse == 3 { vec![0; 1 << cfg.qholo] } else { vec![] },
+            qform: 0,
+            qre: if cfg.qslots { vec![0; cfg.d] } else { vec![] },
+            qim: if cfg.qslots { vec![0; cfg.d] } else { vec![] },
+            qroute: vec![],
             qbits: vec![],
             qcands: vec![],
             ring: vec![],
@@ -1251,7 +1282,9 @@ impl Situation {
         f.iter()
             .map(|&fi| {
                 *cache.entry(fi).or_insert_with(|| {
-                    if self.cfg.qsparse == 2 {
+                    if self.cfg.qsparse == 3 {
+                        q.iter().map(|&b| { let (i, sg) = self.qbind(b, fi); sg * self.qh[i] as i64 }).sum()
+                    } else if self.cfg.qsparse == 2 {
                         self.qr.score(fi, &qset)
                     } else if self.cfg.qsparse == 1 {
                         q.iter().map(|&b| self.qs.get(b * NF as u32 + fi) as i64).sum()
@@ -1262,10 +1295,109 @@ impl Situation {
             })
             .sum()
     }
+    // ---- route choice without weights: the question as a key in the store (--sit-qslots) ----
+    /// The question form of a cue: the words 1, 3 and 4 back (not the entity between them).
+    fn qform_of(cue: &[u32]) -> u64 {
+        let w = |i: usize| cue.get(i).copied().unwrap_or(u32::MAX) as u64;
+        hash(hash(hash(w(0), 71), w(2)), w(3))
+    }
+    /// A route's fields as (field, symbol): the number of hops, then per hop the class, the kind and the rank.
+    fn route_fields(hops: &[(u32, u32, u32)]) -> [(u32, u32); 10] {
+        let none = (u32::MAX, u32::MAX, u32::MAX);
+        let h1 = hops[0];
+        let h2 = hops.get(1).copied().unwrap_or(none);
+        let sym = |f: u64, x: u32| (hash(f + 0xF1E1D, x as u64) & 0xFFFF_FFFF) as u32;
+        [
+            (0, sym(0, hops.len() as u32)),
+            (1, sym(1, h1.0)),
+            (2, sym(2, h1.1)),
+            (3, sym(3, h1.2.min(3))),
+            (4, sym(4, h2.0)),
+            (5, sym(5, h2.1)),
+            (6, sym(6, if h2.2 == u32::MAX { u32::MAX } else { h2.2.min(3) })),
+            // conjunctions: the two kinds; each hop's class with its kind
+            (7, sym(7, (hash(h1.1 as u64, h2.1 as u64) & 0xFFFF_FFFF) as u32)),
+            (8, sym(8, (hash(h1.0 as u64, h1.1 as u64) & 0xFFFF_FFFF) as u32)),
+            (9, sym(9, (hash(h2.0 as u64, h2.1 as u64) & 0xFFFF_FFFF) as u32)),
+        ]
+    }
+    /// The question slot's key: the form, the cue position, the cue kind and the field, hashed to K positions.
+    fn qslot_key(&self, form: u64, j: usize, ke: u32, field: u32) -> (Vec<u32>, Vec<u8>) {
+        // a stable key: no context drift and no clocks (this is long-term memory, unlike the episodic facts)
+        let (d, k) = (self.cfg.d as u64, self.cfg.k);
+        let base = hash(hash(form, j as u64 * 1_000_003 + ke as u64), field as u64 + 0xA11E);
+        let mut idx = Vec::with_capacity(k);
+        let mut ph = Vec::with_capacity(k);
+        for i in 0..k {
+            let h = hash(base, i as u64);
+            idx.push((h % d) as u32);
+            ph.push((h >> 40) as u8 & 3);
+        }
+        (idx, ph)
+    }
+    /// How strongly a slot holds a symbol: the phase-aligned sum over the slot's positions (-K..K, unbinding).
+    fn qslot_sim(&self, idx: &[u32], ph: &[u8], sym: u32) -> i64 {
+        idx.iter()
+            .zip(ph)
+            .map(|(&x, &kp)| {
+                let (a, b) = (self.qre[x as usize] as i64, self.qim[x as usize] as i64);
+                let (zr, zi) = match kp & 3 {
+                    0 => (a, b),
+                    1 => (b, -a),
+                    2 => (-a, -b),
+                    _ => (-b, a),
+                };
+                match self.vph(sym, x) {
+                    0 => zr,
+                    1 => zi,
+                    2 => -zr,
+                    _ => -zi,
+                }
+            })
+            .sum()
+    }
+    /// A route's score from the question's slots: the sum over its fields of how strongly each slot holds the field.
+    fn qslot_score(&self, j: usize, ke: u32, hops: &[(u32, u32, u32)], memo: &mut HashMap<(usize, u32, u32, u32), i64>) -> i64 {
+        let form = self.qform;
+        let mask = self.cfg.qslot_fields;
+        Self::route_fields(hops)
+            .iter()
+            .filter(|x| mask >> x.0 & 1 == 1)
+            .map(|&(f, sym)| {
+                *memo.entry((j, ke, f, sym)).or_insert_with(|| {
+                    let (idx, ph) = self.qslot_key(form, j, ke, f);
+                    self.qslot_sim(&idx, &ph, sym)
+                })
+            })
+            .sum()
+    }
+    /// Write a symbol into a question slot, with the given phase offset (0 = Hebbian, 2 = anti-Hebbian).
+    fn qslot_write(&mut self, form: u64, j: usize, ke: u32, field: u32, sym: u32, off: u8) {
+        let (idx, ph) = self.qslot_key(form, j, ke, field);
+        let (m, cl) = (self.cfg.qslot_mag, self.cfg.qslot_clamp);
+        if self.cfg.qslot_fields >> field & 1 == 0 {
+            return;
+        }
+        for (&x, &kp) in idx.iter().zip(&ph) {
+            let p = ((kp + self.vph(sym, x) + off) & 3) as usize;
+            let x = x as usize;
+            self.qre[x] = (self.qre[x] + m * DRE[p]).clamp(-cl, cl);
+            self.qim[x] = (self.qim[x] + m * DIM[p]).clamp(-cl, cl);
+        }
+    }
+
+    /// The cell and sign a (query bit, feature) pair is bound to in the superposed vector.
+    fn qbind(&self, b: u32, fi: u32) -> (usize, i64) {
+        let h = hash(b as u64 * NF as u64 + fi as u64, 0x5eed);
+        ((h as usize) & (self.qh.len() - 1), if (h >> 63) & 1 == 1 { 1 } else { -1 })
+    }
     fn qupdate(&mut self, q: &[u32], f: &[u32], d: i16) {
         for &b in q {
             for &fi in f {
-                if self.cfg.qsparse == 2 {
+                if self.cfg.qsparse == 3 {
+                    let (i, sg) = self.qbind(b, fi);
+                    self.qh[i] = self.qh[i].saturating_add((sg * d as i64) as i8);
+                } else if self.cfg.qsparse == 2 {
                     self.qr.add(fi, b as u16, d as i8);
                 } else if self.cfg.qsparse == 1 {
                     self.qs.add(b * NF as u32 + fi, d as i8);
@@ -1279,6 +1411,13 @@ impl Situation {
     /// The query learner's candidates: every one- and two-hop route from the cue words' newest live slots, scored.
     fn query_recall(&mut self, cue: &[u32]) -> Vec<(u32, u32)> {
         let q = self.query_bits(cue);
+        self.qform = if self.cfg.qslot_kforms {
+            cue.iter().take(4).fold(0x9F0u64, |h, &u| hash(h, self.kk(u) as u64))
+        } else {
+            Self::qform_of(cue)
+        };
+        let mut memo: HashMap<(usize, u32, u32, u32), i64> = HashMap::new();
+        let mut qroute: Vec<(usize, u32)> = vec![];
         self.after_q = self.hist.last().map_or(false, |&u| self.boundary[u as usize] && self.mood[u as usize] >= 8);
         if self.cfg.sq_max > 0 && self.cfg.sq_mode > 0 && self.after_q {
             if self.qring.len() < 32 {
@@ -1311,21 +1450,24 @@ impl Situation {
             for (c, k, r) in self.newest_slots(e, 8) {
                 let Some((m, _)) = self.read_best(e, c, k, cue) else { continue };
                 let f1 = self.route_feats(j, e, &[(c, k, r)]);
-                let sc = self.qscore(&q, &f1, &mut cache);
+                let ke = self.kk(e);
+                let sc = if self.cfg.qslots { self.qslot_score(j, ke, &[(c, k, r)], &mut memo) } else { self.qscore(&q, &f1, &mut cache) };
                 if dbg {
                     desc.push(format!("j{}:{}>c{}k{}r{}={}", j, e, c, k, r, m));
                 }
                 cands.push((f1, m, sc, self.stamp_of(e, c, k), (c, k, u32::MAX, u32::MAX), (r, u32::MAX)));
+                qroute.push((j, ke));
                 for (c2, k2, r2) in self.newest_slots(m, 8) {
                     let mut ex = cue.to_vec();
                     ex.push(m);
                     let Some((v, _)) = self.read_best(m, c2, k2, &ex) else { continue };
                     let f2 = self.route_feats(j, e, &[(c, k, r), (c2, k2, r2)]);
-                    let sc = self.qscore(&q, &f2, &mut cache);
+                    let sc = if self.cfg.qslots { self.qslot_score(j, ke, &[(c, k, r), (c2, k2, r2)], &mut memo) } else { self.qscore(&q, &f2, &mut cache) };
                     if dbg {
                         desc.push(format!("j{}:{}>c{}k{}r{}={}>c{}k{}r{}={}", j, e, c, k, r, m, c2, k2, r2, v));
                     }
                     cands.push((f2, v, sc, self.stamp_of(e, c, k), (c, k, c2, k2), (r, r2)));
+                    qroute.push((j, ke));
                 }
             }
         }
@@ -1336,7 +1478,12 @@ impl Situation {
             let parts: Vec<String> = ix.iter().take(10).map(|&i| format!("{}[{}]", desc[i], cands[i].2)).collect();
             eprintln!("QROUTES {} {}", self.t, parts.join(" "));
         }
-        cands.sort_by(|a, b| b.2.cmp(&a.2).then(b.3.cmp(&a.3)));
+        // sort (stable), keeping each route's (cue position, cue kind) aligned
+        let mut order: Vec<usize> = (0..cands.len()).collect();
+        order.sort_by(|&a, &b| cands[b].2.cmp(&cands[a].2).then(cands[b].3.cmp(&cands[a].3)));
+        let mut slots: Vec<Option<(Vec<u32>, u32, i64, u64, Route, (u32, u32))>> = cands.into_iter().map(Some).collect();
+        let cands: Vec<(Vec<u32>, u32, i64, u64, Route, (u32, u32))> = order.iter().map(|&i| slots[i].take().unwrap()).collect();
+        self.qroute = order.iter().map(|&i| qroute[i]).collect();
         let lo = cands.iter().map(|x| x.2).min().unwrap_or(0);
         let props: Vec<(u32, u32)> = cands.iter().map(|x| ((x.2 - lo + 1).min(u32::MAX as i64) as u32, x.1)).collect();
         if std::env::var("SIT_QDBG").is_ok() && !cands.is_empty() {
@@ -1357,6 +1504,7 @@ impl Situation {
         let q = std::mem::take(&mut self.qbits);
         let hops = std::mem::take(&mut self.qhops);
         let ranks = std::mem::take(&mut self.qranks);
+        let qroute = std::mem::take(&mut self.qroute);
         if self.cfg.sq_max > 0 && self.after_q {
             // which two-hop patterns answered (candidates to open), and which open queries' slots did (credit), at
             // the answers to questions (after a boundary the mood counter has learned closes a question)
@@ -1401,6 +1549,38 @@ impl Situation {
                     }
                 }
             }
+        }
+        if self.cfg.qslots {
+            // Hebbian on a mistake: write the route that held the answer into the question's slots, and the wrong
+            // route's differing fields with opposite phase
+            if let Some(top) = cands.first() {
+                if top.1 != w {
+                    if let Some(gi) = cands.iter().position(|x| x.1 == w) {
+                        let route_of = |i: usize| -> Vec<(u32, u32, u32)> {
+                            let (h, r) = (hops[i], ranks[i]);
+                            let mut v = vec![(h.0, h.1, r.0)];
+                            if h.2 != u32::MAX {
+                                v.push((h.2, h.3, r.1));
+                            }
+                            v
+                        };
+                        let form = self.qform;
+                        let (gj, gk) = qroute[gi];
+                        let gf = Self::route_fields(&route_of(gi));
+                        for &(f, sym) in &gf {
+                            self.qslot_write(form, gj, gk, f, sym, 0);
+                        }
+                        let (tj, tk) = qroute[0];
+                        let tf = Self::route_fields(&route_of(0));
+                        for (i, &(f, sym)) in tf.iter().enumerate() {
+                            if self.cfg.qslot_anti && ((tj, tk) != (gj, gk) || gf[i].1 != sym) {
+                                self.qslot_write(form, tj, tk, f, sym, 2);
+                            }
+                        }
+                    }
+                }
+            }
+            return;
         }
         if let Some(top) = cands.first() {
             if top.1 != w {
@@ -1730,7 +1910,11 @@ impl Situation {
     /// The query weights' footprint (diagnostics): (stored entries, nonzero, at the 8-bit limit (sparse) or beyond 8
     /// bits (dense), bytes).
     pub fn qw_census(&self) -> (usize, usize, usize, usize) {
-        if self.cfg.qsparse == 2 {
+        if self.cfg.qsparse == 3 {
+            let nz = self.qh.iter().filter(|&&x| x != 0).count();
+            let sat = self.qh.iter().filter(|&&x| x == i8::MAX || x == i8::MIN).count();
+            (self.qh.len(), nz, sat, self.qh.len())
+        } else if self.cfg.qsparse == 2 {
             let (nz, sat) = self.qr.census();
             (nz, nz, sat, self.qr.bytes())
         } else if self.cfg.qsparse == 1 {
