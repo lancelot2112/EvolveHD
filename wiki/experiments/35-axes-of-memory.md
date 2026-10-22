@@ -217,3 +217,12 @@ First candidate of the answer's kind. For comparison, the Rust situation model s
 The seven primitives also lack a home for **time**: the shifting state and the per-slot write time did jobs nothing else did. They belong with Expand, as an expansion along time (time cells), with one exact cell per slot for when it was written.
 
 All single seed. E1 to E6 are synthetic; E7 is the small set only.
+
+## After review
+
+An expert forum reviewed these results (the document "The composite model: a forum's consensus"). Two conclusions above are withdrawn and one is narrowed:
+- **The E7 oracle read the wrong word.** It took the second word before the answer, which is "in" for "what place is X in ?" (227 of the 435 where-person questions). Its 65% "place in the slots" figure is not evidence of merged classes. The merge is shown instead by a class dump: one of the 30 Python classes holds *went/moved/walked to the* together with *got/grabbed/dropped/gave/handed the*. A symbolic replay shows the same: with classes separated, object → holder → place answers 95.1% of where-object questions, against 9.9% merged.
+- **"Time is where 16 bits belong" is withdrawn.** Both scripts compare write times only within one entity, so a small rank does the same job. Once a detach clears the old slot, no time is needed at all.
+- **"Superposition's advantage is tolerance" is narrowed.** At the same bits, a banded locality-sensitive hash with tags is 1.9–3× deeper than the ternary trace up to 25% cue noise.
+- **Questions are written as facts.** The model writes question clauses into memory like any other clause. Before a who-has question, the possessor slot holds the true holder 71% of the time; with read-only questions it would be 92.5% (replay).
+- **The kind-first score supplies the answer type.** Without it, who-has is 12.5%, not 37.5%.
