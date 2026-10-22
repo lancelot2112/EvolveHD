@@ -314,11 +314,11 @@ The second forum (Claude Docs "The forum, round two: navigating the whole book")
 
 **1. A leak in the open queries.** `sq_close` dropped a closed query's pointers but left its derived slots live (`occ`, `dcl`, `stamp`) in every entity it had touched. The live-class scan grows with them. A reopened pattern also got a new id, so its route weights started from zero.
 - **Fix:** closing purges the derived slots, and a pattern keeps its id across closes (`sq_pid`, remapped when classes are repooled).
-- **Effect:** on the small set the score does not change (93.6% on seed 0). On the full set the run takes 34 min instead of 71, about 2.5 ms per word.
+- **Effect:** on the small set the score barely changes (93.6% on seed 0; mean 95.1% → 94.9%). On the full set, with slow merges also on (there is no finished leak-fix-only full run), the run takes 34 min instead of 71, about 2.5 ms per word.
 
-**2. Places and objects merging into one kind.** The kinds are clustered on frame codes that keep the features at a quarter of a word's maximum count or more. After the halfway shift (word 402k), the taking verbs spread over picked up, got, grabbed, took, put down and handed. No "two words before" feature of an object then stays above the cut, so an object's code shrinks to the features it shares with places. The kind trace (`SIT_KDBG=1`, full set, seed 0) shows the objects joining the place kind one by one: book at word 406k, hat 410k, apple 416k, cup 418k, and the rest by 420k.
-- **Slow merges (`--sit-kslow 3`).** Two established kinds merge only after 3 reclusters in a row propose it; splits stay free. This held on the small set but not on the full set: single words moving one at a time get past the guard, and the dilution is permanent.
-- **A lower cut for the kinds (`--sit-kshift 3`).** A feature counts at an eighth of the maximum, not a quarter, and only for clustering the kinds. A frame-counter simulation of the full stream (`scratchpad/kf/sim.py`) put all 8 objects in the places' cluster from the halfway point at a quarter, and none at any point at an eighth. Building the two-back feature from the word's kind (`--sit-kframes`) and keeping only distinctive features also prevented the merge in simulation. But kind frames scored 91.9% on the small set (seed 0), because early words have no kind yet.
+**2. Places and objects merging into one kind.** The kinds are clustered on frame codes that keep the features at a quarter of a word's maximum count or more. After the halfway shift (word 402k), the verbs before an object spread over picked up, got, grabbed, took, put down, dropped, gave and handed. No "two words before" feature of an object then stays above the cut, so an object's code shrinks to the features it shares with places. The kind trace (`SIT_KDBG=1`, full set, seed 0, in the run with slow merges on) shows the objects joining the place kind: book at word 406k, hat 410k, apple 416k, cup 418k; then football, key, milk and pen together at 420k, as two pairs that had split off the object kind from 408k. Brief earlier joins reverted within 2–10k words (hat at 30k, cup between 74k and 350k, milk at 148k, book at 396k), and after 420k the place kind held 6–8 objects.
+- **Slow merges (`--sit-kslow 3`).** Two established kinds merge only after 3 reclusters in a row propose it; splits stay free. On the small set this raised the score (below), though book and key still sat with the places. On the full set it did not hold: single words moving one at a time get past the guard, the split-off pairs then passed the 3-in-a-row test, and the dilution is permanent.
+- **A lower cut for the kinds (`--sit-kshift 3`).** A feature counts at an eighth of the maximum, not a quarter, and only for clustering the kinds. A frame-counter simulation of the full stream (`scratchpad/kf/sim.py`, sampled at each sixteenth) put 3 objects in the places' cluster at the halfway sample and 7–8 of the 8 from word ~460k on at a quarter, and none at any sample at an eighth. Either building the two-back feature from the word's kind or keeping only distinctive features also prevented the merge in simulation. But the simulation gave every word its final kind from word 0. In the real run, kind frames (`--sit-kframes`) scored 91.9% on the small set (seed 0), because early words have no kind yet. The distinctive-features variant was only simulated.
 
 **Small set** (open queries, kind-first reads, 8-bit lists; 3 seeds):
 
@@ -329,7 +329,7 @@ The second forum (Claude Docs "The forum, round two: navigating the whole book")
 | leak fix + slow merges | 95.1 / 96.5 / 97.3% | 96.3% | 82–86% |
 | leak fix + slow merges + lower cut | 95.3 / 95.8 / 95.6% | 95.6% | 80–84% |
 
-With the lower cut, the small-set kinds come out exactly as places, objects (book and key included) and people.
+With the lower cut, the small set's places, objects (book and key included) and people come out exactly; the verb kinds mix motion and taking verbs ("went walked picked got took dropped put | moved travelled grabbed gave").
 
 **Full benchmark** (817,666 words, 19,084 questions, seed 0):
 
@@ -340,7 +340,7 @@ With the lower cut, the small-set kinds come out exactly as places, objects (boo
 | **leak fix + slow merges + lower cut (weight table)** | **99.3%** | **90.0%** | **99.7%** | **98.0%** | 32 min |
 | the same, weight-free (question slots) | 96.3% | 89.6% | 97.2% | 95.4% | 41 min |
 
-Where-object by eighth of the stream, the halfway shift falling between the 4th and 5th:
+Where-object by eighth of the questions (5,619 where-object answers over the whole stream, split into 8 equal groups). The shift at word 402,081 falls inside the 4th eighth (66 of its 702 answers come after it); the 4th/5th boundary is where scoring starts:
 
 | Run | 1st | 2nd | 3rd | 4th | 5th | 6th | 7th | 8th |
 |---|---|---|---|---|---|---|---|---|
@@ -350,6 +350,6 @@ Where-object by eighth of the stream, the halfway shift falling between the 4th 
 | + lower cut, weight-free | 71% | 85% | 86% | 79% | 85% | 89% | 91% | 94% |
 
 - **The halfway collapse was the kind merge.** With the kinds held apart, the second half is better than the first.
-- **The run with the merge still in it got only +5.4 points on where-object from the leak fix.** The forum's prediction for the leak fix alone (≥61%) was not met; its time prediction (≤2.5 ms per word) was.
-- **Open queries still churn on the long stream:** 1,808 opened and 1,776 closed, with 14.5 open on average (peak 37) and 3.6 upkeep per word.
-- **Single seed** on the full set.
+- **The run with the merge still in it (leak fix and slow merges) gained only +5.4 points on where-object.** The CPU seat's prediction for the leak fix (≥61%) was not met by that run; its time prediction (≤2.5 ms per word) was.
+- **Open queries still churn on the long stream** (the weight-table run with all fixes): 1,808 opened and 1,776 closed, with 14.5 open on average (peak 37) and 3.6 upkeep per word.
+- **Single seed** on the full set. The wall times come from a 2-core machine with two runs overlapping for most of each, so treat small differences in time loosely.
