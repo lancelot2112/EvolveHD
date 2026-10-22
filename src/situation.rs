@@ -107,6 +107,18 @@ pub struct SitCfg {
     pub k: usize,
     pub mag: i8,
     pub cue: usize,
+    /// The cue reaches back to the start of the clause (the last boundary before it), at least `cue` words and at most
+    /// 12: "what did X find in chapter twenty two ?" then has X in view. 0 = the last `cue` words only.
+    pub cue_clause: bool,
+    /// Long-term heads: an exact newest-wins table of committed facts, (entity, relation class, value kind) -> (value,
+    /// time), that never drifts (symbols, not superposed vectors). Its entries join the route candidates as one-hop
+    /// routes with a "long-term" source feature, so the query learner learns when to read them.
+    pub heads: bool,
+    /// Heads keyed by the exact relation path ("owns the" / "got the"), not the pooled class: only an exact
+    /// restatement overwrites a durable fact. All of an entity's heads are offered (up to 24), ranked within kind.
+    pub heads_path: bool,
+    /// With heads_path: the newest heads offered per value kind (8 by default), up to 48 in all.
+    pub heads_per_kind: u32,
     pub win: usize,
     pub ntop: usize,
     pub pool: f64,
@@ -424,6 +436,9 @@ pub struct Situation {
     qr: RowW,                                       // ... or per feature, (bit, weight) lists (--sit-qsparse 2)
     qh: Vec<i8>,                                    // ... or superposed in one vector of 8-bit cells (--sit-qsparse 3)
     qform: u64,                                     // the current question form (--sit-qslots)
+    heads_tab: HashMap<(u32, u32, u32), (u32, u64, u32)>, // --sit-heads: (entity, path or class, kind) -> (value, time, class)
+    heads_of: HashMap<u32, Vec<(u32, u32)>>,       // entity -> its head keys (path or class, kind)
+    bufp: Vec<u32>,                                 // the exact path of each buffered binding (aligned with buf)
     qre: Vec<i8>,                                   // the question slots' own ternary phasor store (an area of its own)
     qim: Vec<i8>,
     qroute: Vec<(usize, u32)>,                      // each route's (cue position, cue word's kind), aligned with qcands
@@ -556,6 +571,9 @@ impl Situation {
             qr: RowW::new(if cfg.query && cfg.qsparse == 2 { NF } else { 0 }),
             qh: if cfg.query && cfg.qsparse == 3 { vec![0; 1 << cfg.qholo] } else { vec![] },
             qform: 0,
+            heads_tab: HashMap::new(),
+            bufp: vec![],
+            heads_of: HashMap::new(),
             qre: if cfg.qslots { vec![0; cfg.d] } else { vec![] },
             qim: if cfg.qslots { vec![0; cfg.d] } else { vec![] },
             qroute: vec![],
@@ -992,6 +1010,28 @@ impl Situation {
         for ((e, c), ks) in occ {
             if c >= COMP || map.get(&c) == Some(&c) {
                 self.occ.insert((e, c), ks);
+            }
+        }
+        if self.cfg.heads {
+            // the heads follow their classes (the newer entry wins where two classes merge)
+            let hd = std::mem::take(&mut self.heads_tab);
+            for ((e, key, k), (v, t, c)) in hd {
+                // a path key stays (whatever happens to its class); a class key follows its class
+                let c2 = match map.get(&c) {
+                    Some(&c2) => c2,
+                    None if key & 0x8000_0000 != 0 => c,
+                    None => continue,
+                };
+                let key2 = if key & 0x8000_0000 != 0 { key } else { c2 };
+                let ent = self.heads_tab.entry((e, key2, k)).or_insert((v, t, c2));
+                if t > ent.1 {
+                    *ent = (v, t, c2);
+                }
+            }
+            self.heads_of.clear();
+            let keys: Vec<(u32, u32, u32)> = self.heads_tab.keys().copied().collect();
+            for (e, c, k) in keys {
+                self.heads_of.entry(e).or_default().push((c, k));
             }
         }
         let stamp = std::mem::take(&mut self.stamp);
@@ -1656,6 +1696,51 @@ impl Situation {
             if !self.seen[e as usize] {
                 continue;
             }
+            if self.cfg.heads {
+                // long-term heads: the newest two per value kind, ranked within kind, newest first
+                let mut hs: Vec<(u64, u32, u32, u32, u32)> = self
+                    .heads_of
+                    .get(&e)
+                    .map(|v| {
+                        v.iter()
+                            .filter_map(|&(key, k)| {
+                                // the value's kind as it is now (kinds settle after a head is written)
+                                self.heads_tab.get(&(e, key, k)).map(|&(val, t, c)| (t, c, if self.cfg.heads_path { self.kk(val) } else { k }, val, key))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let (per_kind, cap) = if self.cfg.heads_path { (self.cfg.heads_per_kind, 48) } else { (2, 8) };
+                hs.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+                let mut seen_k: HashMap<u32, u32> = HashMap::new();
+                let mut taken = 0;
+                for (t, c, k, val, key) in hs {
+                    let r = seen_k.entry(k).or_insert(0);
+                    let rr = *r;
+                    *r += 1;
+                    if rr >= per_kind || cue.contains(&val) {
+                        continue;
+                    }
+                    let mut f1 = self.route_feats(j, e, &[(c, k, rr)]);
+                    f1.push(Self::fid(41, 1, 0)); // the source: long-term heads
+                    f1.push(Self::fid(42, k as u64, rr.min(7) as u64));
+                    f1.push(Self::fid(43, j as u64, c as u64));
+                    if self.cfg.heads_path {
+                        f1.push(Self::fid(44, key as u64, 0)); // the exact relation path ("found the" is not "got the")
+                    }
+                    let ke = self.kk(e);
+                    let sc = if self.cfg.qslots { self.qslot_score(j, ke, &[(c, k, rr)], &mut memo) } else { self.qscore(&q, &f1, &mut cache) };
+                    if dbg {
+                        desc.push(format!("j{}:{}>H c{}k{}r{}={}", j, e, c, k, rr, val));
+                    }
+                    cands.push((f1, val, sc, t, (c, k, u32::MAX, u32::MAX), (rr, u32::MAX)));
+                    qroute.push((j, ke));
+                    taken += 1;
+                    if taken >= cap {
+                        break;
+                    }
+                }
+            }
             for (c, k, r) in self.newest_slots(e, 8) {
                 let Some((m, _)) = self.read_best(e, c, k, cue) else { continue };
                 let f1 = self.route_feats(j, e, &[(c, k, r)]);
@@ -2170,7 +2255,7 @@ impl Situation {
     /// The candidates for the next word: (value, weight), best first.
     pub fn recall(&mut self) -> Vec<(u32, f64)> {
         let ctx = self.ctx_key();
-        let cue: Vec<u32> = (0..self.cfg.cue.min(self.hist.len())).map(|j| self.hist[self.hist.len() - 1 - j]).collect();
+        let cue: Vec<u32> = self.cue_words();
         if self.cfg.query {
             let mut props = self.query_recall(&cue);
             let mut given: Option<Vec<(u32, u32)>> = None; // what is answered, when it differs from props
@@ -2423,10 +2508,29 @@ impl Situation {
         out
     }
 
+    /// The cue words, newest first: the last `cue` words, or with `cue_clause` back to the clause start (at least
+    /// `cue`, at most 12). The newest word may itself be a boundary ("?" before an answer); the walk stops at the
+    /// first boundary behind it.
+    fn cue_words(&self) -> Vec<u32> {
+        let n = self.hist.len();
+        let base = self.cfg.cue.min(n);
+        if !self.cfg.cue_clause {
+            return (0..base).map(|j| self.hist[n - 1 - j]).collect();
+        }
+        let mut out = vec![];
+        for j in 0..n.min(12) {
+            let u = self.hist[n - 1 - j];
+            if j > 0 && j >= base && self.boundary[u as usize] {
+                break;
+            }
+            out.push(u);
+        }
+        out
+    }
     /// Learn from word w (after it has been predicted).
     pub fn observe(&mut self, w: u32) {
         let ctx = self.ctx_key();
-        let cue: Vec<u32> = (0..self.cfg.cue.min(self.hist.len())).map(|j| self.hist[self.hist.len() - 1 - j]).collect();
+        let cue: Vec<u32> = self.cue_words();
         self.wcount[w as usize] += 1;
         // NoGo: every route proposed for this word that was wrong
         // (only the routes behind the answer actually given, the top proposal, are blamed: the bandit's rule,
@@ -2650,6 +2754,7 @@ impl Situation {
                     } else {
                         self.buf.push((w, c, 1, s));
                     }
+                    self.bufp.push((hash(p.iter().fold(0x9A7, |h, &x| hash(h, x as u64)), 77) & 0x7FFF_FFFF) as u32);
                 }
             }
             path.push(s);
@@ -2660,6 +2765,7 @@ impl Situation {
         if self.boundary[w as usize] || self.buf.len() > 64 {
             if self.cfg.mood && self.boundary[w as usize] && self.mood[w as usize] >= 8 {
                 self.buf.clear(); // a question: a cue, not a fact
+                self.bufp.clear();
                 self.dropped += 1;
             } else {
                 self.commit();
@@ -2721,7 +2827,8 @@ impl Situation {
     /// Write the buffered bindings of a clause into their slots.
     fn commit(&mut self) {
         let buf = std::mem::take(&mut self.buf);
-        for (x, c, dir, v) in buf {
+        let bufp = std::mem::take(&mut self.bufp);
+        for (bi, (x, c, dir, v)) in buf.into_iter().enumerate() {
             let kd = self.kk(v);
             if self.cfg.supersede {
                 let others: Vec<u32> = self.dcl.get(&(x, dir as u8)).cloned().unwrap_or_default();
@@ -2748,6 +2855,12 @@ impl Situation {
                 cl.push(c);
             }
             self.stamp.insert((x, c, kd), self.t);
+            if self.cfg.heads && c < COMP {
+                let key = if self.cfg.heads_path { bufp.get(bi).copied().unwrap_or(c) | 0x8000_0000 } else { c };
+                if self.heads_tab.insert((x, key, kd), (v, self.t, c)).is_none() {
+                    self.heads_of.entry(x).or_default().push((key, kd));
+                }
+            }
             if self.cfg.sq_max > 0 {
                 self.sq_on_fact(x, c, kd, v);
                 if self.cfg.sq_mode > 0 && c < COMP && self.seen[v as usize] {
