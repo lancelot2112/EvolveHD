@@ -62,6 +62,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         qslot_fields: g("--sit-qslot-fields", "1023").parse().unwrap(),
         qslot_anti: !flag(args, "--sit-qslot-noanti"),
         qslot_kforms: flag(args, "--sit-qslot-kforms"),
+        qslot_hopconj: flag(args, "--sit-qslot-hopconj"),
         kindfirst: flag(args, "--sit-kindfirst"),
         replay: g("--sit-replay", "0").parse().unwrap(),
         fpool: flag(args, "--sit-fpool"),

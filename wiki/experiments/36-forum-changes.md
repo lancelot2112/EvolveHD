@@ -203,16 +203,16 @@ With 17 cases, the attribution of the moved cases is weak.
 | | Where-person | Where-object | Who-has | All | Wall time | Per word |
 |---|---|---|---|---|---|---|
 | full set, seed 0 | 96.2% | 51.4% | 95.7% | **89.5%** | 4,284 s (one core) | 5.2 ms |
-| small set, seed 0 (same configuration) | 97.9% | 76.5% | 87.5% | 93.6% | 40–60 s | about 2 ms |
+| small set, seed 0 (same configuration) | 97.9% | 76.5% | 87.5% | 93.6% | 54 s | 2.2 ms |
 
 - **Where-object falls on the long stream** (51.4% against 77–83% on the small set). Where-person and who-has hold up.
 - **Open queries churn:** 1,642 opened and 1,627 closed, with 8.4 open on average (peak 22) and 3.7 upkeep per word.
-- **The per-word cost grows along the stream:** 5.2 ms against about 2 ms. Not yet profiled.
+- **The per-word cost grows along the stream:** 5.2 ms against 2.2 ms. Not yet profiled.
 - **The transformer's one-pass run on the full set was stopped** before it reported anything. The full-set comparison with a transformer is still open.
 
 ### The query weights at 8 bits, sparse
 
-Only 3.8% of the dense 16-bit table (2,816 query bits × 4,096 features = 11.5M weights) is ever nonzero: 435,557 on seed 0. None ever leaves the 8-bit range. `--sit-qsparse` stores them three other ways (seed 0, open queries on):
+Only 3.8% of the dense 16-bit table (2,816 query bits × 4,096 features = 11.5M weights) is nonzero at the end of the run: 435,557 on seed 0. None ever leaves the 8-bit range. `--sit-qsparse` stores them three other ways (seed 0, open queries on):
 
 | `--sit-qsparse` | Layout | Bytes | All |
 |---|---|---|---|
@@ -225,36 +225,39 @@ Only 3.8% of the dense 16-bit table (2,816 query bits × 4,096 features = 11.5M 
 | 3, 2^14 | the same | 16 KB | 91.3% |
 
 - **The list layout is bit-identical to the dense table.** Its predictions match byte for byte. A first version counted a query bit that two hashes land on only once; that scored 94.1 / 93.6 / 94.6% against 93.6 / 95.8 / 95.8%, so the double count matters.
-- **The superposed vector degrades slowly.** At 64 KB, 360 times smaller than the dense table, it loses half a point on seed 0. That is the association memory written holographically, with crosstalk between pairs that share a cell.
-- **For comparison,** the transformer has 426k float weights: 1.7 MB, or about 7 MB with Adam's state.
+- **The superposed vector degrades slowly.** At 64 KB, about 350 times smaller than the dense table, it loses half a point on seed 0. That is the association memory written holographically, with crosstalk between pairs that share a cell.
+- **For comparison,** the transformer has 426k float weights: 1.7 MB, about 5 MB with Adam's two moments, or about 7 MB counting gradients.
 
 ### Route choice without weights: the question as a key in the store (`--sit-qslots`)
 
 - **The question is an entity.** It is keyed on its form, and its slots are keyed on (cue position, the cue word's kind, a route field). They hold route symbols the way a fact's slots hold words.
 - **The fields:** the number of hops; per hop the relation class, the value's kind and the recency rank; and three conjunctions (the two kinds together, and each hop's class with its kind).
 - **Choosing a route:** each candidate route's fields are matched against the slots by a phase-aligned dot product (unbinding), and the best total wins.
-- **Learning, only on a mistake:** the fields of the route that held the answer are written into the slots (Hebbian). The wrong route's differing fields are written with opposite phase (anti-Hebbian).
-- **No weight table is involved.** The question memory is its own ternary-phasor area of 65,536 cells, with each component clamped to ±7.
+- **Learning, only on a mistake** where some candidate held the answer: the fields of the route that held it are written into the slots (Hebbian). The wrong route's fields are written with opposite phase (anti-Hebbian): only the fields that differ when both routes have the same cue position and cue kind, and all 10 otherwise.
+- **Every route has the same 10 fields.** A one-hop route's hop-2 fields, and the conjunctions that involve hop 2, carry a fixed "none" symbol.
+- **No weight table is involved.** The question memory is its own phasor area of 65,536 cells, each component clamped to ±1 (ternary, as the facts) or ±7.
 
 Getting there, seed 0, without open queries (`--sit-qform14 --sit-kindfirst`; the weight table scores 91.4% here):
 
 | Change | All |
 |---|---|
-| question slots in the facts' own cells | 47.1% |
+| question slots in the facts' own cells (an earlier build; the code now always uses a separate area) | 47.1% |
 | an area of their own | 54.0% |
-| keys that do not drift | 75.2% (78.5% with cells clamped at ±7) |
+| keys that do not drift (cells at ±1) | 75.2% |
+| cells clamped at ±7 (all rows below) | 78.5% |
 | + conjunction fields | 81.9% |
 | **+ the form from the learned kinds of the last 4 words** (`--sit-qslot-kforms`) | **93.0%** |
 
-Three things made it work:
-- **Its own area.** Learning happens on every mispredicted word, and each mistake writes about 900 cells. Sharing the facts' cells overwrote the facts within a few hundred words.
-- **Keys that do not drift.** The store's keys drift on purpose: at every clause boundary, one of a key's 64 positions moves. That is how the episodic facts fade. The question slots are long-term memory and lost what they learned.
+Four things made it work:
+- **Its own area.** Learning happens on every mispredicted word, and each mistake makes 640–1,280 cell writes (10 fields × 64 positions, Hebbian, plus anti-Hebbian). Sharing the facts' cells overwrote the facts within a few hundred words.
+- **Keys that do not drift.** The store's keys drift on purpose: at every learned boundary (".", "?", "is"), one of a key's 64 positions moves. That is how the episodic facts fade. The question slots are long-term memory and lost what they learned.
+- **Conjunction fields** (+3.4 points): the two kinds together, and each hop's class with its kind.
 - **The form from kinds.** The form was first the words 1, 3 and 4 back. In "what place is mary in ?" those are "?", "mary" and "is", so each person was a separate question learned from scratch. Built from the kinds of the last 4 words, it is one question. Function words are kinds of their own, so they keep their identity.
 
 Also tried, seed 0:
 - **No anti-Hebbian writes:** 75.2% against 81.9%.
 - **Cells clamped at ±31:** the same as ±7.
-- **Leaving out the class fields:** 83.7% before the kind forms, but 87.1% against 93.0% after.
+- **Leaving out the class fields** (fields 1, 4, 8 and 9, keeping the hops, kinds, ranks and the two kinds together): 83.7% against 81.9% before the kind forms, a gain; 87.1% against 93.0% after, a loss.
 
 **Three seeds:**
 
@@ -265,7 +268,8 @@ Also tried, seed 0:
 | weight table | yes | 93.6 / 95.8 / 95.8% | 95.1% | 88–96% |
 | question slots | yes | 95.0 / 88.8 / 91.3% | 91.7% | 58–96% |
 
-- **Without weights, it is close on two seeds and fails on who-has on the third.** On seed 1, who-has is 57.5–60%. The slots there settled on a verb-mediated route, "apple → the verb 'took' → the latest person who took anything", instead of the object's holder. A two-hop route has more fields than a one-hop one to collect positive evidence in, so a field-sum score favours it. Where-person is 94–98% in every seed.
-- **Next:** score each route by its fields relative to the route's length, or write the hop count as a conjunction with every field, so that one- and two-hop routes compete on equal terms.
+- **Without open queries, it is close on seeds 0 and 2 (+1.6 and −1.4 points) and fails on who-has on seed 1** (57.5–60%). With open queries, it is behind on seeds 1 and 2. Where-person is 94–98% in every seed.
+- **Seed 1's failure:** the slots settled on a verb-mediated route, "apple → the verb 'took' → the latest person who took anything", instead of the object's holder. The direct one-hop route was a candidate but scored lower. Why is not yet diagnosed. One guess was that two-hop routes collect more evidence; both lengths have the same 10 fields, but the one-hop route's fixed "none" symbols may not be reinforced the way real symbols are.
+- **Tying every field's symbol to the hop count does not fix it** (`--sit-qslot-hopconj`, which keeps one- and two-hop evidence apart): 92.1 / 86.7 / 89.8% (mean 89.5%), with who-has at 90.0 / 70.0 / 66.2%.
 
 **Caveats:** seed 0 only, except the three-seed tables. The full benchmark is one seed of one configuration.

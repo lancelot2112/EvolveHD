@@ -169,6 +169,9 @@ pub struct SitCfg {
     /// The question form from the learned kinds of the last 4 words (instead of the identities of the words 1, 3
     /// and 4 back): "what place is mary in ?" and "what place is john in ?" are one question.
     pub qslot_kforms: bool,
+    /// Every route field's symbol also carries the route's number of hops (one- and two-hop routes keep their
+    /// evidence apart).
+    pub qslot_hopconj: bool,
     /// The query code also carries 4 bits hashed from the words 1 and 4 back together ("?" ... "has" against "?" ...
     /// "is": the two question forms share the words 1 and 3 back).
     pub qform14: bool,
@@ -1302,11 +1305,12 @@ impl Situation {
         hash(hash(hash(w(0), 71), w(2)), w(3))
     }
     /// A route's fields as (field, symbol): the number of hops, then per hop the class, the kind and the rank.
-    fn route_fields(hops: &[(u32, u32, u32)]) -> [(u32, u32); 10] {
+    fn route_fields(hops: &[(u32, u32, u32)], hopconj: bool) -> [(u32, u32); 10] {
         let none = (u32::MAX, u32::MAX, u32::MAX);
         let h1 = hops[0];
         let h2 = hops.get(1).copied().unwrap_or(none);
-        let sym = |f: u64, x: u32| (hash(f + 0xF1E1D, x as u64) & 0xFFFF_FFFF) as u32;
+        let salt = if hopconj { 0xF1E1D + 977 * hops.len() as u64 } else { 0xF1E1D };
+        let sym = |f: u64, x: u32| (hash(f + salt, x as u64) & 0xFFFF_FFFF) as u32;
         [
             (0, sym(0, hops.len() as u32)),
             (1, sym(1, h1.0)),
@@ -1360,7 +1364,7 @@ impl Situation {
     fn qslot_score(&self, j: usize, ke: u32, hops: &[(u32, u32, u32)], memo: &mut HashMap<(usize, u32, u32, u32), i64>) -> i64 {
         let form = self.qform;
         let mask = self.cfg.qslot_fields;
-        Self::route_fields(hops)
+        Self::route_fields(hops, self.cfg.qslot_hopconj)
             .iter()
             .filter(|x| mask >> x.0 & 1 == 1)
             .map(|&(f, sym)| {
@@ -1566,12 +1570,12 @@ impl Situation {
                         };
                         let form = self.qform;
                         let (gj, gk) = qroute[gi];
-                        let gf = Self::route_fields(&route_of(gi));
+                        let gf = Self::route_fields(&route_of(gi), self.cfg.qslot_hopconj);
                         for &(f, sym) in &gf {
                             self.qslot_write(form, gj, gk, f, sym, 0);
                         }
                         let (tj, tk) = qroute[0];
-                        let tf = Self::route_fields(&route_of(0));
+                        let tf = Self::route_fields(&route_of(0), self.cfg.qslot_hopconj);
                         for (i, &(f, sym)) in tf.iter().enumerate() {
                             if self.cfg.qslot_anti && ((tj, tk) != (gj, gk) || gf[i].1 != sym) {
                                 self.qslot_write(form, tj, tk, f, sym, 2);
