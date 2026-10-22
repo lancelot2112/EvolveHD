@@ -1,4 +1,4 @@
-# 36 · The forum's changes, in Rust: from 70% to 86% on the stories (2026-10-22)
+# 36 · The forum's changes, in Rust: from 70% to 92% on the stories (2026-10-22)
 
 *[All experiments](README.md)* · [← 35](35-axes-of-memory.md)
 
@@ -108,3 +108,48 @@ An arbiter decides which answer to give. It counts, per (question form, both sou
 - **Looking it up is only as good as the reader of the window, and that reader is weak.** Alone it gets 57–84%. It must learn offsets in raw text, which is slow: the transformer needed 2.5M training positions to reach 41%. Where the two disagree, the slots are right more often in all three seeds. The window helps only on where-object, and only on seed 0: 50% right against the slots' 19% there.
 - **So the net effect is small:** +0.5 to −1.7 points over the slots alone, across arbiter variants. A first arbiter keyed on the slots' margin and a two-word question form (90.8 / 88.8 / 86.2%) mixed up "who has the X ?" with "where is the X ?". One pool scored by the shared weights overused the window (85.1 / 83.6%).
 - **What would make it pay:** a better window reader (the next step), or answering "unknown" on disagreement. Answering only when the two agree would give about 97% right on 56–79% of the questions.
+
+## Holding many questions open, and letting the system choose how many (`--sit-sq N`)
+
+An **open query** is a two-hop pattern held answered while reading. Written as (class, kind) then (class, kind), an example is "an object's getter, then the getter's place". Each open query has a derived slot per entity:
+- **First-hop fact:** a fact that matches the first hop moves the entity's pointer and refreshes its slot.
+- **Second-hop fact:** a fact that matches the second hop refreshes every entity pointing to that fact's subject. "fred went to the kitchen" moves every object fred holds.
+- **Reading:** the query learner reads derived slots like any other.
+
+`N` is only a ceiling. How many are open is decided by each query's integer balance:
+- **The balance:** it starts at 512 and pays 1 per read or write it does. It gets credit when it helps, and loses 64 when an answer given through its slot was wrong.
+- **Closing:** a query closes when its balance is below 0 after a 2,000-word trial.
+- **Opening:** every 64 words, the best candidate opens if there is room.
+
+All of it is integer, and the judge is the next word.
+
+**Three changes made it work:**
+- **Contribution credit (`--sit-sq-credit 1`).** A query is paid +32 when its slot gave the right answer and +16 when the answer given was wrong but its slot held the right one. It gets nothing when another route answered right anyway. Before, any query whose slot happened to hold the answer was paid. Riders stayed open, and cap 64 fell to 88.6%.
+- **Attention to derived slots by balance (`--sit-sq-rank 1`).** An entity's reader sees at most 4 derived slots, now the 4 with the highest balance instead of the 4 newest. With many open, new trial queries had pushed the paying ones out of the reader's view. That is a capacity limit on the read side, not the write side.
+- **Which open (top-down, mode 0):** the two-hop patterns that held answers to questions at least 16 times.
+
+**Capacity sweep** (`--sit-sq-credit 1 --sit-sq-rank 1`, 3 seeds; "open" is averaged over every word read, including the first ~14k words before "?" is learned as a question boundary, when none are open):
+
+| Cap | All, seeds 0 / 1 / 2 | Mean | Where-person | Where-object | Who-has | Mean open | Peak open | Opened | Upkeep per word |
+|---|---|---|---|---|---|---|---|---|---|
+| none | 90.3 / 87.9 / 88.4% | 88.9% | 96.8–97.0% | 46–58% | 81–88% | — | — | — | — |
+| 1 | 88.9 / 89.6 / 90.3% | 89.6% | 96.6% | 54.7% | 86.7% | 0.38 | 1 | 5 | 0.30 |
+| 2 | 91.1 / 90.3 / 91.1% | 90.8% | 97.8% | 56.8% | 87.5% | 0.76 | 2 | 10 | 0.55 |
+| 4 | 90.9 / 90.8 / 90.9% | 90.9% | 97.9% | 56.0% | 87.9% | 1.5 | 4 | 16–17 | 0.78–0.87 |
+| 8 | 91.1 / 91.1 / 91.4% | 91.2% | 97.9% | 57.6% | 89.2% | 2.9 | 8 | 28–29 | 1.5–1.7 |
+| **16** | **91.8 / 91.4 / 92.6%** | **91.9%** | **98.0%** | **62.6%** | **88.7%** | **4.5–4.8** | **15–16** | **44–47** | **2.7** |
+| 64 (self-tuned) | 91.8 / 91.4 / 92.6% | 91.9% | 98.0% | 62.6% | 88.7% | 4.5–4.8 | 15–16 | 44–47 | 2.7 |
+
+- **The number open tunes itself.** Above 16 the cap never binds: cap 64 gives the same runs as cap 16, bit for bit. With room, the system holds about 5 on average over the run. Because none are open in the first ~14k words, that is very roughly 12 while queries are possible. It peaks at 15–16 while trials come and go, and closes about 32 of 44 opened.
+- **Accuracy grows with capacity and then stops.** From none to self-tuned the mean rises by 3 points (88.9 → 91.9%), mostly in where-object: 46–58% becomes 60–64%. That is the two-hop question the open queries keep answered.
+- **The price grows linearly.** Upkeep is about 0.55 reads and writes per word per open query on average. The best setting costs 2.7 per word.
+- **Without the two fixes, more capacity hurt.** Seed 0 was 91.1% at cap 4 and 88.6% at cap 64.
+
+**Letting the input drive which queries open** (modes 1 and 2, cap 64, 3 seeds):
+- **Mode 1:** every committed fact proposes the two-hop chains starting from it (counted). The higher level then ranks the proposals: the chain's route features summed under the learned query weights, over the last 32 question codes. This gave **86.4 / 83.4 / 89.1%**, with 12–37 open on average, 136–249 opened, and 6–9 upkeep per word. The query weights are trained to choose what to *read*, and they turned out to be a poor judge of what is worth *holding*. They rank chains ending in "to", "?" and "." highly, so the set churns.
+- **Mode 2:** as mode 1, but a chain must also have held 4 answers. This gave **89.6 / 87.2 / 90.6%**, with about 9 open. That is better than mode 1 but below top-down choice.
+- **So for now:** the input drives attention at *read* time. Each word's query, built from the last 4 words, chooses among the open queries' slots and the facts. Which questions to *hold* is chosen by what has answered questions. A bottom-up proposer would need a judge trained for holding, for instance the credit itself fed back to the proposals' features.
+
+**What the open queries are:** many go through function-word or verb intermediates. Examples are "(class 929, kind .) then (class 1, kind office)" and "(class 0, kind moved) then (class 28, kind office)": "the latest place written after this word". They are paid only for what they contribute, so they earn their place. But they are recency buffers, not the clean "object → holder → place" chain.
+
+**Caveats:** the small set only. The constants are designed: the amounts, the 2,000-word trial, the opening count of 16, and the read budget of 4. A self-scaling price, staying open while a query's payoff per word beats the open set's average, would remove most of them.
