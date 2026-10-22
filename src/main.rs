@@ -64,6 +64,8 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         qslot_kforms: flag(args, "--sit-qslot-kforms"),
         qslot_hopconj: flag(args, "--sit-qslot-hopconj"),
         curious: flag(args, "--sit-curious"),
+        kframes: flag(args, "--sit-kframes"),
+        kslow: g("--sit-kslow", "0").parse().unwrap(),
         curious_coarse: flag(args, "--sit-curious-coarse"),
         curious_practice: flag(args, "--sit-curious-practice"),
         curious_num: g("--sit-curious-bar", "1/2").split('/').next().unwrap().parse().unwrap(),

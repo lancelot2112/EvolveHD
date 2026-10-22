@@ -178,6 +178,12 @@ pub struct SitCfg {
     /// margins, whether the two agree), and answer nothing ("unknown") if that source has not been right often
     /// enough either. "Often enough": right x den > num x n, with a prior of 1 right in 2.
     pub curious: bool,
+    /// The "two words before" frame feature uses the kind of the word two back, not its identity: ⟨kind, word before⟩.
+    /// Synonyms (picked up / grabbed / took …) then count as one frame instead of diluting it.
+    pub kframes: bool,
+    /// Slow merges: two established kinds (each with at least 2 members) merge only after `kslow` reclusters in a row
+    /// propose it; until then the proposed cluster is split back by the old kinds (0 = merge at once). Splits are free.
+    pub kslow: u32,
     pub curious_num: u32,
     /// The trust counts for the two sources keyed on (form, agree) only, not the margins too.
     pub curious_coarse: bool,
@@ -441,6 +447,8 @@ pub struct Situation {
     sq_ptr: HashMap<(u32, u32), u32>,               // (query id, entity x) -> the intermediate m it points to
     sq_rev: HashMap<(u32, u32), Vec<u32>>,          // (query id, m) -> the entities pointing to m
     sq_next: u32,
+    sq_pid: HashMap<((u32, u32), (u32, u32)), u32>, // a pattern's id, kept across closes (its derived class and weights)
+    kmerge: HashMap<(u32, u32), u32>,               // slow merges: proposals in a row per pair of old kinds
     pub sq_work: u64,                               // maintenance reads and writes
     pub sq_open_sum: u64,                           // open queries summed over words (for the mean)
     pub sq_peak: usize,                             // the most open at once
@@ -569,6 +577,8 @@ impl Situation {
             sq_ptr: HashMap::new(),
             sq_rev: HashMap::new(),
             sq_next: 0,
+            sq_pid: HashMap::new(),
+            kmerge: HashMap::new(),
             sq_work: 0,
             sq_open_sum: 0,
             sq_peak: 0,
@@ -926,6 +936,14 @@ impl Situation {
         for id in closing {
             self.sq_close(id);
         }
+        // the patterns' ids follow their classes
+        let mp = |c: u32| if c == ANY { Some(ANY) } else { map.get(&c).copied() };
+        let pid = std::mem::take(&mut self.sq_pid);
+        for (((a, ka), (b, kb)), id) in pid {
+            if let (Some(a2), Some(b2)) = (mp(a), mp(b)) {
+                self.sq_pid.entry(((a2, ka), (b2, kb))).or_insert(id);
+            }
+        }
         self.sq_cand.retain(|p, _| p.0 .0 == ANY);
         self.sq_in.clear();
         let hop = std::mem::take(&mut self.hop);
@@ -1042,6 +1060,50 @@ impl Situation {
                 leaders.push((w, c, vec![w]));
             }
         }
+        if self.cfg.kslow > 0 {
+            // slow merges: a cluster joining two or more established old kinds (2+ members each in it) is split back
+            // by old kind until the same merge has been proposed kslow reclusters in a row
+            let mut proposed: Vec<(u32, u32)> = vec![];
+            let mut out: Vec<(u32, Vec<bool>, Vec<u32>)> = vec![];
+            for (lw, code, ms) in leaders.into_iter() {
+                let mut by: HashMap<u32, Vec<u32>> = HashMap::new();
+                for &w in &ms {
+                    by.entry(self.kind[w as usize]).or_default().push(w);
+                }
+                let mut est: Vec<u32> = by.iter().filter(|(k, v)| **k != self.kn && v.len() >= 2).map(|(k, _)| *k).collect();
+                est.sort_unstable();
+                let mut ok = true;
+                for i in 0..est.len() {
+                    for j in i + 1..est.len() {
+                        let pr = (est[i], est[j]);
+                        proposed.push(pr);
+                        if self.kmerge.get(&pr).copied().unwrap_or(0) + 1 < self.cfg.kslow {
+                            ok = false;
+                        }
+                    }
+                }
+                if ok || est.len() < 2 {
+                    out.push((lw, code, ms));
+                } else {
+                    // split back: each established old kind keeps its members; the rest stay with the first
+                    let first = est[0];
+                    for (k, mut v) in by.into_iter() {
+                        if est.contains(&k) && k != first {
+                            v.sort_unstable();
+                            out.push((v[0], code.clone(), v));
+                        }
+                    }
+                    let rest: Vec<u32> = ms.iter().copied().filter(|w| !est.contains(&self.kind[*w as usize]) || self.kind[*w as usize] == first).collect();
+                    out.push((lw, code, rest));
+                }
+            }
+            let mut km: HashMap<(u32, u32), u32> = HashMap::new();
+            for pr in proposed {
+                km.insert(pr, self.kmerge.get(&pr).copied().unwrap_or(0) + 1);
+            }
+            self.kmerge = km; // proposals not repeated this time start again from zero
+            leaders = out;
+        }
         leaders.sort_by(|a, b| b.2.len().cmp(&a.2.len()).then(a.0.cmp(&b.0)));
         let mut used: Vec<u32> = vec![];
         let mut newk = self.kind.clone();
@@ -1063,6 +1125,11 @@ impl Situation {
             }
         }
         self.kind = newk;
+        if std::env::var("SIT_KDBG").is_ok() {
+            let mut g: Vec<String> = leaders.iter().filter(|l| l.2.len() >= 2).map(|l| format!("{:?}", l.2)).collect();
+            g.sort();
+            eprintln!("KDBG {} kinds of 2+: {}", self.t, g.join(" "));
+        }
         self.ksize.clear();
         for w in 0..self.nw {
             if self.wcount[w] > 0 {
@@ -1839,8 +1906,16 @@ impl Situation {
             if let Some(p) = best {
                 self.sq_cand.insert(p, 0);
                 self.sq_in.remove(&p);
-                let id = self.sq_next;
-                self.sq_next += 1;
+                // a pattern keeps its id across closes, so its derived class (and the weights learned on it) return
+                let id = match self.sq_pid.get(&p) {
+                    Some(&id) => id,
+                    None => {
+                        let id = self.sq_next;
+                        self.sq_next += 1;
+                        self.sq_pid.insert(p, id);
+                        id
+                    }
+                };
                 self.sq.push(OpenQuery { id, p1: p.0, p2: p.1, util: 512, credits: 0, work: 0, opened_at: t });
                 self.sq_opened += 1;
             }
@@ -1891,6 +1966,14 @@ impl Situation {
         self.sq.retain(|o| o.id != id);
         self.sq_ptr.retain(|k, _| k.0 != id);
         self.sq_rev.retain(|k, _| k.0 != id);
+        // purge its derived slots from every entity: a closed query's slots are no longer live (they had stayed in
+        // the live lists, growing the per-word cost and filling the reader's derived budget with stale values)
+        let cs = DER + id;
+        self.occ.retain(|k, _| k.1 != cs);
+        self.stamp.retain(|k, _| k.1 != cs);
+        for v in self.dcl.values_mut() {
+            v.retain(|&c| c != cs);
+        }
         self.sq_closed += 1;
     }
     /// A committed fact (x, class c, kind kd) = v, checked against every open query: it may move x's pointer (the
@@ -2455,7 +2538,8 @@ impl Situation {
             let u = self.hist[n - 1];
             self.frame_bump(w, Self::fb(1, u as u64));
             if n >= 2 {
-                let f = Self::fb(2, self.hist[n - 2] as u64 * 100_003 + u as u64);
+                let two = if self.cfg.kframes { (1u64 << 40) + self.kk(self.hist[n - 2]) as u64 } else { self.hist[n - 2] as u64 };
+                let f = Self::fb(2, two * 100_003 + u as u64);
                 self.frame_bump(w, f);
             }
             self.frame_bump(u, Self::fb(3, w as u64));
