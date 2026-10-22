@@ -1,4 +1,4 @@
-# 36 · The forum's changes, in Rust: from 70% to 95% on the stories (2026-10-22)
+# 36 · The forum's changes, in Rust: from 70% to 98% on the stories (2026-10-22)
 
 *[All experiments](README.md)* · [← 35](35-axes-of-memory.md)
 
@@ -307,3 +307,49 @@ Scored with `scripts/exp36/score_unknown.py`; "unknown" is written as no candida
   - coarse keys: 89.4 / 3.9 / 6.7%;
   - coarse keys with practice: 90.6 / 3.7 / 5.7%.
 - **What would make the lookup find answers:** a better window reader. When memory is sure, the window is right 73% of the time; when memory is unsure, only 44%.
+
+## Fixing the two bugs the second forum found
+
+The second forum (Claude Docs "The forum, round two: navigating the whole book") traced the full-benchmark drop and the slowdown to two bugs.
+
+**1. A leak in the open queries.** `sq_close` dropped a closed query's pointers but left its derived slots live (`occ`, `dcl`, `stamp`) in every entity it had touched. The live-class scan grows with them. A reopened pattern also got a new id, so its route weights started from zero.
+- **Fix:** closing purges the derived slots, and a pattern keeps its id across closes (`sq_pid`, remapped when classes are repooled).
+- **Effect:** on the small set the score does not change (93.6% on seed 0). On the full set the run takes 34 min instead of 71, about 2.5 ms per word.
+
+**2. Places and objects merging into one kind.** The kinds are clustered on frame codes that keep the features at a quarter of a word's maximum count or more. After the halfway shift (word 402k), the taking verbs spread over picked up, got, grabbed, took, put down and handed. No "two words before" feature of an object then stays above the cut, so an object's code shrinks to the features it shares with places. The kind trace (`SIT_KDBG=1`, full set, seed 0) shows the objects joining the place kind one by one: book at word 406k, hat 410k, apple 416k, cup 418k, and the rest by 420k.
+- **Slow merges (`--sit-kslow 3`).** Two established kinds merge only after 3 reclusters in a row propose it; splits stay free. This held on the small set but not on the full set: single words moving one at a time get past the guard, and the dilution is permanent.
+- **A lower cut for the kinds (`--sit-kshift 3`).** A feature counts at an eighth of the maximum, not a quarter, and only for clustering the kinds. A frame-counter simulation of the full stream (`scratchpad/kf/sim.py`) put all 8 objects in the places' cluster from the halfway point at a quarter, and none at any point at an eighth. Building the two-back feature from the word's kind (`--sit-kframes`) and keeping only distinctive features also prevented the merge in simulation. But kind frames scored 91.9% on the small set (seed 0), because early words have no kind yet.
+
+**Small set** (open queries, kind-first reads, 8-bit lists; 3 seeds):
+
+| Configuration | All, seeds 0 / 1 / 2 | Mean | Where-object |
+|---|---|---|---|
+| before the fixes | 93.6 / 95.8 / 95.8% | 95.1% | 77–83% |
+| leak fix | 93.6 / 95.3 / 95.8% | 94.9% | 75–82% |
+| leak fix + slow merges | 95.1 / 96.5 / 97.3% | 96.3% | 82–86% |
+| leak fix + slow merges + lower cut | 95.3 / 95.8 / 95.6% | 95.6% | 80–84% |
+
+With the lower cut, the small-set kinds come out exactly as places, objects (book and key included) and people.
+
+**Full benchmark** (817,666 words, 19,084 questions, seed 0):
+
+| Configuration | Where-person | Where-object | Who-has | All | Wall time |
+|---|---|---|---|---|---|
+| before (weight table) | 96.2% | 51.4% | 95.7% | 89.5% | 71 min |
+| leak fix + slow merges | 97.0% | 56.8% | 95.3% | 90.8% | 34 min |
+| **leak fix + slow merges + lower cut (weight table)** | **99.3%** | **90.0%** | **99.7%** | **98.0%** | 32 min |
+| the same, weight-free (question slots) | 96.3% | 89.6% | 97.2% | 95.4% | 41 min |
+
+Where-object by eighth of the stream, the halfway shift falling between the 4th and 5th:
+
+| Run | 1st | 2nd | 3rd | 4th | 5th | 6th | 7th | 8th |
+|---|---|---|---|---|---|---|---|---|
+| before | 73% | 83% | 84% | 75% | 49% | 52% | 47% | 57% |
+| leak fix + slow merges | 73% | 87% | 85% | 78% | 51% | 60% | 54% | 62% |
+| + lower cut | 74% | 85% | 86% | 78% | 88% | 89% | 89% | 94% |
+| + lower cut, weight-free | 71% | 85% | 86% | 79% | 85% | 89% | 91% | 94% |
+
+- **The halfway collapse was the kind merge.** With the kinds held apart, the second half is better than the first.
+- **The run with the merge still in it got only +5.4 points on where-object from the leak fix.** The forum's prediction for the leak fix alone (≥61%) was not met; its time prediction (≤2.5 ms per word) was.
+- **Open queries still churn on the long stream:** 1,808 opened and 1,776 closed, with 14.5 open on average (peak 37) and 3.6 upkeep per word.
+- **Single seed** on the full set.
