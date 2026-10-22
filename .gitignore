@@ -32,3 +32,4 @@ runs/
 /target-prof
 /target-fast
 /target-dev
+__pycache__/
