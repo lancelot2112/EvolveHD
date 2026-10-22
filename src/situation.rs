@@ -117,7 +117,8 @@ pub struct SitCfg {
     /// Heads keyed by the exact relation path ("owns the" / "got the"), not the pooled class: only an exact
     /// restatement overwrites a durable fact. All of an entity's heads are offered (up to 24), ranked within kind.
     pub heads_path: bool,
-    /// With heads_path: the newest heads offered per value kind (8 by default), up to 48 in all.
+    /// With heads_path: the newest heads offered per value kind of 3 or more members (8 by default), one per smaller
+    /// kind, up to 48 in all.
     pub heads_per_kind: u32,
     pub win: usize,
     pub ntop: usize,
@@ -1718,7 +1719,10 @@ impl Situation {
                     let r = seen_k.entry(k).or_insert(0);
                     let rr = *r;
                     *r += 1;
-                    if rr >= per_kind || cue.contains(&val) {
+                    // content kinds (3 or more members) offer up to per_kind heads; singleton kinds ("." "the" "to",
+                    // whose heads multiply with every distinct clause tail) offer their newest only
+                    let lim = if self.cfg.heads_path && self.ksize.get(&k).copied().unwrap_or(0) < 3 { 1 } else { per_kind };
+                    if rr >= lim || cue.contains(&val) {
                         continue;
                     }
                     let mut f1 = self.route_feats(j, e, &[(c, k, rr)]);

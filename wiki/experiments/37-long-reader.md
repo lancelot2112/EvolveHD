@@ -60,7 +60,7 @@ Chance is about 1 in 12 for places and objects, 1 in 24 for people.
 
 | # | Experiment | Prediction |
 |---|---|---|
-| 0 | The scorer: echo distance, recall@8, newest-find baseline | Done (above) |
+| 0 | The scorer: echo distance, recall@8, newest-find baseline | Done |
 | 1 | The whole question clause as the cue, from the last boundary to "?" | Found at 8–127 from 1.7% to ≥45–60%; home and owner within 3 points |
 | 2 | A clause log of symbols (10–24 bytes per clause, posting lists, keys made from ids at read time, never drifting) with newest-wins heads per (entity, relation) as route candidates; no hierarchy | Home and owner ≥85% in every bucket, 64k+ within 5 points of 128–1k, by echo distance too; found about 50% and flat; local within 1 point |
 | 3 | Durable relations kept apart from changing ones, with persistence learned per relation class | Owner at 8–1k from 24–33% to ≥85% |
@@ -76,6 +76,42 @@ If home at 64k+ stays under 70% after step 2, the limit is route credit rather t
 - **Consolidate into a stable store, or read the log directly.**
 - **How labels are matched:** hash, FM-index, trie, or the oldest occurrence of the cue words.
 - **Whether question–answer pairs are committed as facts:** only once scoring is by echo distance.
+
+## Steps 1 and 2: the whole question clause, and long-term heads
+
+All runs below use the baseline configuration plus `--sit-bnd2`, seed 0, on `ld200k`.
+
+**Step 1, `--sit-cue-clause`.** The cue reaches back to the start of the clause: at least 4 words, at most 12. On the story set it scores 98.2% (seed 0; 96.8% before). On the book, found at 8–127 words rises only from 1.7% to 12.1% (recall@8 from 14% to 36%), well short of the forum's ≥45%. With X in view, the reader still answers X's latest find only 12% of the time. About 85% of found questions lie beyond the drift horizon, so the route learner almost never sees a candidate that holds the answer: credit is starved.
+
+**Step 2, `--sit-heads`.** An exact newest-wins table of committed facts that never drifts: (entity, key, value kind) → (value, time, class), stored as symbols. Its entries are offered as one-hop route candidates with a long-term source feature. The design changes along the way, each tried on the book:
+
+| Change | Home 128–1k / 8k–64k / 64k+ | Owner 1k–8k / 8k–64k / 64k+ | Found 8–127 / 1k–8k |
+|---|---|---|---|
+| clause cue only (step 1) | 20.7 / 7.5 / 4.0% | 10.4 / 8.1 / 11.1% | 12.1 / 7.7% |
+| heads keyed by pooled class, newest 2 per kind | 15.9 / 9.1 / 9.4% | 89.4 / 61.5 / 11.1% | 29.3 / 10.2% |
+| keyed by the exact relation path (`--sit-heads-path`), newest 24 | 74.4 / 12.6 / 6.7% | 96.9 / 48.6 / 6.9% | 46.6 / 19.9% |
+| newest 8 per value kind, 48 in all | 96.3 / 73.0 / 22.1% | 95.5 / 96.7 / 100% | 27.6 / 25.1% |
+| + the value's kind read fresh, + an exact-path feature | 95.1 / 81.6 / 38.9% | 100 / 95.8 / 100% | 55.2 / 43.3% |
+| **+ singleton kinds offer their newest head only** | **96.3 / 99.4 / 100%** | **95.2 / 92.7 / 100%** | **60.3 / 43.0%** |
+
+The changes, in order:
+- **Pooled-class keys.** "owns the" shares a class with "got the", so a later pick-up overwrote the owner fact, and the further back the fact, the likelier that was.
+- **Exact-path keys** stop that: only a restatement overwrites a fact.
+- **The cap had to be per value kind.** Each function word is a kind of its own, and a person collects a head to "." for every distinct clause tail ("went to the kitchen", "went to the garden", …). Those crowded out old durable heads such as "lives in the".
+- **The value's kind is read at lookup time,** since kinds settle after early heads are written.
+- **The exact-path feature** lets the learner tell "found the" from "got the", which share a kind and a class.
+
+**The final row** (`R_hk10_0`, 1,091 s):
+- **Home:** 96–100% in every bucket, and 98.8–99.7% by echo distance.
+- **Owner:** 89–100% in every bucket.
+- **Recall@8:** 100% for both, everywhere.
+- **Local questions:** 99.6 / 93.1 / 82.0% (where-person, who-has, where-object).
+
+This meets the forum's step-2 prediction: ≥85% in every bucket, 64k+ within 5 points of 128–1k.
+
+- **Found is unsolved.** It scores 60.3 / 63.3 / 43.0 / 15.3 / 12.6% by fact distance, against a newest-find baseline of 100 / 99.5 / 73.6 / 19.2 / 8.8%. Its recall@8 is 98.3 / 94.3 / 82.6 / 58.1 / 51.6%. Below about 8k words the newest find is usually the answer, and the reader still misses it about 40% of the time. Beyond that, only the chapter address can answer (step 4).
+- **The cost on the story set:** 96.5% (seed 0) against 98.2% without heads. Facts from earlier stories never fade, and the learner sometimes trusts them.
+- **Step 3** (durable relations apart from changing ones) was needed in part for step 2: exact-path keys and the exact-path feature keep "owns" apart from "got" without learning persistence per class.
 
 ## Caveats
 
