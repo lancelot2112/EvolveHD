@@ -54,6 +54,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         nroutes: g("--sit-nroutes", "0").parse().unwrap(),
         query: flag(args, "--sit-query"),
         qform14: flag(args, "--sit-qform14"),
+        qsparse: g("--sit-qsparse", "0").parse().unwrap(),
         kindfirst: flag(args, "--sit-kindfirst"),
         replay: g("--sit-replay", "0").parse().unwrap(),
         fpool: flag(args, "--sit-fpool"),
@@ -730,6 +731,10 @@ fn main() {
                 let name = |w: u32| voc.get(w as usize).cloned().unwrap_or(w.to_string());
                 eprintln!("learned boundaries: {} | paths {} | relation classes {}", x.boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.n_paths(), x.n_classes());
                 eprintln!("question boundaries: {} | clauses committed {}, dropped {}", x.question_boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.committed, x.dropped);
+                if x.cfg.query {
+                    let (n, nz, sat, bytes) = x.qw_census();
+                    eprintln!("query weights: {} stored, {} nonzero, {} at or beyond the 8-bit limit, {} bytes", n, nz, sat, bytes);
+                }
                 if x.cfg.sq_max > 0 {
                     let words = x.words_seen().max(1);
                     eprintln!("open queries: opened {}, closed {}, mean open {:.2}, peak {}, upkeep {:.3} reads+writes per word", x.sq_opened, x.sq_closed, x.sq_open_sum as f64 / words as f64, x.sq_peak, x.sq_work as f64 / words as f64);

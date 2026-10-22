@@ -144,6 +144,10 @@ pub struct SitCfg {
     pub nroutes: usize,
     /// The general query learner (see the module docs) instead of the C1/C2 tables.
     pub query: bool,
+    /// The query weights stored sparse at 8 bits instead of a dense 16-bit table. 1: an open-addressing table of
+    /// 32-bit keys and 8-bit saturating weights (grown at 3/4 full). 2: per feature, a list of (query bit as 16 bits,
+    /// weight as 8 bits), 3 bytes per nonzero weight; a weight that returns to 0 is dropped.
+    pub qsparse: u32,
     /// The query code also carries 4 bits hashed from the words 1 and 4 back together ("?" ... "has" against "?" ...
     /// "is": the two question forms share the words 1 and 3 back).
     pub qform14: bool,
@@ -190,6 +194,119 @@ pub struct SitCfg {
     pub sq_open: u32,
     pub cred: u32,
     pub seed: u64,
+}
+
+/// Sparse 8-bit weights: an open-addressing hash table (linear probing, power-of-two capacity, grown at half full)
+/// of 32-bit keys and saturating 8-bit values. A key never updated reads 0.
+pub struct SparseW {
+    keys: Vec<u32>,
+    vals: Vec<i8>,
+    pub len: usize,
+}
+impl SparseW {
+    const EMPTY: u32 = u32::MAX;
+    pub fn new() -> Self {
+        SparseW { keys: vec![Self::EMPTY; 1024], vals: vec![0; 1024], len: 0 }
+    }
+    fn slot(&self, k: u32) -> usize {
+        // multiplicative hash (Fibonacci), then linear probing
+        let m = self.keys.len() - 1;
+        let mut i = ((k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize & m;
+        while self.keys[i] != Self::EMPTY && self.keys[i] != k {
+            i = (i + 1) & m;
+        }
+        i
+    }
+    pub fn get(&self, k: u32) -> i8 {
+        let i = self.slot(k);
+        if self.keys[i] == k { self.vals[i] } else { 0 }
+    }
+    pub fn add(&mut self, k: u32, d: i8) {
+        if 4 * (self.len + 1) > 3 * self.keys.len() {
+            let (ok, ov) = (std::mem::take(&mut self.keys), std::mem::take(&mut self.vals));
+            self.keys = vec![Self::EMPTY; ok.len() * 2];
+            self.vals = vec![0; ok.len() * 2];
+            for (k, v) in ok.into_iter().zip(ov) {
+                if k != Self::EMPTY {
+                    let i = self.slot(k);
+                    self.keys[i] = k;
+                    self.vals[i] = v;
+                }
+            }
+        }
+        let i = self.slot(k);
+        if self.keys[i] != k {
+            self.keys[i] = k;
+            self.len += 1;
+        }
+        self.vals[i] = self.vals[i].saturating_add(d);
+    }
+    /// Bytes held (keys and values, at the table's capacity).
+    pub fn bytes(&self) -> usize {
+        self.keys.len() * 5
+    }
+    /// (entries nonzero, entries at the 8-bit limit)
+    pub fn census(&self) -> (usize, usize) {
+        let mut nz = 0;
+        let mut sat = 0;
+        for (k, v) in self.keys.iter().zip(&self.vals) {
+            if *k != Self::EMPTY && *v != 0 {
+                nz += 1;
+                if *v == i8::MAX || *v == i8::MIN {
+                    sat += 1;
+                }
+            }
+        }
+        (nz, sat)
+    }
+}
+
+/// Sparse 8-bit weights by feature: for each feature, the query bits with a nonzero weight (16 bits) and their
+/// weights (8 bits, saturating). A feature's score under a query is the sum of its weights, each times the number of
+/// times its bit is in the query.
+pub struct RowW {
+    bits: Vec<Vec<u16>>,
+    vals: Vec<Vec<i8>>,
+}
+impl RowW {
+    pub fn new(nf: usize) -> Self {
+        RowW { bits: vec![vec![]; nf], vals: vec![vec![]; nf] }
+    }
+    pub fn score(&self, fi: u32, qcount: &[u8]) -> i64 {
+        let (b, v) = (&self.bits[fi as usize], &self.vals[fi as usize]);
+        let mut s = 0i64;
+        for (&bb, &w) in b.iter().zip(v) {
+            s += w as i64 * qcount[bb as usize] as i64;
+        }
+        s
+    }
+    pub fn add(&mut self, fi: u32, b: u16, d: i8) {
+        let (bs, vs) = (&mut self.bits[fi as usize], &mut self.vals[fi as usize]);
+        match bs.iter().position(|&x| x == b) {
+            Some(i) => {
+                vs[i] = vs[i].saturating_add(d);
+                if vs[i] == 0 {
+                    bs.swap_remove(i);
+                    vs.swap_remove(i);
+                }
+            }
+            None => {
+                bs.push(b);
+                vs.push(d);
+            }
+        }
+    }
+    /// Bytes held: 3 per weight at the lists' capacity, plus the lists' headers.
+    pub fn bytes(&self) -> usize {
+        self.bits.iter().map(|b| b.capacity() * 2).sum::<usize>()
+            + self.vals.iter().map(|v| v.capacity()).sum::<usize>()
+            + self.bits.len() * 48
+    }
+    pub fn census(&self) -> (usize, usize) {
+        let nz = self.vals.iter().map(|v| v.len()).sum();
+        let sat = self.vals.iter().flatten().filter(|&&w| w == i8::MAX || w == i8::MIN).count();
+        (nz, sat)
+    }
 }
 
 /// A learned sense of a word: a prototype of the contexts it is used in (counts over the identity bits of the
@@ -246,7 +363,9 @@ pub struct Situation {
     ksize: HashMap<u32, u32>,                      // members per kind
     fdf: Vec<u32>,                                  // per frame feature: how many words' frame codes hold it
     fseen: u32,
-    qw: Vec<i16>,                                   // the query learner: QD x NF signed 16-bit weights
+    qw: Vec<i16>,                                   // the query learner: QD x NF signed 16-bit weights (dense)
+    qs: SparseW,                                    // ... or the same weights sparse, 8-bit (--sit-qsparse 1)
+    qr: RowW,                                       // ... or per feature, (bit, weight) lists (--sit-qsparse 2)
     qbits: Vec<u32>,                                // the query code of the current prediction
     qcands: Vec<(Vec<u32>, u32, i64)>,             // its routes: (features, value, score), best first
     ring: Vec<(Vec<u32>, Vec<(Vec<u32>, u32)>, u32)>, // replayed mistakes: (query, routes (features, value), answer)
@@ -357,7 +476,9 @@ impl Situation {
             ksize: HashMap::new(),
             fdf: vec![0; FB],
             fseen: 0,
-            qw: if cfg.query { vec![0; QD * NF] } else { vec![] },
+            qw: if cfg.query && cfg.qsparse == 0 { vec![0; QD * NF] } else { vec![] },
+            qs: SparseW::new(),
+            qr: RowW::new(if cfg.query && cfg.qsparse == 2 { NF } else { 0 }),
             qbits: vec![],
             qcands: vec![],
             ring: vec![],
@@ -1120,17 +1241,38 @@ impl Situation {
     }
     /// Score features against the current query: the sum of W[q bit, feature].
     fn qscore(&self, q: &[u32], f: &[u32], cache: &mut HashMap<u32, i64>) -> i64 {
+        // the query as counts per bit (a bit two hashes land on counts twice, as in the dense table)
+        let mut qset = [0u8; QD];
+        if self.cfg.qsparse == 2 {
+            for &b in q {
+                qset[b as usize] += 1;
+            }
+        }
         f.iter()
             .map(|&fi| {
-                *cache.entry(fi).or_insert_with(|| q.iter().map(|&b| self.qw[b as usize * NF + fi as usize] as i64).sum())
+                *cache.entry(fi).or_insert_with(|| {
+                    if self.cfg.qsparse == 2 {
+                        self.qr.score(fi, &qset)
+                    } else if self.cfg.qsparse == 1 {
+                        q.iter().map(|&b| self.qs.get(b * NF as u32 + fi) as i64).sum()
+                    } else {
+                        q.iter().map(|&b| self.qw[b as usize * NF + fi as usize] as i64).sum()
+                    }
+                })
             })
             .sum()
     }
     fn qupdate(&mut self, q: &[u32], f: &[u32], d: i16) {
         for &b in q {
             for &fi in f {
-                let x = &mut self.qw[b as usize * NF + fi as usize];
-                *x = x.saturating_add(d);
+                if self.cfg.qsparse == 2 {
+                    self.qr.add(fi, b as u16, d as i8);
+                } else if self.cfg.qsparse == 1 {
+                    self.qs.add(b * NF as u32 + fi, d as i8);
+                } else {
+                    let x = &mut self.qw[b as usize * NF + fi as usize];
+                    *x = x.saturating_add(d);
+                }
             }
         }
     }
@@ -1584,6 +1726,21 @@ impl Situation {
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         v.truncate(n);
         v
+    }
+    /// The query weights' footprint (diagnostics): (stored entries, nonzero, at the 8-bit limit (sparse) or beyond 8
+    /// bits (dense), bytes).
+    pub fn qw_census(&self) -> (usize, usize, usize, usize) {
+        if self.cfg.qsparse == 2 {
+            let (nz, sat) = self.qr.census();
+            (nz, nz, sat, self.qr.bytes())
+        } else if self.cfg.qsparse == 1 {
+            let (nz, sat) = self.qs.census();
+            (self.qs.len, nz, sat, self.qs.bytes())
+        } else {
+            let nz = self.qw.iter().filter(|&&x| x != 0).count();
+            let big = self.qw.iter().filter(|&&x| x > 127 || x < -128).count();
+            (self.qw.len(), nz, big, self.qw.len() * 2)
+        }
     }
     pub fn words_seen(&self) -> u64 {
         self.t
