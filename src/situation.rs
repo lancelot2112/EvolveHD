@@ -59,7 +59,8 @@
 //!   whose class is rarer.
 //! - `query`: the general query learner, in place of the C1/C2 tables, the context hash, the cue positions, the
 //!   entity-cue rule and the recency rule. A bitwise W_QK:
-//!   - the query code is the last 4 words' frame codes, each in its position's block, plus identity bits;
+//!   - the query code is the last 4 words' frame codes, each in its position's block, plus identity bits, plus 4
+//!     bits hashed from the words 1 and 3 back together (a conjunction: the question form, apart from its entity);
 //!   - a route's key is a set of features: cue position, the cue word's kind, per hop the class, the kind and the
 //!     slot's recency rank within its entity, and the number of hops;
 //!   - W holds signed 8-bit weights per (query bit, feature);
@@ -68,6 +69,12 @@
 //!   - learning is mistake-driven and three-factor (a perceptron): when the top route was wrong, the best-scored
 //!     route that held the next word is stepped up and the top route down. (Stepping up every route that held it
 //!     instead fell to 52%: the frequent routes' weights swamp the rest.)
+//! - `replay`: the query learner keeps its mistakes (the query, the routes as they were, the answer) in a ring of
+//!   512 and re-learns this many per word, so the rarer two-hop questions train it as often as the common ones.
+//! - `fpool`: relations pooled by the words' frame codes (the 8-bit frame counters of `kinds`, all integer)
+//!   instead of the meaning module's codes (float inside); the meaning module is then not run. Only distinctive
+//!   frame features count: those in at most an eighth of the words' codes (recounted at each recluster), so
+//!   "went" and "got" (both after a name) differ by what follows them.
 //! - `seed`: salts the codes, keys and context.
 use crate::meaning::{Meaning, MeaningCfg};
 use std::collections::HashMap;
@@ -119,6 +126,10 @@ pub struct SitCfg {
     pub nroutes: usize,
     /// The general query learner (see the module docs) instead of the C1/C2 tables.
     pub query: bool,
+    /// Query learner: mistakes kept in a ring of 512 and re-learned, this many per word (0 = off).
+    pub replay: usize,
+    /// Pool relations by the words' frame codes (8-bit frame counters, integer) instead of the meaning module.
+    pub fpool: bool,
     pub cred: u32,
     pub seed: u64,
 }
@@ -175,9 +186,13 @@ pub struct Situation {
     kind: Vec<u32>,                                 // each word's kind (a word id); kn = none yet
     kn: u32,
     ksize: HashMap<u32, u32>,                      // members per kind
-    qw: Vec<i8>,                                    // the query learner: QD x NF signed 8-bit weights
+    fdf: Vec<u32>,                                  // per frame feature: how many words' frame codes hold it
+    fseen: u32,
+    qw: Vec<i16>,                                   // the query learner: QD x NF signed 16-bit weights
     qbits: Vec<u32>,                                // the query code of the current prediction
     qcands: Vec<(Vec<u32>, u32, i64)>,             // its routes: (features, value, score), best first
+    ring: Vec<(Vec<u32>, Vec<(Vec<u32>, u32)>, u32)>, // replayed mistakes: (query, routes (features, value), answer)
+    ring_at: usize,
     mood: Vec<u8>,
     buf: Vec<(u32, u32, u8, u32)>,                  // buffered bindings: (entity, class, direction, value)
     stamp: HashMap<(u32, u32, u32), u64>,           // last write time per slot (entity, class, kind)
@@ -195,7 +210,7 @@ pub struct Situation {
 
 const DRE: [i8; 4] = [1, 0, -1, 0];
 const FB: usize = 512;
-const QD: usize = 4 * FB + 256; // query bits: 4 positions x frame code, plus 4 positions x 64 identity bits
+const QD: usize = 4 * FB + 512; // query bits: 4 positions x frame code, 4 positions x 64 identity bits, 256 context bits
 const NF: usize = 4096;         // route features (hashed)
 /// A route: one slot (class, kind), or two (the second with class != u32::MAX).
 type Route = (u32, u32, u32, u32);
@@ -244,9 +259,13 @@ impl Situation {
             kind: vec![nw as u32; nw + 1],
             kn: nw as u32,
             ksize: HashMap::new(),
+            fdf: vec![0; FB],
+            fseen: 0,
             qw: if cfg.query { vec![0; QD * NF] } else { vec![] },
             qbits: vec![],
             qcands: vec![],
+            ring: vec![],
+            ring_at: 0,
             mood: vec![0; nw],
             buf: vec![],
             stamp: HashMap::new(),
@@ -358,6 +377,7 @@ impl Situation {
         for (i, &w) in words.iter().enumerate() {
             let c = match sids.get(i) {
                 Some(&k) if k != u32::MAX => self.sense_mask(w, k as usize),
+                _ if self.cfg.fpool => self.frame_bits(w),
                 _ => self.mn.code_or_ident(w),
             };
             out.extend(c.iter().map(|&b| ((b as usize + i * 7919) % d) as u32));
@@ -500,6 +520,9 @@ impl Situation {
     /// Re-assign every path, most used first, as the meanings have matured; classes keep their numbers where
     /// their most used path lands again.
     fn recluster(&mut self) {
+        if self.cfg.fpool {
+            self.recount_fdf();
+        }
         let mut paths: Vec<(u64, Vec<u32>)> = self.path_count.iter().map(|(p, &c)| (c, p.clone())).collect();
         paths.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         // each old class's most used path, to carry its counts over to wherever that path lands now
@@ -634,6 +657,36 @@ impl Situation {
         if r[f] > 255 {
             r.iter_mut().for_each(|x| *x >>= 1); // 8-bit: halve together when one saturates
         }
+    }
+    /// A word's frame code as bit indices (an integer meaning code: its 8-bit frame counters at a quarter of their
+    /// maximum or more); a few identity bits while it has no frames yet.
+    fn frame_bits(&self, w: u32) -> Vec<u32> {
+        let r = &self.frame[w as usize];
+        let mx = *r.iter().max().unwrap_or(&0);
+        if mx == 0 {
+            return (0..4u64).map(|i| (hash(w as u64 + 77, i) % FB as u64) as u32).collect();
+        }
+        let th = (mx >> 2).max(1);
+        // keep the distinctive features: those in at most an eighth of the words' codes (integer compare)
+        (0..FB as u32).filter(|&b| r[b as usize] >= th && (self.fseen == 0 || self.fdf[b as usize] * 8 <= self.fseen)).collect()
+    }
+    /// Recount, per frame feature, how many words' frame codes hold it.
+    fn recount_fdf(&mut self) {
+        let mut df = vec![0u32; FB];
+        let mut nseen = 0;
+        for w in 0..self.nw as u32 {
+            if self.wcount[w as usize] == 0 {
+                continue;
+            }
+            nseen += 1;
+            for (b, on) in self.frame_code(w).into_iter().enumerate() {
+                if on {
+                    df[b] += 1;
+                }
+            }
+        }
+        self.fdf = df;
+        self.fseen = nseen;
     }
     fn frame_code(&self, w: u32) -> Vec<bool> {
         let r = &self.frame[w as usize];
@@ -827,6 +880,14 @@ impl Situation {
                 q.push((4 * FB + j * 64 + (hash(u as u64 + 31, i) % 64) as usize) as u32);
             }
         }
+        // conjunctive context bits: a hash of the words 1 and 3 back together, skipping the entity between them
+        // (the question form)
+        let w0 = cue.first().copied().unwrap_or(u32::MAX) as u64;
+        let w2 = cue.get(2).copied().unwrap_or(u32::MAX) as u64;
+        let cx = hash(hash(w0, 7), w2);
+        for i in 0..4u64 {
+            q.push((4 * FB + 256 + (hash(cx, i) % 256) as usize) as u32);
+        }
         q
     }
     fn fid(tag: u64, a: u64, b: u64) -> u32 {
@@ -861,7 +922,18 @@ impl Situation {
             }
         }
         v.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-        v.into_iter().take(n).enumerate().map(|(i, x)| (x.1, x.2, i as u32)).collect()
+        // the newest few of each kind, ranked within their kind (a slot's recency among the entity's values of the
+        // same kind: the current holder is rank 0 even when the clause also wrote "up" or "." beside it)
+        let mut seen_k: HashMap<u32, u32> = HashMap::new();
+        let mut out = vec![];
+        for x in v {
+            let r = seen_k.entry(x.2).or_insert(0);
+            if *r < 2 && out.len() < n {
+                out.push((x.1, x.2, *r));
+            }
+            *r += 1;
+        }
+        out
     }
     /// Score features against the current query: the sum of W[q bit, feature].
     fn qscore(&self, q: &[u32], f: &[u32], cache: &mut HashMap<u32, i64>) -> i64 {
@@ -871,7 +943,7 @@ impl Situation {
             })
             .sum()
     }
-    fn qupdate(&mut self, q: &[u32], f: &[u32], d: i8) {
+    fn qupdate(&mut self, q: &[u32], f: &[u32], d: i16) {
         for &b in q {
             for &fi in f {
                 let x = &mut self.qw[b as usize * NF + fi as usize];
@@ -884,6 +956,8 @@ impl Situation {
         let q = self.query_bits(cue);
         let mut cache: HashMap<u32, i64> = HashMap::new();
         let mut cands: Vec<(Vec<u32>, u32, i64, u64)> = vec![];
+        let dbg = std::env::var("SIT_QDBG").is_ok();
+        let mut desc: Vec<String> = vec![];
         for (j, &e) in cue.iter().enumerate() {
             if !self.seen[e as usize] {
                 continue;
@@ -892,6 +966,9 @@ impl Situation {
                 let Some((m, _)) = self.read_best(e, c, k, cue) else { continue };
                 let f1 = self.route_feats(j, e, &[(c, k, r)]);
                 let sc = self.qscore(&q, &f1, &mut cache);
+                if dbg {
+                    desc.push(format!("j{}:{}>c{}k{}r{}={}", j, e, c, k, r, m));
+                }
                 cands.push((f1, m, sc, self.stamp_of(e, c, k)));
                 for (c2, k2, r2) in self.newest_slots(m, 8) {
                     let mut ex = cue.to_vec();
@@ -899,14 +976,27 @@ impl Situation {
                     let Some((v, _)) = self.read_best(m, c2, k2, &ex) else { continue };
                     let f2 = self.route_feats(j, e, &[(c, k, r), (c2, k2, r2)]);
                     let sc = self.qscore(&q, &f2, &mut cache);
+                    if dbg {
+                        desc.push(format!("j{}:{}>c{}k{}r{}={}>c{}k{}r{}={}", j, e, c, k, r, m, c2, k2, r2, v));
+                    }
                     cands.push((f2, v, sc, self.stamp_of(e, c, k)));
                 }
             }
         }
         // best score first; ties: the newest first slot, then the shorter route (stable sort keeps one-hop first)
+        if dbg {
+            let mut ix: Vec<usize> = (0..cands.len()).collect();
+            ix.sort_by(|&a, &b| cands[b].2.cmp(&cands[a].2).then(cands[b].3.cmp(&cands[a].3)));
+            let parts: Vec<String> = ix.iter().take(10).map(|&i| format!("{}[{}]", desc[i], cands[i].2)).collect();
+            eprintln!("QROUTES {} {}", self.t, parts.join(" "));
+        }
         cands.sort_by(|a, b| b.2.cmp(&a.2).then(b.3.cmp(&a.3)));
         let lo = cands.iter().map(|x| x.2).min().unwrap_or(0);
         let props: Vec<(u32, u32)> = cands.iter().map(|x| ((x.2 - lo + 1).min(u32::MAX as i64) as u32, x.1)).collect();
+        if std::env::var("SIT_QDBG").is_ok() && !cands.is_empty() {
+            let vals: Vec<String> = cands.iter().take(12).map(|x| format!("{}:{}", x.1, x.2)).collect();
+            eprintln!("QDBG {} n {} top {}", self.t, cands.len(), vals.join(" "));
+        }
         self.qbits = q;
         self.qcands = cands.into_iter().map(|x| (x.0, x.1, x.2)).collect();
         props
@@ -917,14 +1007,51 @@ impl Situation {
     fn query_learn(&mut self, w: u32) {
         let cands = std::mem::take(&mut self.qcands);
         let q = std::mem::take(&mut self.qbits);
-        let Some(top) = cands.first() else { return };
-        if top.1 == w {
-            return;
+        if let Some(top) = cands.first() {
+            if top.1 != w {
+                if let Some(good) = cands.iter().find(|x| x.1 == w) {
+                    let (gf, tf) = (good.0.clone(), top.0.clone());
+                    self.qupdate(&q, &gf, 1);
+                    self.qupdate(&q, &tf, -1);
+                    // keep the mistake for replay: the routes as they were, with their answer
+                    if self.cfg.replay > 0 {
+                        let ep = (q.clone(), cands.iter().map(|x| (x.0.clone(), x.1)).collect(), w);
+                        if self.ring.len() < 512 {
+                            self.ring.push(ep);
+                        } else {
+                            self.ring[self.ring_at] = ep;
+                        }
+                        self.ring_at = (self.ring_at + 1) % 512;
+                    }
+                }
+            }
         }
-        if let Some(good) = cands.iter().find(|x| x.1 == w) {
-            let (gf, tf) = (good.0.clone(), top.0.clone());
-            self.qupdate(&q, &gf, 1);
-            self.qupdate(&q, &tf, -1);
+        // replay: re-score a few kept mistakes under the current weights, and learn again from those still wrong
+        for i in 0..self.cfg.replay {
+            if self.ring.is_empty() {
+                break;
+            }
+            let at = (hash(self.t, 4242 + i as u64) % self.ring.len() as u64) as usize;
+            let (rq, routes, rw) = self.ring[at].clone();
+            let mut cache: HashMap<u32, i64> = HashMap::new();
+            let mut best: Option<(i64, usize)> = None;
+            let mut good: Option<(i64, usize)> = None;
+            for (r, (f, v)) in routes.iter().enumerate() {
+                let sc = self.qscore(&rq, f, &mut cache);
+                if best.map_or(true, |b| sc > b.0) {
+                    best = Some((sc, r));
+                }
+                if *v == rw && good.map_or(true, |g| sc > g.0) {
+                    good = Some((sc, r));
+                }
+            }
+            if let (Some((_, b)), Some((_, g))) = (best, good) {
+                if routes[b].1 != rw {
+                    let (gf, bf) = (routes[g].0.clone(), routes[b].0.clone());
+                    self.qupdate(&rq, &gf, 1);
+                    self.qupdate(&rq, &bf, -1);
+                }
+            }
         }
     }
 
@@ -1182,8 +1309,10 @@ impl Situation {
             let (x, u) = (self.hist[n - 2], self.hist[n - 1]);
             self.seg_update(x, u, w);
         }
-        self.mn.observe(w);
-        if self.cfg.kinds && n >= 1 {
+        if !(self.cfg.fpool && !self.cfg.sense) {
+            self.mn.observe(w); // the meaning module (float inside) is only needed for its codes
+        }
+        if (self.cfg.kinds || self.cfg.fpool) && n >= 1 {
             let u = self.hist[n - 1];
             self.frame_bump(w, Self::fb(1, u as u64));
             if n >= 2 {

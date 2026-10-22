@@ -53,6 +53,8 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         live: flag(args, "--sit-live"),
         nroutes: g("--sit-nroutes", "0").parse().unwrap(),
         query: flag(args, "--sit-query"),
+        replay: g("--sit-replay", "0").parse().unwrap(),
+        fpool: flag(args, "--sit-fpool"),
         cred: g("--sit-cred", "2").parse().unwrap(),
         seed: g("--sit-seed", "0").parse().unwrap(),
     }
