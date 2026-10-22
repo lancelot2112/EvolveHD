@@ -1,6 +1,6 @@
 # 35 · Precision, spread and compression: testing the trade-offs (2026-10-21)
 
-*[All experiments](README.md)* · [← 33](33-learned-map.md)
+*[All experiments](README.md)* · [← 33](33-learned-map.md) · [36 →](36-forum-changes.md)
 
 **Concepts:** [Sparse codes](../concepts/sparse-codes.md) · [Capacity and budget](../concepts/capacity-and-budget.md) · [Time delays and holds](../concepts/time-delays-and-holds.md) · [Go/NoGo selection](../concepts/go-nogo-selection.md)
 
