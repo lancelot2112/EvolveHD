@@ -132,6 +132,43 @@ The pilot stream (`bl_pilot`, 308,702 words, vocabulary 19,018):
 - **The class index** removed the scan but not the cost. The shared bits are common, and class lookup plus sorting still took 82% (profiles from `perf`, not saved).
 - **With `--sit-win 4`** a word costs about 9 ms (about 10 ms on book text). That run is under way.
 
+## Hashing instead of searching
+
+Three lookups searched, and on natural text each grew with the vocabulary:
+- **relation classes:** a new path was compared with every class prototype;
+- **slot reads:** an unbound slot was cleaned up against every word of its kind;
+- **an entity's newest slots:** all of the entity's slots were gathered and sorted.
+
+Each was replaced by a hash, all integer. On the story set (seed 0; base 96.8%):
+
+| Change | Flag | Story set | Cost |
+|---|---|---|---|
+| relation classes by MinHash banding: 8 bands of 3 rows over the path code's bits; two paths share a class when a band collides; re-pooling becomes re-hashing | `--sit-lsh` | 96.8% | 24 hashes per new path, whatever the number of classes |
+| (4 bands of 3 rows) | | 95.3% | |
+| slot reads by bit sampling over fixed value codes: a value's phase at a key's i-th position depends on (value, i) only; 16 bands of 4 positions, multi-probing the positions whose unbound component is ambiguous | `--sit-vlsh` | 97.3% | 4.8 values scored per read, against 7.1 kind members |
+| (bands of 8 positions) | | 89.9% | the estimate rarely survives a whole band |
+| slot reads from the slot's write log: the slot's last 16 values, found by hashing the slot | `--sit-slotlog 16` | 96.6% | 3.4 values scored per read |
+| + an entity's newest slots from a 32-entry recency list kept at write time | `--sit-recent 32` | 98.2% | |
+| (16 entries) | | 91.6% | |
+
+- **Bit-sampling slot reads do not scale to natural vocabulary.** With 19,018 words, a 4-position band (8 bits) holds about 80 words, and gathering candidates took 56% of the time (about 26 ms per word). Longer bands do not survive the store's noise. The write log is the hash that works there.
+- **BABILong pilot speed** (words 60k–80k, the first stretch of book text, ms per word):
+  - search: about 23 (window 8) and 9 (window 4);
+  - with `--sit-lsh` and `--sit-slotlog 16`: about 8.7;
+  - adding `--sit-recent 32`: about 4.4.
+
+  What is left: query-row scoring 20%, the MinHash itself 18%, re-hashing all paths at re-pooling 13%.
+
+## Home without echoes, found
+
+Route logging (`SIT_QDBG_FROM`) on the read-then-ask run explains the missing home candidate:
+- **When the answer was right,** the "lives in" head was among the person's 8 newest place-valued heads.
+- **When it was wrong,** it was missing: newer place heads under the same paths, filed under old kind numbers after kinds were renumbered, had pushed it out of the per-kind cap.
+- **The fix:** keying heads and their histories by (entity, exact path) only (`--sit-heads-nokind`, `R_ar_nokind`).
+  - Home at 8k–64k: from 41% to 88% (17 questions).
+  - Found: unchanged (79.0 / 87.6 / 92.2%).
+  - Owner: still 14% (7 questions), with its answer among the candidates: a ranking failure.
+
 ## Lost run
 
 The three-book read-then-ask (`ld3m_pqr`: A, B, then C) hit the 2-hour limit for background jobs and was stopped. It was not restarted, because `--sit-epoch` answers the same question more directly.
