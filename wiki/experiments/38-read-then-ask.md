@@ -132,6 +132,21 @@ The pilot stream (`bl_pilot`, 308,702 words, vocabulary 19,018):
 - **The class index** removed the scan but not the cost. The shared bits are common, and class lookup plus sorting still took 82% (profiles from `perf`, not saved).
 - **With `--sit-win 4`** a word costs about 9 ms (about 10 ms on book text). That run is under way.
 
+**The first BABILong pilot run to finish** used `--sit-skip --sit-lsh --sit-slotlog 16 --sit-recent 32 --sit-heads-nokind` (`R_blpR`, 3,913 s).
+
+| Part of the stream | Learning | Top-1 |
+|---|---|---|
+| training, qa1 0k (plain bAbI), 1,000 documents | on | 93.5% |
+| training, qa1 1k (facts in about 1k words of book text), 200 documents | on | 78.0% |
+| test, qa1 0k, 100 documents | frozen, answer-only | 0% |
+| test, qa1 4k, 50 documents | frozen, answer-only | 0% |
+
+- **While learning, it reads facts out of book text** (78% on the 1k documents, against chance of 1 in 6 places).
+- **The test failed before answering anything:** 0 predictions at question boundaries.
+  - **The learned boundaries are wrong.** At the end of the run they were ", and of"; "." and "?" had lost their boundary status. The both-sides-open rule compares each word with the most open word, and in book text the most frequent words (",", "and", "of") have far more distinct neighbours than "." or "?". With "?" no longer a boundary, no question is detected, and answer-only never predicts.
+  - The rule needs a measure that does not grow with frequency.
+- **The index pass is slow on book text: 20–26 ms per word.** By word 300k the long-term tier held 1.75M heads and 2.97M head-history entries. Each word binds to up to 8 earlier words, and almost every binding is a new (entity, path). This is the index growth the CPU and data-structures seats predicted (about 23 entries per clause). It needs their leaner layout: a clause log plus inverted lists, with paths re-parsed at question time.
+
 ## Hashing instead of searching
 
 Three lookups searched, and on natural text each grew with the vocabulary:
