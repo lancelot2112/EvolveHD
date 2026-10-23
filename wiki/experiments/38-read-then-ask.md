@@ -152,12 +152,17 @@ Each was replaced by a hash, all integer. On the story set (seed 0; base 96.8%):
 | (16 entries) | | 91.6% | |
 
 - **Bit-sampling slot reads do not scale to natural vocabulary.** With 19,018 words, a 4-position band (8 bits) holds about 80 words, and gathering candidates took 56% of the time (about 26 ms per word). Longer bands do not survive the store's noise. The write log is the hash that works there.
-- **BABILong pilot speed** (words 60k–80k, the first stretch of book text, ms per word):
-  - search: about 23 (window 8) and 9 (window 4);
-  - with `--sit-lsh` and `--sit-slotlog 16`: about 8.7;
-  - adding `--sit-recent 32`: about 4.4.
+- **BABILong pilot speed** (ms per word over words 40k–60k / 60k–80k, where the book text starts):
 
-  What is left: query-row scoring 20%, the MinHash itself 18%, re-hashing all paths at re-pooling 13%.
+  | Build | 40k–60k | 60k–80k |
+  |---|---|---|
+  | search, window 8 | 22.9 | — |
+  | search, window 4 | 8.9 | 30.5 |
+  | `--sit-lsh --sit-vlsh` | 14.4 | — |
+  | `--sit-lsh --sit-slotlog 16` | 3.1 | 8.7 |
+  | **+ `--sit-recent 32` `--sit-heads-nokind`** | **1.8** | **4.4** |
+
+  The bAbI-only start costs about 1 ms per word. What is left at 60k–80k: query-row scoring 20%, the MinHash itself 18%, re-hashing all paths at re-pooling 13%.
 
 ## Home without echoes, found
 
