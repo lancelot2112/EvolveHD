@@ -4,7 +4,7 @@ Two distances per long-range question:
   fact   words from the fact's latest statement to the answer (the generator's "dist")
   echo   the smaller of that and the words back to the last time the same question was asked with the same answer
          (a question followed by its answer restates the fact)
-Grouped 8-127, 128-1k, 1k-8k, 8k-64k, 64k+. Questions in the first 10% of the document are left out.
+Grouped 8-127, 128-1k, 1k-8k, 8k-64k, 64k-512k, 512k+. Questions in the first 10% of the document are left out.
 Also the newest-find baseline: for "what did X find in chapter N ?", answering with X's latest find whatever the chapter.
 usage: score_dist.py PREFIX_OF_DOC RUN_PREFIX ..."""
 import sys, json, numpy as np
@@ -12,7 +12,7 @@ doc = sys.argv[1]
 ids = np.fromfile(doc + ".ids", dtype=np.uint32).astype(np.int64); n = len(ids)
 V = open(doc + ".txt").read().split("\n"); ix = {w: i for i, w in enumerate(V)}
 info = json.load(open(doc + ".info.json"))
-groups = [(8, 128, "8-127"), (128, 1024, "128-1k"), (1024, 8192, "1k-8k"), (8192, 65536, "8k-64k"), (65536, 1 << 62, "64k+")]
+groups = [(8, 128, "8-127"), (128, 1024, "128-1k"), (1024, 8192, "1k-8k"), (8192, 65536, "8k-64k"), (65536, 524288, "64k-512k"), (524288, 1 << 62, "512k+")]
 dot, found = ix["."], ix["found"]
 # echo distances and the newest-find baseline, from the text itself, in one pass
 ans = {p: k for p, k in info["answers"]}
@@ -30,7 +30,7 @@ for i in range(n):
             echo[i] = min(fdist[i], i - prev) if prev is not None else fdist[i]
             if ans[i] == "found":                        # "what did X find in chapter N ?": X follows "did"
                 j = i - 1
-                while V[ids[j]] != "did": j -= 1
+                while V[ids[j]] != "did": j -= 1                # "what did X find in chapter M [of part N] ?"
                 base[i] = newest_find.get(ids[j + 1], -1) == ids[i]
         last_q[(q, ids[i])] = i
     if w == dot:

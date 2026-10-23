@@ -17,11 +17,17 @@ found) and "dist": the distance in words for each answer (-1 for local questions
 Control (5th argument "shuffle"): each chapter's heading prints a permuted chapter number while the questions keep
 the true one, so a reader that answers by finding the heading should fall to about chance on found; the rest of
 the book is the same as without it (the permutation has its own random generator).
-usage: longdoc_gen.py WORDS OUT_PREFIX [seed] [shuffle]"""
+Nested structure ("parts=P", with "chapters=C", default 20): the book is P parts ("part N ."), each of C chapters
+numbered from one again ("chapter M ."), and found is asked as "what did X find in chapter M of part N ?": the
+chapter heading recurs in every part, so only the part's unit tells them apart (structure of structure).
+usage: longdoc_gen.py WORDS OUT_PREFIX [seed] [shuffle] [parts=P] [chapters=C]"""
 import sys, json, math, random
 
 n_words = int(sys.argv[1]); out = sys.argv[2]; rng = random.Random(int(sys.argv[3]) if len(sys.argv) > 3 else 1)
-shuffle = len(sys.argv) > 4 and sys.argv[4] == "shuffle"
+extra = sys.argv[4:]
+shuffle = "shuffle" in extra
+n_parts = next((int(x.split("=")[1]) for x in extra if x.startswith("parts=")), 0)
+per_part = next((int(x.split("=")[1]) for x in extra if x.startswith("chapters=")), 20)
 names = ("mary john sandra daniel emma fred bill julie anna peter lucy oscar nina victor clara hugo "
          "rosa felix irene marco tess omar ella sam").split()
 places = "kitchen garden office bathroom hallway bedroom cellar attic library garage porch studio".split()
@@ -31,7 +37,7 @@ teens = "ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen 
 tens = "twenty thirty forty fifty sixty seventy eighty ninety".split()
 func = ("chapter scene . , ? to the where is who has what place in went moved picked up got dropped gave lives "
         "owns found does live own did find").split()
-vocab = func + names + places + objects + units + teens + tens
+vocab = func + names + places + objects + units + teens + tens + ["part", "of"]   # new words last: old ids unchanged
 ix = {w: i for i, w in enumerate(vocab)}
 assert len(ix) == len(vocab), "duplicate word in the vocabulary"
 
@@ -42,13 +48,14 @@ def number_words(k):
     t, u = divmod(k, 10)
     return [tens[t - 2]] + ([units[u - 1]] if u else [])
 
-n_chapters = 99
-perm = list(range(1, n_chapters + 1))
+n_chapters = 99 if n_parts == 0 else n_parts * per_part
+assert n_parts <= 99 and per_part <= 99
+perm = list(range(1, (n_chapters if n_parts == 0 else per_part) + 1))
 if shuffle:
     prng = random.Random(4242)
     while True:                                   # a permutation that moves every chapter
         prng.shuffle(perm)
-        if all(perm[i] != i + 1 for i in range(n_chapters)): break
+        if all(perm[i] != i + 1 for i in range(len(perm))): break
 chapter_words = max(400, n_words // n_chapters)
 toks, answers, dist = [], [], []
 def say(*ws): toks.extend(ix[w] for w in ws)
@@ -83,11 +90,19 @@ def long_question():
     elif kind == "owner":
         ask("owner", owner[key][1], "who", "owns", "the", key, "?", ans)
     else:
-        p, ch = key
-        ask("found", found[key][1], "what", "did", p, "find", "in", "chapter", *number_words(ch), "?", ans)
+        p, pt, ch = key
+        if pt == 0:
+            ask("found", found[key][1], "what", "did", p, "find", "in", "chapter", *number_words(ch), "?", ans)
+        else:
+            ask("found", found[key][1], "what", "did", p, "find", "in", "chapter", *number_words(ch), "of", "part",
+                *number_words(pt), "?", ans)
     say(".")
 
-for ch in range(1, n_chapters + 1):
+units_list = [(0, c) for c in range(1, n_chapters + 1)] if n_parts == 0 else \
+    [(pt, c) for pt in range(1, n_parts + 1) for c in range(1, per_part + 1)]
+for pt, ch in units_list:
+    if pt and ch == 1:
+        say("part", *number_words(pt), ".")
     say("chapter", *number_words(perm[ch - 1]), ".")
     start = len(toks)
     while len(toks) - start < chapter_words:
@@ -112,8 +127,8 @@ for ch in range(1, n_chapters + 1):
                 others = [q for q in people if q != p and loc.get(q) == loc[p]]
                 if mine and others:
                     o = rng.choice(mine); q = rng.choice(others); say(p, "gave", "the", o, "to", q, "."); held[o] = q
-            elif r < 0.84 and (p, ch) not in found:
-                o = rng.choice(objects); say(p, "found", "the", o, "."); found[(p, ch)] = (o, len(toks) - 2)
+            elif r < 0.84 and (p, pt, ch) not in found:
+                o = rng.choice(objects); say(p, "found", "the", o, "."); found[(p, pt, ch)] = (o, len(toks) - 2)
             # long-range facts: first statements when due; rare restatements with a new value
             pos = len(toks)
             for q in people:
@@ -145,7 +160,7 @@ import numpy as np
 np.array(toks, dtype=np.uint32).tofile(out + ".ids")
 open(out + ".txt", "w").write("\n".join(vocab))
 json.dump({"answers": answers, "dist": dist, "words": len(toks), "chapters": n_chapters, "chapter_words": chapter_words,
-           "shuffled_headings": shuffle,
+           "shuffled_headings": shuffle, "parts": n_parts, "chapters_per_part": per_part,
            "names": names, "places": places, "objects": objects}, open(out + ".info.json", "w"))
 from collections import Counter
 c = Counter(k for _, k in answers)

@@ -153,6 +153,9 @@ pub struct SitCfg {
     /// are anchors; the cue entity's history inside each anchor's unit gives candidates, with features for the opener
     /// type, first or latest occurrence, span length, the path and the rank within the range.
     pub ranges: bool,
+    /// Nested anchors (with --sit-ranges): two spans of a question that both name clauses give the inner span's
+    /// occurrence inside the outer span's unit ("chapter twelve" within "part three"): structure of structure.
+    pub nest: bool,
     /// Speed: slot reads cached within a word (cleared on any write), kind member lists kept with the kinds, the
     /// background total kept as a running sum, and a cheaper multiplicative phase hash for values.
     pub fast: bool,
@@ -481,7 +484,7 @@ pub struct Situation {
     heads_tab: HashMap<(u32, u32, u32), (u32, u64, u32)>, // --sit-heads: (entity, path or class, kind) -> (value, time, class)
     heads_of: HashMap<u32, Vec<(u32, u32)>>,       // entity -> its head keys (path or class, kind)
     bufp: Vec<u32>,                                 // the exact path of each buffered binding (aligned with buf)
-    ctext: HashMap<u64, (u64, u64, u32)>,           // --sit-ranges: clause text -> (first start, latest start, first word)
+    ctext: HashMap<u64, (Vec<u64>, u32)>,           // --sit-ranges: clause text -> (every start, ascending; first word)
     opener_pos: HashMap<u32, Vec<u64>>,             // first word -> start positions of its clauses (ascending)
     posts: HashMap<(u32, u32, u32), Vec<(u64, u32)>>, // head key -> its history (time, value), ascending
     rcache: std::cell::RefCell<HashMap<(u32, u32, u32), Vec<(u32, i128)>>>, // --sit-fast: slot reads this word
@@ -1885,7 +1888,7 @@ impl Situation {
                     for &(key, k0) in keys {
                         let Some(&(_, _, c)) = self.heads_tab.get(&(e, key, k0)) else { continue };
                         let Some(hist) = self.posts.get(&(e, key, k0)) else { continue };
-                        for &(a, b, fw, which, len) in &anchors {
+                        for &(a, b, fw, which, len, ofw, olen) in &anchors {
                             // the history inside the unit [a, b), newest first, at most 2
                             let lo = hist.partition_point(|x| x.0 < a);
                             let hi = hist.partition_point(|x| x.0 < b);
@@ -1901,6 +1904,9 @@ impl Situation {
                                 f1.push(Self::fid(45, 1, 0)); // the source: a unit's range
                                 f1.push(Self::fid(46, which as u64, len as u64));
                                 f1.push(Self::fid(48, fw as u64, 0)); // the opener type that addressed it
+                                if which == 2 {
+                                    f1.push(Self::fid(50, ofw as u64, olen as u64)); // nested inside this outer type
+                                }
                                 f1.push(Self::fid(44, key as u64, 1));
                                 f1.push(Self::fid(49, rank as u64, k as u64));
                                 let ke = self.kk(e);
@@ -2702,31 +2708,67 @@ impl Situation {
     fn text_hash(ws: &[u32]) -> u64 {
         ws.iter().fold(0x7E47u64, |h, &w| hash(h, w as u64))
     }
+    /// The end of the unit that starts at `st` with a clause whose first word is `fw`: the next clause with that
+    /// first word.
+    fn unit_end(&self, fw: u32, st: u64) -> u64 {
+        self.opener_pos
+            .get(&fw)
+            .and_then(|v| {
+                let at = v.partition_point(|&x| x <= st);
+                v.get(at).copied()
+            })
+            .unwrap_or(u64::MAX)
+    }
     /// The anchors of a cue (newest word first): spans of 1-4 words of the cue, in text order, that equal a stored
-    /// clause's text; each with its unit (from the clause to the next clause with the same first word), as
-    /// (start, end, first word, 0 = first occurrence / 1 = latest, span length).
-    fn anchors(&self, cue: &[u32]) -> Vec<(u64, u64, u32, u32, u32)> {
+    /// clause's text, each with its unit (from the clause to the next clause with the same first word). A span gives
+    /// its first and its latest occurrence; two spans give a nested anchor: the inner span's first occurrence inside
+    /// the outer span's unit ("chapter twelve" inside "part three"), cut to it. As (start, end, first word, which:
+    /// 0 first / 1 latest / 2 nested, span length, the outer span's first word or MAX, the outer span's length).
+    fn anchors(&self, cue: &[u32]) -> Vec<(u64, u64, u32, u32, u32, u32, u32)> {
         let text: Vec<u32> = cue.iter().rev().copied().collect();
-        let mut out = vec![];
+        let mut spans: Vec<(&Vec<u64>, u32, u32)> = vec![];
         for len in 1..=4usize.min(text.len()) {
             for i in 0..=text.len() - len {
                 let h = Self::text_hash(&text[i..i + len]);
-                let Some(&(first, latest, fw)) = self.ctext.get(&h) else { continue };
-                let ps = self.opener_pos.get(&fw);
-                let end_of = |st: u64| -> u64 {
-                    ps.and_then(|v| {
-                        let at = v.partition_point(|&x| x <= st);
-                        v.get(at).copied()
-                    })
-                    .unwrap_or(u64::MAX)
-                };
-                out.push((first, end_of(first), fw, 0, len as u32));
-                if latest != first {
-                    out.push((latest, end_of(latest), fw, 1, len as u32));
+                if let Some((occ, fw)) = self.ctext.get(&h) {
+                    spans.push((occ, *fw, len as u32));
                 }
             }
         }
-        out.truncate(6);
+        let mut out = vec![];
+        for &(occ, fw, len) in &spans {
+            let (first, latest) = (occ[0], *occ.last().unwrap());
+            out.push((first, self.unit_end(fw, first), fw, 0, len, u32::MAX, 0));
+            if latest != first {
+                out.push((latest, self.unit_end(fw, latest), fw, 1, len, u32::MAX, 0));
+            }
+        }
+        out.truncate(6); // as without nesting
+        // nested: an inner span's occurrence inside an outer span's unit (each outer at its first and latest start)
+        let mut nested = vec![];
+        for &(oc, ofw, olen) in spans.iter().filter(|_| self.cfg.nest) {
+            for &(ic, ifw, ilen) in &spans {
+                if std::ptr::eq(oc, ic) || ofw == ifw {
+                    continue;
+                }
+                for &a in [oc[0], *oc.last().unwrap()].iter() {
+                    let ea = self.unit_end(ofw, a);
+                    let at = ic.partition_point(|&x| x < a);
+                    if let Some(&b) = ic.get(at) {
+                        if b < ea {
+                            nested.push((b, self.unit_end(ifw, b).min(ea), ifw, 2, ilen, ofw, olen));
+                        }
+                    }
+                    if oc.len() == 1 {
+                        break;
+                    }
+                }
+            }
+        }
+        nested.sort_unstable();
+        nested.dedup();
+        nested.truncate(4);
+        out.extend(nested);
         out
     }
     /// The cue words, newest first: the last `cue` words, or with `cue_clause` back to the clause start (at least
@@ -3022,8 +3064,7 @@ impl Situation {
                     if let Some(&fw) = ws.first() {
                         let st = self.t.saturating_sub(ws.len() as u64);
                         let h = Self::text_hash(&ws);
-                        let e = self.ctext.entry(h).or_insert((st, st, fw));
-                        e.1 = st;
+                        self.ctext.entry(h).or_insert((vec![], fw)).0.push(st);
                         self.opener_pos.entry(fw).or_default().push(st);
                     }
                 }
