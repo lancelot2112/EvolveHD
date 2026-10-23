@@ -52,6 +52,8 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         heads_per_kind: g("--sit-heads-per-kind", "8").parse().unwrap(),
         ranges: flag(args, "--sit-ranges"),
         nest: flag(args, "--sit-nest"),
+        scope: flag(args, "--sit-scope"),
+        freeze_from: arg(args, "--sit-freeze-from").map(|s| s.parse().unwrap()).unwrap_or(u64::MAX),
         fast: flag(args, "--sit-fast"),
         fast_mask: g("--sit-fast-mask", "23").parse().unwrap(),
         recency: flag(args, "--sit-recency"),
@@ -83,6 +85,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         curious_den: g("--sit-curious-bar", "1/2").split('/').nth(1).unwrap().parse().unwrap(),
         kindfirst: flag(args, "--sit-kindfirst"),
         replay: g("--sit-replay", "0").parse().unwrap(),
+        replay_q: flag(args, "--sit-replay-q"),
         fpool: flag(args, "--sit-fpool"),
         lookback: g("--sit-lookback", "0").parse().unwrap(),
         merge: flag(args, "--sit-merge"),
@@ -843,7 +846,26 @@ fn main() {
                 top = tp;
                 a = St::S(x);
             }
-            for &w in ids.iter().filter(|_| !(flag(&args, "--sit") && arg(&args, "--sit-shards").is_some())) {
+            // --sit-answer-only T: from word T on, read without predicting except where a question is to be answered
+            // (after a learned question boundary); other words get no candidates
+            let answer_only: usize = arg(&args, "--sit-answer-only").map(|s| s.parse().unwrap()).unwrap_or(usize::MAX);
+            let mut n_answered = 0u64;
+            let t_read = Instant::now();
+            for (ti, &w) in ids.iter().enumerate().filter(|_| !(flag(&args, "--sit") && arg(&args, "--sit-shards").is_some())) {
+                if ti == answer_only {
+                    eprintln!("answer-only starts at word {ti}, {:.1} s in", t_read.elapsed().as_secs_f64());
+                }
+                if ti >= answer_only {
+                    if let St::S(x) = &mut a {
+                        if !x.at_question() {
+                            out.push(255);
+                            top.extend(std::iter::repeat(u32::MAX).take(kk));
+                            x.observe_only(w);
+                            continue;
+                        }
+                        n_answered += 1;
+                    }
+                }
                 let sets = a.recall();
                 for h in 0..hops {
                     let r = sets
@@ -877,6 +899,9 @@ fn main() {
                 a.observe(w);
             }
             eprintln!("{} words, {:.1} s", ids.len(), t0.elapsed().as_secs_f64());
+            if answer_only < ids.len() {
+                eprintln!("answer-only from word {answer_only}: {n_answered} predictions at question boundaries; {:.1} s in all", t_read.elapsed().as_secs_f64());
+            }
             if let St::S(x) = &mut a {
                 let voc: Vec<String> = arg(&args, "--vocab").map(|p| std::fs::read_to_string(p).unwrap().lines().map(String::from).collect()).unwrap_or_default();
                 let id = |s: &str| voc.iter().position(|w| w == s).map(|i| i as u32);

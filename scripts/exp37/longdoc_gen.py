@@ -20,7 +20,10 @@ the book is the same as without it (the permutation has its own random generator
 Nested structure ("parts=P", with "chapters=C", default 20): the book is P parts ("part N ."), each of C chapters
 numbered from one again ("chapter M ."), and found is asked as "what did X find in chapter M of part N ?": the
 chapter heading recurs in every part, so only the part's unit tells them apart (structure of structure).
-usage: longdoc_gen.py WORDS OUT_PREFIX [seed] [shuffle] [parts=P] [chapters=C]"""
+Read, then ask ("noq", with "qend=N"): no questions inside the book at all, then N long-range questions at its end
+(kinds and log-distance buckets drawn as above, each fact asked at most once), so no answer is in the text before
+it is asked (no echoes) and a reader can be scored on questions it has never seen answered.
+usage: longdoc_gen.py WORDS OUT_PREFIX [seed] [shuffle] [parts=P] [chapters=C] [noq] [qend=N]"""
 import sys, json, math, random
 
 n_words = int(sys.argv[1]); out = sys.argv[2]; rng = random.Random(int(sys.argv[3]) if len(sys.argv) > 3 else 1)
@@ -28,6 +31,8 @@ extra = sys.argv[4:]
 shuffle = "shuffle" in extra
 n_parts = next((int(x.split("=")[1]) for x in extra if x.startswith("parts=")), 0)
 per_part = next((int(x.split("=")[1]) for x in extra if x.startswith("chapters=")), 20)
+noq = "noq" in extra
+qend = next((int(x.split("=")[1]) for x in extra if x.startswith("qend=")), 0)
 names = ("mary john sandra daniel emma fred bill julie anna peter lucy oscar nina victor clara hugo "
          "rosa felix irene marco tess omar ella sam").split()
 places = "kitchen garden office bathroom hallway bedroom cellar attic library garage porch studio".split()
@@ -71,13 +76,14 @@ found = {}     # (person, chapter) -> (object, position)
 first_home = {p: rng.randrange(0, int(0.6 * n_words)) for p in names}
 first_owner = {o: rng.randrange(0, int(0.6 * n_words)) for o in objects}
 
-def long_question():
-    """a long-range question whose fact's distance is spread evenly over log2 buckets"""
+asked = set()   # with qend: the facts already asked at the end
+def long_question(once=False):
+    """a long-range question whose fact's distance is spread evenly over log2 buckets (once: each fact at most once)"""
     pos = len(toks)
     cands = [("home", p, pl, pos - t) for p, (pl, t) in home.items()]
     cands += [("owner", o, pr, pos - t) for o, (pr, t) in owner.items()]
     cands += [("found", pc, ob, pos - t) for pc, (ob, t) in found.items()]
-    cands = [c for c in cands if c[3] >= 8]
+    cands = [c for c in cands if c[3] >= 8 and not (once and (c[0], c[1]) in asked)]
     if not cands: return
     kinds = sorted({c[0] for c in cands})
     kd = rng.choice(kinds)                      # a kind first, so no kind crowds out the others
@@ -85,6 +91,7 @@ def long_question():
     for c in cands:
         if c[0] == kd: buckets.setdefault(int(math.log2(c[3])), []).append(c)
     kind, key, ans, _ = rng.choice(buckets[rng.choice(sorted(buckets))])
+    asked.add((kind, key))
     if kind == "home":
         ask("home", home[key][1], "where", "does", key, "live", "?", ans)
     elif kind == "owner":
@@ -145,7 +152,9 @@ for pt, ch in units_list:
                     say(pr, "owns", "the", o, "."); owner[o] = (pr, len(toks) - 5)
             # questions: local ones as in the stories; a long-range one now and then
             u = rng.random()
-            if u < 0.25 and loc:
+            if noq:
+                pass
+            elif u < 0.25 and loc:
                 q = rng.choice(list(loc)); ask("where-person", -1, "where", "is", q, "?", loc[q]); say(".")
             elif u < 0.32 and held:
                 o = rng.choice(list(held)); ask("who-has", -1, "who", "has", "the", o, "?", held[o]); say(".")
@@ -156,11 +165,15 @@ for pt, ch in units_list:
             elif u < 0.46:
                 long_question()
 
+book_end = len(toks)
+for _ in range(qend):
+    long_question(once=True)
 import numpy as np
 np.array(toks, dtype=np.uint32).tofile(out + ".ids")
 open(out + ".txt", "w").write("\n".join(vocab))
 json.dump({"answers": answers, "dist": dist, "words": len(toks), "chapters": n_chapters, "chapter_words": chapter_words,
            "shuffled_headings": shuffle, "parts": n_parts, "chapters_per_part": per_part,
+           "no_questions_in_text": noq, "questions_at_end": qend, "book_end": book_end,
            "names": names, "places": places, "objects": objects}, open(out + ".info.json", "w"))
 from collections import Counter
 c = Counter(k for _, k in answers)

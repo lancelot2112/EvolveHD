@@ -156,6 +156,13 @@ pub struct SitCfg {
     /// Nested anchors (with --sit-ranges): two spans of a question that both name clauses give the inner span's
     /// occurrence inside the outer span's unit ("chapter twelve" within "part three"): structure of structure.
     pub nest: bool,
+    /// Scoped anchors (with --sit-ranges): every anchor carries the rank of its occurrence from the newest (0 the
+    /// latest, 1 the one before, 2 any older), for a nested anchor the rank of the outer span's occurrence; route
+    /// features conjoin the opener type with which occurrence and that rank, a nested anchor's outer type and rank
+    /// with its inner type, and count how many anchor units contain the candidate. Nested anchors keep the newest 4.
+    pub scope: bool,
+    /// From this word on, route skill is frozen: no query learning (and no open-query credit). u64::MAX: never.
+    pub freeze_from: u64,
     /// Speed: slot reads cached within a word (cleared on any write), kind member lists kept with the kinds, the
     /// background total kept as a running sum, and a cheaper multiplicative phase hash for values.
     pub fast: bool,
@@ -269,6 +276,9 @@ pub struct SitCfg {
     pub kindfirst: bool,
     /// Query learner: mistakes kept in a ring of 512 and re-learned, this many per word (0 = off).
     pub replay: usize,
+    /// Replay question episodes only: keep the mistakes made answering a question (after a learned question
+    /// boundary) and replay `replay` of them at each question, not at every word.
+    pub replay_q: bool,
     /// Pool relations by the words' frame codes (8-bit frame counters, integer) instead of the meaning module.
     pub fpool: bool,
     /// Lookback: a window of the last `lookback` words, searched by the same query learner when the slots are unsure
@@ -2021,7 +2031,7 @@ impl Situation {
                 if let Some(keys) = self.heads_of.get(&e) {
                     for &(key, k0, _, _, c) in keys {
                         let Some(hist) = self.posts.get(&(e, key, k0)) else { continue };
-                        for &(a, b, fw, which, len, ofw, olen) in &anchors {
+                        for &(a, b, fw, which, len, ofw, olen, orank) in &anchors {
                             // the history inside the unit [a, b), newest first, at most 2
                             let lo = hist.partition_point(|x| x.0 < a);
                             let hi = hist.partition_point(|x| x.0 < b);
@@ -2042,6 +2052,17 @@ impl Situation {
                                 }
                                 f1.push(Self::fid(44, key as u64, 1));
                                 f1.push(Self::fid(49, rank as u64, k as u64));
+                                if self.cfg.scope {
+                                    // which occurrence addressed it, conjoined with the opener type
+                                    f1.push(Self::fid(51, fw as u64, (which * 3 + orank) as u64));
+                                    if which == 2 {
+                                        // the outer type and its occurrence, with the inner type
+                                        f1.push(Self::fid(52, ((ofw as u64) << 20) ^ fw as u64, orank as u64));
+                                    }
+                                    // how many of the question's anchor units hold this event
+                                    let n_in = anchors.iter().filter(|x| x.0 <= t && t < x.1).count();
+                                    f1.push(Self::fid(53, n_in.min(4) as u64, which as u64));
+                                }
                                 let ke = self.kk(e);
                                 let sc = if self.cfg.qslots { self.qslot_score(j, ke, &[(c, k, rank as u32)], &mut memo) } else { self.qscore(&q, &f1, &mut cache) };
                                 if dbg {
@@ -2204,7 +2225,7 @@ impl Situation {
                     self.qupdate(&q, &gf, 1);
                     self.qupdate(&q, &tf, -1);
                     // keep the mistake for replay: the routes as they were, with their answer
-                    if self.cfg.replay > 0 {
+                    if self.cfg.replay > 0 && (!self.cfg.replay_q || self.after_q) {
                         let ep = (q.clone(), cands.iter().map(|x| (x.0.clone(), x.1)).collect(), w);
                         if self.ring.len() < 512 {
                             self.ring.push(ep);
@@ -2218,7 +2239,7 @@ impl Situation {
         }
         // replay: re-score a few kept mistakes under the current weights, and learn again from those still wrong
         for i in 0..self.cfg.replay {
-            if self.ring.is_empty() {
+            if self.ring.is_empty() || (self.cfg.replay_q && !self.after_q) {
                 break;
             }
             let at = (hash(self.t, 4242 + i as u64) % self.ring.len() as u64) as usize;
@@ -2861,6 +2882,10 @@ impl Situation {
     pub fn add_learned(&mut self, d: &[(u32, u16, i16)]) {
         self.qr.apply(d);
     }
+    /// Whether the next word answers a question: the last word is a learned question boundary.
+    pub fn at_question(&self) -> bool {
+        self.hist.last().map_or(false, |&u| self.boundary[u as usize] && self.mood[u as usize] >= 8)
+    }
     /// The time (words read).
     pub fn time(&self) -> u64 {
         self.t
@@ -2945,7 +2970,7 @@ impl Situation {
     /// its first and its latest occurrence; two spans give a nested anchor: the inner span's first occurrence inside
     /// the outer span's unit ("chapter twelve" inside "part three"), cut to it. As (start, end, first word, which:
     /// 0 first / 1 latest / 2 nested, span length, the outer span's first word or MAX, the outer span's length).
-    fn anchors(&self, cue: &[u32]) -> Vec<(u64, u64, u32, u32, u32, u32, u32)> {
+    fn anchors(&self, cue: &[u32]) -> Vec<(u64, u64, u32, u32, u32, u32, u32, u32)> {
         let text: Vec<u32> = cue.iter().rev().copied().collect();
         let mut spans: Vec<(&Vec<u64>, u32, u32)> = vec![];
         for len in 1..=4usize.min(text.len()) {
@@ -2959,9 +2984,9 @@ impl Situation {
         let mut out = vec![];
         for &(occ, fw, len) in &spans {
             let (first, latest) = (occ[0], *occ.last().unwrap());
-            out.push((first, self.unit_end(fw, first), fw, 0, len, u32::MAX, 0));
+            out.push((first, self.unit_end(fw, first), fw, 0, len, u32::MAX, 0, (occ.len() - 1).min(2) as u32));
             if latest != first {
-                out.push((latest, self.unit_end(fw, latest), fw, 1, len, u32::MAX, 0));
+                out.push((latest, self.unit_end(fw, latest), fw, 1, len, u32::MAX, 0, 0));
             }
         }
         out.truncate(6); // as without nesting
@@ -2972,12 +2997,13 @@ impl Situation {
                 if std::ptr::eq(oc, ic) || ofw == ifw {
                     continue;
                 }
-                for &a in [oc[0], *oc.last().unwrap()].iter() {
+                for (ai, &a) in [oc[0], *oc.last().unwrap()].iter().enumerate() {
                     let ea = self.unit_end(ofw, a);
                     let at = ic.partition_point(|&x| x < a);
+                    let orank = if ai == 1 { 0 } else { (oc.len() - 1).min(2) as u32 };
                     if let Some(&b) = ic.get(at) {
                         if b < ea {
-                            nested.push((b, self.unit_end(ifw, b).min(ea), ifw, 2, ilen, ofw, olen));
+                            nested.push((b, self.unit_end(ifw, b).min(ea), ifw, 2, ilen, ofw, olen, orank));
                         }
                     }
                     if oc.len() == 1 {
@@ -2988,6 +3014,9 @@ impl Situation {
         }
         nested.sort_unstable();
         nested.dedup();
+        if self.cfg.scope {
+            nested.reverse(); // keep the newest
+        }
         nested.truncate(4);
         out.extend(nested);
         out
@@ -3157,7 +3186,16 @@ impl Situation {
                     }
                 }
             }
-            self.query_learn(w);
+            if self.t >= self.cfg.freeze_from {
+                // frozen: the proposals are dropped unlearned
+                self.qcands.clear();
+                self.qbits.clear();
+                self.qhops.clear();
+                self.qranks.clear();
+                self.qroute.clear();
+            } else {
+                self.query_learn(w);
+            }
         }
         // which classes answer this context: those whose slot (of a cue word) holds w
         if !self.cfg.query && self.seen[w as usize] && !self.class_count.is_empty() {
