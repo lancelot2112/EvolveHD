@@ -33,6 +33,9 @@ generator of their own):
   mod=P   a modifier after the subject ("mary finally found the lamp"), with probability P
   syn=P   the statement's verb said with a synonym the questions never use ("discovered", "possesses", "resides"),
           with probability P (paraphrase between question and text)
+No echoes ("noecho"): every long-range fact is asked exactly once, at a delay after its (latest) statement drawn
+log-uniformly from 8 to 2^19 words (dropped if the book ends first), so no question can be answered from an earlier
+answer; questions still come only at the usual question points.
 usage: longdoc_gen.py WORDS OUT_PREFIX [seed] [shuffle] [parts=P] [chapters=C] [noq] [qend=N] [fresh]
        [pron=P] [mod=P] [syn=P]"""
 import sys, json, math, random
@@ -43,6 +46,7 @@ shuffle = "shuffle" in extra
 n_parts = next((int(x.split("=")[1]) for x in extra if x.startswith("parts=")), 0)
 per_part = next((int(x.split("=")[1]) for x in extra if x.startswith("chapters=")), 20)
 noq = "noq" in extra
+noecho = "noecho" in extra
 qend = next((int(x.split("=")[1]) for x in extra if x.startswith("qend=")), 0)
 names = ("mary john sandra daniel emma fred bill julie anna peter lucy oscar nina victor clara hugo "
          "rosa felix irene marco tess omar ella sam").split()
@@ -121,6 +125,23 @@ first_home = {p: rng.randrange(0, int(0.6 * n_words)) for p in names}
 first_owner = {o: rng.randrange(0, int(0.6 * n_words)) for o in objects}
 
 asked = set()   # with qend: the facts already asked at the end
+pending = {}    # noecho: (kind, key) -> the word position when it is due
+erng = random.Random(5150)
+def plan(kind, key):
+    """noecho: schedule the one question about a fact just stated"""
+    if noecho: pending[(kind, key)] = len(toks) + int(2 ** erng.uniform(3, 19))
+def due_question():
+    """noecho: the most overdue planned question, asked once"""
+    pos = len(toks); due = [(t, k) for k, t in pending.items() if t <= pos]
+    if not due: return
+    _, (kind, key) = min(due); del pending[(kind, key)]
+    if kind == "home": ask("home", home[key][1], "where", "does", key, "live", "?", home[key][0])
+    elif kind == "owner": ask("owner", owner[key][1], "who", "owns", "the", key, "?", owner[key][0])
+    else:
+        p, pt, ch = key; ob = found[key][0]
+        if pt == 0: ask("found", found[key][1], "what", "did", p, "find", "in", H_CH, *number_words(ch), "?", ob)
+        else: ask("found", found[key][1], "what", "did", p, "find", "in", H_CH, *number_words(ch), "of", H_PT, *number_words(pt), "?", ob)
+    say(".")
 def long_question(once=False):
     """a long-range question whose fact's distance is spread evenly over log2 buckets (once: each fact at most once)"""
     pos = len(toks)
@@ -179,21 +200,21 @@ for pt, ch in units_list:
                 if mine and others:
                     o = rng.choice(mine); q = rng.choice(others); st(p, "gave", "the", o, "to", q, "."); held[o] = q
             elif r < 0.84 and (p, pt, ch) not in found:
-                o = rng.choice(objects); st(p, "found", "the", o, "."); found[(p, pt, ch)] = (o, len(toks) - 2)
+                o = rng.choice(objects); st(p, "found", "the", o, "."); found[(p, pt, ch)] = (o, len(toks) - 2); plan("found", (p, pt, ch))
             # long-range facts: first statements when due; rare restatements with a new value
             pos = len(toks)
             for q in people:
                 if q not in home and pos >= first_home[q]:
-                    pl = rng.choice(places); st(q, "lives", "in", "the", pl, "."); home[q] = (pl, len(toks) - 2)
+                    pl = rng.choice(places); st(q, "lives", "in", "the", pl, "."); home[q] = (pl, len(toks) - 2); plan("home", q)
                 elif q in home and rng.random() < 0.0008:
                     pl = rng.choice([x for x in places if x != home[q][0]])
-                    st(q, "lives", "in", "the", pl, "."); home[q] = (pl, len(toks) - 2)
+                    st(q, "lives", "in", "the", pl, "."); home[q] = (pl, len(toks) - 2); plan("home", q)
             for o in things:
                 if o not in owner and pos >= first_owner[o]:
-                    pr = rng.choice(names); owner[o] = (pr, st(pr, "owns", "the", o, "."))
+                    pr = rng.choice(names); owner[o] = (pr, st(pr, "owns", "the", o, ".")); plan("owner", o)
                 elif o in owner and rng.random() < 0.0008:
                     pr = rng.choice([x for x in names if x != owner[o][0]])
-                    owner[o] = (pr, st(pr, "owns", "the", o, "."))
+                    owner[o] = (pr, st(pr, "owns", "the", o, ".")); plan("owner", o)
             # questions: local ones as in the stories; a long-range one now and then
             u = rng.random()
             if noq:
@@ -207,7 +228,7 @@ for pt, ch in units_list:
                 if held[o] in loc:
                     ask("where-object", -1, "where", "is", "the", o, "?", loc[held[o]]); say(".")
             elif u < 0.46:
-                long_question()
+                due_question() if noecho else long_question()
 
 book_end = len(toks)
 for _ in range(qend):
