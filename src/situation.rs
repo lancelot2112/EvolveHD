@@ -376,16 +376,25 @@ impl SparseW {
 
 /// Sparse 8-bit weights by feature: for each feature, the query bits with a nonzero weight (16 bits) and their
 /// weights (8 bits, saturating). A feature's score under a query is the sum of its weights, each times the number of
-/// times its bit is in the query.
+/// times its bit is in the query. A row whose list grows past a third of the query bits is kept dense (one byte per
+/// bit), which is no bigger than its list and scores as one vector dot product; the sums are the same.
 pub struct RowW {
     bits: Vec<Vec<u16>>,
     vals: Vec<Vec<i8>>,
+    dense: Vec<Vec<i8>>,
 }
+const DENSE_AT: usize = QD / 3;
 impl RowW {
     pub fn new(nf: usize) -> Self {
-        RowW { bits: vec![vec![]; nf], vals: vec![vec![]; nf] }
+        RowW { bits: vec![vec![]; nf], vals: vec![vec![]; nf], dense: vec![vec![]; nf] }
     }
     pub fn score(&self, fi: u32, qcount: &[u8]) -> i64 {
+        let dn = &self.dense[fi as usize];
+        if !dn.is_empty() {
+            // i8 x u8 products fit i16; sums of QD of them fit i32
+            let s: i32 = dn.iter().zip(&qcount[..QD]).map(|(&w, &c)| w as i32 * c as i32).sum();
+            return s as i64;
+        }
         let (b, v) = (&self.bits[fi as usize], &self.vals[fi as usize]);
         let mut s = 0i64;
         for (&bb, &w) in b.iter().zip(v) {
@@ -394,6 +403,22 @@ impl RowW {
         s
     }
     pub fn add(&mut self, fi: u32, b: u16, d: i8) {
+        let dn = &mut self.dense[fi as usize];
+        if !dn.is_empty() {
+            dn[b as usize] = dn[b as usize].saturating_add(d);
+            return;
+        }
+        if self.bits[fi as usize].len() >= DENSE_AT {
+            let mut row = vec![0i8; QD];
+            for (&bb, &w) in self.bits[fi as usize].iter().zip(&self.vals[fi as usize]) {
+                row[bb as usize] = w;
+            }
+            row[b as usize] = row[b as usize].saturating_add(d);
+            self.dense[fi as usize] = row;
+            self.bits[fi as usize] = vec![];
+            self.vals[fi as usize] = vec![];
+            return;
+        }
         let (bs, vs) = (&mut self.bits[fi as usize], &mut self.vals[fi as usize]);
         match bs.iter().position(|&x| x == b) {
             Some(i) => {
@@ -409,16 +434,21 @@ impl RowW {
             }
         }
     }
-    /// Bytes held: 3 per weight at the lists' capacity, plus the lists' headers.
+    /// Bytes held: 3 per weight at the lists' capacity, one per bit for dense rows, plus the lists' headers.
     pub fn bytes(&self) -> usize {
         self.bits.iter().map(|b| b.capacity() * 2).sum::<usize>()
             + self.vals.iter().map(|v| v.capacity()).sum::<usize>()
-            + self.bits.len() * 48
+            + self.dense.iter().map(|v| v.capacity()).sum::<usize>()
+            + self.bits.len() * 72
     }
     pub fn census(&self) -> (usize, usize) {
-        let nz = self.vals.iter().map(|v| v.len()).sum();
-        let sat = self.vals.iter().flatten().filter(|&&w| w == i8::MAX || w == i8::MIN).count();
+        let all = || self.vals.iter().flatten().chain(self.dense.iter().flatten());
+        let nz = all().filter(|&&w| w != 0).count();
+        let sat = all().filter(|&&w| w == i8::MAX || w == i8::MIN).count();
         (nz, sat)
+    }
+    pub fn dense_rows(&self) -> usize {
+        self.dense.iter().filter(|v| !v.is_empty()).count()
     }
 }
 
@@ -479,6 +509,7 @@ pub struct Situation {
     qw: Vec<i16>,                                   // the query learner: QD x NF signed 16-bit weights (dense)
     qs: SparseW,                                    // ... or the same weights sparse, 8-bit (--sit-qsparse 1)
     qr: RowW,                                       // ... or per feature, (bit, weight) lists (--sit-qsparse 2)
+    qset_memo: std::cell::RefCell<(Vec<u32>, Vec<u8>)>,        // the last query's bit counts (built once per query)
     qh: Vec<i8>,                                    // ... or superposed in one vector of 8-bit cells (--sit-qsparse 3)
     qform: u64,                                     // the current question form (--sit-qslots)
     heads_tab: HashMap<(u32, u32, u32), (u32, u64, u32)>, // --sit-heads: (entity, path or class, kind) -> (value, time, class)
@@ -621,6 +652,7 @@ impl Situation {
             qw: if cfg.query && cfg.qsparse == 0 { vec![0; QD * NF] } else { vec![] },
             qs: SparseW::new(),
             qr: RowW::new(if cfg.query && cfg.qsparse == 2 { NF } else { 0 }),
+            qset_memo: std::cell::RefCell::new((vec![], vec![0u8; QD])),
             qh: if cfg.query && cfg.qsparse == 3 { vec![0; 1 << cfg.qholo] } else { vec![] },
             qform: 0,
             heads_tab: HashMap::default(),
@@ -1467,7 +1499,31 @@ impl Situation {
         let empty: Vec<u32> = vec![];
         let cands: &Vec<u32> = if typed { self.members.get(&kd).unwrap_or(&empty) } else { &self.words };
         self.stat.borrow_mut()[3] += cands.len() as u64;
-        let mut sc: Vec<(u32, i64)> = cands
+        let mut sc: Vec<(u32, i64)> = if self.fm(1) {
+            // the cheap phase, unrolled over the key: the key-side multiply once per read, then per value one
+            // multiply-xor-shift per position and a sign-select of the unbound slot (vectorizes)
+            let s0 = self.cfg.seed.wrapping_mul(0x1000_0001).wrapping_add(0x7777);
+            let xm: Vec<u64> = idx.iter().map(|&x| (x as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93)).collect();
+            let zr: Vec<i32> = z.iter().map(|x| x.0).collect();
+            let zi: Vec<i32> = z.iter().map(|x| x.1).collect();
+            cands
+                .iter()
+                .map(|&v| {
+                    let a = (v as u64 ^ s0).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                    let mut s = 0i32;
+                    for i in 0..xm.len() {
+                        let h = a ^ xm[i];
+                        let p = ((h ^ (h >> 31)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 62) as i32;
+                        let w = if p & 1 == 0 { zr[i] } else { zi[i] };
+                        let m = -(p >> 1);
+                        s += (w ^ m) - m;
+                    }
+                    (v, s as i64)
+                })
+                .filter(|x| x.1 > 0)
+                .collect()
+        } else {
+            cands
             .iter()
             .map(|&v| {
                 let s: i64 = idx
@@ -1483,7 +1539,8 @@ impl Situation {
                 (v, s)
             })
             .filter(|x| x.1 > 0)
-            .collect();
+            .collect()
+        };
         let st: i128 = sc.iter().map(|x| x.1 as i128).sum();
         let bt = self.bg_total.max(1);
         let mut out: Vec<(u32, i128)> = sc.drain(..).map(|(v, s)| (v, s as i128 * bt - self.bg[v as usize] as i128 * st)).filter(|x| x.1 > 0).collect();
@@ -1616,19 +1673,23 @@ impl Situation {
     /// Score features against the current query: the sum of W[q bit, feature].
     fn qscore(&self, q: &[u32], f: &[u32], cache: &mut HashMap<u32, i64>) -> i64 {
         // the query as counts per bit (a bit two hashes land on counts twice, as in the dense table)
-        let mut qset = [0u8; QD];
-        if self.cfg.qsparse == 2 {
+        let mut memo = self.qset_memo.borrow_mut();
+        if self.cfg.qsparse == 2 && memo.0 != q {
+            memo.0.clear();
+            memo.0.extend_from_slice(q);
+            memo.1.iter_mut().for_each(|x| *x = 0);
             for &b in q {
-                qset[b as usize] += 1;
+                memo.1[b as usize] += 1;
             }
         }
+        let qset = &memo.1;
         f.iter()
             .map(|&fi| {
                 *cache.entry(fi).or_insert_with(|| {
                     if self.cfg.qsparse == 3 {
                         q.iter().map(|&b| { let (i, sg) = self.qbind(b, fi); sg * self.qh[i] as i64 }).sum()
                     } else if self.cfg.qsparse == 2 {
-                        self.qr.score(fi, &qset)
+                        self.qr.score(fi, qset)
                     } else if self.cfg.qsparse == 1 {
                         q.iter().map(|&b| self.qs.get(b * NF as u32 + fi) as i64).sum()
                     } else {
