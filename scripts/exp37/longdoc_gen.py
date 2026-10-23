@@ -14,10 +14,14 @@ Local questions: "where is X ?" (the person's place in this scene), "who has the
 Output: PREFIX.ids (u32 little-endian word ids), PREFIX.txt (vocabulary, one word per line), PREFIX.info.json with
 "answers": [[position of the answer word, kind], ...] (kinds: where-person, who-has, where-object, home, owner,
 found) and "dist": the distance in words for each answer (-1 for local questions), plus the parameters.
-usage: longdoc_gen.py WORDS OUT_PREFIX [seed]"""
+Control (5th argument "shuffle"): each chapter's heading prints a permuted chapter number while the questions keep
+the true one, so a reader that answers by finding the heading should fall to about chance on found; the rest of
+the book is the same as without it (the permutation has its own random generator).
+usage: longdoc_gen.py WORDS OUT_PREFIX [seed] [shuffle]"""
 import sys, json, math, random
 
 n_words = int(sys.argv[1]); out = sys.argv[2]; rng = random.Random(int(sys.argv[3]) if len(sys.argv) > 3 else 1)
+shuffle = len(sys.argv) > 4 and sys.argv[4] == "shuffle"
 names = ("mary john sandra daniel emma fred bill julie anna peter lucy oscar nina victor clara hugo "
          "rosa felix irene marco tess omar ella sam").split()
 places = "kitchen garden office bathroom hallway bedroom cellar attic library garage porch studio".split()
@@ -39,6 +43,12 @@ def number_words(k):
     return [tens[t - 2]] + ([units[u - 1]] if u else [])
 
 n_chapters = 99
+perm = list(range(1, n_chapters + 1))
+if shuffle:
+    prng = random.Random(4242)
+    while True:                                   # a permutation that moves every chapter
+        prng.shuffle(perm)
+        if all(perm[i] != i + 1 for i in range(n_chapters)): break
 chapter_words = max(400, n_words // n_chapters)
 toks, answers, dist = [], [], []
 def say(*ws): toks.extend(ix[w] for w in ws)
@@ -78,7 +88,7 @@ def long_question():
     say(".")
 
 for ch in range(1, n_chapters + 1):
-    say("chapter", *number_words(ch), ".")
+    say("chapter", *number_words(perm[ch - 1]), ".")
     start = len(toks)
     while len(toks) - start < chapter_words:
         say("scene", ".")
@@ -135,6 +145,7 @@ import numpy as np
 np.array(toks, dtype=np.uint32).tofile(out + ".ids")
 open(out + ".txt", "w").write("\n".join(vocab))
 json.dump({"answers": answers, "dist": dist, "words": len(toks), "chapters": n_chapters, "chapter_words": chapter_words,
+           "shuffled_headings": shuffle,
            "names": names, "places": places, "objects": objects}, open(out + ".info.json", "w"))
 from collections import Counter
 c = Counter(k for _, k in answers)

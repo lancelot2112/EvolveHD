@@ -51,6 +51,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         heads_path: flag(args, "--sit-heads-path"),
         heads_per_kind: g("--sit-heads-per-kind", "8").parse().unwrap(),
         ranges: flag(args, "--sit-ranges"),
+        fast: flag(args, "--sit-fast"),
         recency: flag(args, "--sit-recency"),
         bounce: flag(args, "--sit-bounce"),
         supersede: flag(args, "--sit-supersede"),

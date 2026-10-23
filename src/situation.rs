@@ -95,7 +95,33 @@
 //!     the cap.
 //! - `seed`: salts the codes, keys and context.
 use crate::meaning::{Meaning, MeaningCfg};
-use std::collections::HashMap;
+/// A fast integer hasher (FxHash-style multiply-rotate) for the many small-key maps; std's SipHash is the costlier
+/// default meant to resist adversarial keys, which these maps do not face.
+#[derive(Default, Clone, Copy)]
+pub struct Fx(u64);
+impl std::hash::Hasher for Fx {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x51_7C_C1_B7_27_22_0A_95);
+        }
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.0 = (self.0.rotate_left(5) ^ i as u64).wrapping_mul(0x51_7C_C1_B7_27_22_0A_95);
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.0 = (self.0.rotate_left(5) ^ i as u64).wrapping_mul(0x51_7C_C1_B7_27_22_0A_95);
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x51_7C_C1_B7_27_22_0A_95);
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64);
+    }
+}
+type HashMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
 
 fn hash(a: u64, b: u64) -> u64 {
     crate::rng::hash2(a, b)
@@ -127,6 +153,9 @@ pub struct SitCfg {
     /// are anchors; the cue entity's history inside each anchor's unit gives candidates, with features for the opener
     /// type, first or latest occurrence, span length, the path and the rank within the range.
     pub ranges: bool,
+    /// Speed: slot reads cached within a word (cleared on any write), kind member lists kept with the kinds, the
+    /// background total kept as a running sum, and a cheaper multiplicative phase hash for values.
+    pub fast: bool,
     pub win: usize,
     pub ntop: usize,
     pub pool: f64,
@@ -450,6 +479,9 @@ pub struct Situation {
     ctext: HashMap<u64, (u64, u64, u32)>,           // --sit-ranges: clause text -> (first start, latest start, first word)
     opener_pos: HashMap<u32, Vec<u64>>,             // first word -> start positions of its clauses (ascending)
     posts: HashMap<(u32, u32, u32), Vec<(u64, u32)>>, // head key -> its history (time, value), ascending
+    rcache: std::cell::RefCell<HashMap<(u32, u32, u32), Vec<(u32, i128)>>>, // --sit-fast: slot reads this word
+    members: HashMap<u32, Vec<u32>>,                // --sit-fast: kind -> its seen words
+    bg_total: i128,                                 // --sit-fast: the background summed over seen words
     qre: Vec<i8>,                                   // the question slots' own ternary phasor store (an area of its own)
     qim: Vec<i8>,
     qroute: Vec<(usize, u32)>,                      // each route's (cue position, cue word's kind), aligned with qcands
@@ -550,18 +582,18 @@ impl Situation {
             bg: vec![0; nw + 1],
             ctx_off: (0..cfg.k).map(|i| (hash(91 + sd, i as u64) % cfg.d as u64) as u32).collect(),
             ctx_ph: (0..cfg.k).map(|i| (hash(92 + sd, i as u64) & 3) as u8).collect(),
-            seg_draw: HashMap::new(),
-            seg_hits: HashMap::new(),
-            seg_n: HashMap::new(),
+            seg_draw: HashMap::default(),
+            seg_hits: HashMap::default(),
+            seg_n: HashMap::default(),
             boundary: vec![false; nw],
             mn,
-            path_count: HashMap::new(),
-            path_class: HashMap::new(),
+            path_count: HashMap::default(),
+            path_class: HashMap::default(),
             protos: vec![],
             class_count: vec![],
-            senses: HashMap::new(),
-            c1: HashMap::new(),
-            c2: HashMap::new(),
+            senses: HashMap::default(),
+            c1: HashMap::default(),
+            c2: HashMap::default(),
             hist: vec![],
             clause: vec![],
             seen: vec![false; nw],
@@ -574,7 +606,7 @@ impl Situation {
             wcount: vec![0; nw],
             kind: vec![nw as u32; nw + 1],
             kn: nw as u32,
-            ksize: HashMap::new(),
+            ksize: HashMap::default(),
             fdf: vec![0; FB],
             fseen: 0,
             qw: if cfg.query && cfg.qsparse == 0 { vec![0; QD * NF] } else { vec![] },
@@ -582,12 +614,15 @@ impl Situation {
             qr: RowW::new(if cfg.query && cfg.qsparse == 2 { NF } else { 0 }),
             qh: if cfg.query && cfg.qsparse == 3 { vec![0; 1 << cfg.qholo] } else { vec![] },
             qform: 0,
-            heads_tab: HashMap::new(),
+            heads_tab: HashMap::default(),
             bufp: vec![],
-            ctext: HashMap::new(),
-            opener_pos: HashMap::new(),
-            posts: HashMap::new(),
-            heads_of: HashMap::new(),
+            ctext: HashMap::default(),
+            opener_pos: HashMap::default(),
+            posts: HashMap::default(),
+            rcache: std::cell::RefCell::new(HashMap::default()),
+            members: HashMap::default(),
+            bg_total: 0,
+            heads_of: HashMap::default(),
             qre: if cfg.qslots { vec![0; cfg.d] } else { vec![] },
             qim: if cfg.qslots { vec![0; cfg.d] } else { vec![] },
             qroute: vec![],
@@ -597,10 +632,10 @@ impl Situation {
             ring_at: 0,
             win: vec![],
             wcands: vec![],
-            arb: HashMap::new(),
+            arb: HashMap::default(),
             arb_key: (0, 0),
-            conf_s: HashMap::new(),
-            conf_c: HashMap::new(),
+            conf_s: HashMap::default(),
+            conf_c: HashMap::default(),
             cur_ks: (0, 0),
             cur_kc: None,
             win_top: None,
@@ -617,33 +652,33 @@ impl Situation {
             qranks: vec![],
             after_q: false,
             sq: vec![],
-            sq_cand: HashMap::new(),
-            sq_in: HashMap::new(),
+            sq_cand: HashMap::default(),
+            sq_in: HashMap::default(),
             qring: vec![],
             qring_at: 0,
-            sq_ptr: HashMap::new(),
-            sq_rev: HashMap::new(),
+            sq_ptr: HashMap::default(),
+            sq_rev: HashMap::default(),
             sq_next: 0,
-            sq_pid: HashMap::new(),
-            kmerge: HashMap::new(),
+            sq_pid: HashMap::default(),
+            kmerge: HashMap::default(),
             sq_work: 0,
             sq_open_sum: 0,
             sq_peak: 0,
             sq_opened: 0,
             sq_closed: 0,
             mood: vec![0; nw],
-            succ: HashMap::new(),
-            succ_top: HashMap::new(),
+            succ: HashMap::default(),
+            succ_top: HashMap::default(),
             buf: vec![],
-            stamp: HashMap::new(),
-            occ: HashMap::new(),
-            dcl: HashMap::new(),
-            hop: HashMap::new(),
-            g2: HashMap::new(),
-            comp: HashMap::new(),
-            miss: HashMap::new(),
+            stamp: HashMap::default(),
+            occ: HashMap::default(),
+            dcl: HashMap::default(),
+            hop: HashMap::default(),
+            g2: HashMap::default(),
+            comp: HashMap::default(),
+            miss: HashMap::default(),
             routes: vec![],
-            halt: HashMap::new(),
+            halt: HashMap::default(),
             committed: 0,
             dropped: 0,
             cfg,
@@ -675,7 +710,7 @@ impl Situation {
     }
     /// The classes with the most uses, each with its most used paths (dir-tagged: first element 0 forward, 1 back).
     pub fn classes(&self, top: usize) -> Vec<Vec<Vec<u32>>> {
-        let mut by: HashMap<u32, Vec<(u64, Vec<u32>)>> = HashMap::new();
+        let mut by: HashMap<u32, Vec<(u64, Vec<u32>)>> = HashMap::default();
         for (p, &c) in &self.path_count {
             if let Some(&k) = self.path_class.get(p) {
                 by.entry(k).or_default().push((c, p.clone()));
@@ -895,7 +930,7 @@ impl Situation {
         let mut paths: Vec<(u64, Vec<u32>)> = self.path_count.iter().map(|(p, &c)| (c, p.clone())).collect();
         paths.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         // each old class's most used path, to carry its counts over to wherever that path lands now
-        let mut rep: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut rep: HashMap<u32, Vec<u32>> = HashMap::default();
         for (_, p) in &paths {
             if let Some(&c) = self.path_class.get(p) {
                 rep.entry(c).or_insert_with(|| p.clone());
@@ -1064,8 +1099,8 @@ impl Situation {
 
     /// bnd2: boundaries as the words open on both sides (see the config field).
     fn open_boundaries(&mut self) {
-        let mut sc: HashMap<u32, Vec<u32>> = HashMap::new();
-        let mut pc: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut sc: HashMap<u32, Vec<u32>> = HashMap::default();
+        let mut pc: HashMap<u32, Vec<u32>> = HashMap::default();
         for (&(a, b), &c) in &self.succ {
             sc.entry(a).or_default().push(c);
             pc.entry(b).or_default().push(c);
@@ -1186,7 +1221,7 @@ impl Situation {
             let mut proposed: Vec<(u32, u32)> = vec![];
             let mut out: Vec<(u32, Vec<bool>, Vec<u32>)> = vec![];
             for (lw, code, ms) in leaders.into_iter() {
-                let mut by: HashMap<u32, Vec<u32>> = HashMap::new();
+                let mut by: HashMap<u32, Vec<u32>> = HashMap::default();
                 for &w in &ms {
                     by.entry(self.kind[w as usize]).or_default().push(w);
                 }
@@ -1217,7 +1252,7 @@ impl Situation {
                     out.push((lw, code, rest));
                 }
             }
-            let mut km: HashMap<(u32, u32), u32> = HashMap::new();
+            let mut km: HashMap<(u32, u32), u32> = HashMap::default();
             for pr in proposed {
                 km.insert(pr, self.kmerge.get(&pr).copied().unwrap_or(0) + 1);
             }
@@ -1228,7 +1263,7 @@ impl Situation {
         let mut used: Vec<u32> = vec![];
         let mut newk = self.kind.clone();
         for (lw, _, ms) in &leaders {
-            let mut votes: HashMap<u32, u32> = HashMap::new();
+            let mut votes: HashMap<u32, u32> = HashMap::default();
             for &w in ms {
                 if self.kind[w as usize] != self.kn {
                     *votes.entry(self.kind[w as usize]).or_insert(0) += 1;
@@ -1245,6 +1280,13 @@ impl Situation {
             }
         }
         self.kind = newk;
+        if self.cfg.fast {
+            self.members.clear();
+            for &w in &self.words {
+                self.members.entry(self.kind[w as usize]).or_default().push(w);
+            }
+            self.rcache.get_mut().clear();
+        }
         if std::env::var("SIT_KDBG").is_ok() {
             let mut g: Vec<String> = leaders.iter().filter(|l| l.2.len() >= 2).map(|l| format!("{:?}", l.2)).collect();
             g.sort();
@@ -1280,7 +1322,7 @@ impl Situation {
     }
     /// The kinds, as groups of words (diagnostics).
     pub fn kind_groups(&self) -> Vec<Vec<u32>> {
-        let mut by: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut by: HashMap<u32, Vec<u32>> = HashMap::default();
         for w in 0..self.nw as u32 {
             if self.wcount[w as usize] > 0 {
                 by.entry(self.kind[w as usize]).or_default().push(w);
@@ -1312,6 +1354,12 @@ impl Situation {
     }
     #[inline]
     fn vph(&self, v: u32, e: u32) -> u8 {
+        if self.cfg.fast {
+            // a cheaper phase: two multiplies and a fold
+            let h = (v as u64 ^ self.cfg.seed.wrapping_mul(0x1000_0001).wrapping_add(0x7777)).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ (e as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+            return ((h ^ (h >> 31)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 62) as u8;
+        }
         (hash(v as u64 + 0x7777 + self.cfg.seed.wrapping_mul(0x1000_0001), e as u64) & 3) as u8
     }
     fn write(&mut self, e: u32, c: u32, kd: u32, v: u32) {
@@ -1324,9 +1372,26 @@ impl Situation {
             self.im[x] = (self.im[x] + m * DIM[p]).clamp(-1, 1);
         }
         self.bg[v as usize] += 1;
+        if self.cfg.fast {
+            if self.seen[v as usize] {
+                self.bg_total += 1;
+            }
+            self.rcache.get_mut().clear();
+        }
     }
     /// The best value in e's slot for class c (by excess over its background, by subtraction), and its excess.
     fn read_best(&self, e: u32, c: u32, kd: u32, excl: &[u32]) -> Option<(u32, i128)> {
+        if self.cfg.fast {
+            // the slot's ranked values, read once per word (the background share over all the kind's words, so the
+            // exclusions only filter the ranking)
+            if let Some(r) = self.rcache.borrow().get(&(e, c, kd)) {
+                return r.iter().find(|x| !excl.contains(&x.0)).copied();
+            }
+            let r = self.read_ranked(e, c, kd);
+            let out = r.iter().find(|x| !excl.contains(&x.0)).copied();
+            self.rcache.borrow_mut().insert((e, c, kd), r);
+            return out;
+        }
         let (idx, ph) = self.key(e, c, kd);
         let z: Vec<(i32, i32)> = idx
             .iter()
@@ -1370,6 +1435,48 @@ impl Situation {
             .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
     }
 
+    /// --sit-fast: all of a slot's values with positive excess, best first (over the kind's member list).
+    fn read_ranked(&self, e: u32, c: u32, kd: u32) -> Vec<(u32, i128)> {
+        let (idx, ph) = self.key(e, c, kd);
+        let z: Vec<(i32, i32)> = idx
+            .iter()
+            .zip(&ph)
+            .map(|(&x, &kp)| {
+                let (a, b) = (self.re[x as usize] as i32, self.im[x as usize] as i32);
+                match kp & 3 {
+                    0 => (a, b),
+                    1 => (b, -a),
+                    2 => (-a, -b),
+                    _ => (-b, a),
+                }
+            })
+            .collect();
+        let typed = self.cfg.kinds && kd != self.kn;
+        let empty: Vec<u32> = vec![];
+        let cands: &Vec<u32> = if typed { self.members.get(&kd).unwrap_or(&empty) } else { &self.words };
+        let mut sc: Vec<(u32, i64)> = cands
+            .iter()
+            .map(|&v| {
+                let s: i64 = idx
+                    .iter()
+                    .zip(&z)
+                    .map(|(&x, &(zr, zi))| match self.vph(v, x) {
+                        0 => zr,
+                        1 => zi,
+                        2 => -zr,
+                        _ => -zi,
+                    } as i64)
+                    .sum();
+                (v, s)
+            })
+            .filter(|x| x.1 > 0)
+            .collect();
+        let st: i128 = sc.iter().map(|x| x.1 as i128).sum();
+        let bt = self.bg_total.max(1);
+        let mut out: Vec<(u32, i128)> = sc.drain(..).map(|(v, s)| (v, s as i128 * bt - self.bg[v as usize] as i128 * st)).filter(|x| x.1 > 0).collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out
+    }
     fn ctx_key(&self) -> u64 {
         let n = self.hist.len();
         let at = |j: usize| if j < n { self.hist[n - 1 - j] as u64 } else { u64::MAX };
@@ -1458,7 +1565,7 @@ impl Situation {
         }
         if self.cfg.kindfirst {
             // each kind's newest first, then the second newest of each (stable: newest first within a rank)
-            let mut rk: HashMap<u32, u32> = HashMap::new();
+            let mut rk: HashMap<u32, u32> = HashMap::default();
             let mut tagged: Vec<(u32, (u64, u32, u32))> = v
                 .iter()
                 .map(|x| {
@@ -1473,7 +1580,7 @@ impl Situation {
             tagged.sort_by_key(|t| t.0);
             v = tagged.into_iter().map(|t| t.1).collect();
         }
-        let mut seen_k: HashMap<u32, u32> = HashMap::new();
+        let mut seen_k: HashMap<u32, u32> = HashMap::default();
         let mut out = vec![];
         let mut derived = 0;
         for x in v {
@@ -1679,7 +1786,7 @@ impl Situation {
         } else {
             Self::qform_of(cue)
         };
-        let mut memo: HashMap<(usize, u32, u32, u32), i64> = HashMap::new();
+        let mut memo: HashMap<(usize, u32, u32, u32), i64> = HashMap::default();
         let mut qroute: Vec<(usize, u32)> = vec![];
         self.after_q = self.hist.last().map_or(false, |&u| self.boundary[u as usize] && self.mood[u as usize] >= 8);
         if self.cfg.sq_max > 0 && self.cfg.sq_mode > 0 && self.after_q {
@@ -1702,7 +1809,7 @@ impl Situation {
                 }
             }
         }
-        let mut cache: HashMap<u32, i64> = HashMap::new();
+        let mut cache: HashMap<u32, i64> = HashMap::default();
         let mut cands: Vec<(Vec<u32>, u32, i64, u64, Route, (u32, u32))> = vec![];
         let anchors = if self.cfg.ranges && self.after_q { self.anchors(cue) } else { vec![] };
         let dbg = std::env::var("SIT_QDBG").is_ok();
@@ -1722,12 +1829,14 @@ impl Situation {
                                 // the value's kind as it is now (kinds settle after a head is written)
                                 self.heads_tab.get(&(e, key, k)).map(|&(val, t, c)| (t, c, if self.cfg.heads_path { self.kk(val) } else { k }, val, key))
                             })
+                            // fast: only content values (kinds of 3 or more), before the sort
+                            .filter(|h| !self.cfg.fast || self.ksize.get(&h.2).copied().unwrap_or(0) >= 3)
                             .collect()
                     })
                     .unwrap_or_default();
                 let (per_kind, cap) = if self.cfg.heads_path { (self.cfg.heads_per_kind, 48) } else { (2, 8) };
                 hs.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-                let mut seen_k: HashMap<u32, u32> = HashMap::new();
+                let mut seen_k: HashMap<u32, u32> = HashMap::default();
                 let mut taken = 0;
                 for (t, c, k, val, key) in hs {
                     let r = seen_k.entry(k).or_insert(0);
@@ -1804,6 +1913,9 @@ impl Situation {
                 }
                 cands.push((f1, m, sc, self.stamp_of(e, c, k), (c, k, u32::MAX, u32::MAX), (r, u32::MAX)));
                 qroute.push((j, ke));
+                if self.cfg.fast && j >= 4 {
+                    continue; // fast: second hops only from the 4 nearest cue words
+                }
                 for (c2, k2, r2) in self.newest_slots(m, 8) {
                     let mut ex = cue.to_vec();
                     ex.push(m);
@@ -1955,7 +2067,7 @@ impl Situation {
             }
             let at = (hash(self.t, 4242 + i as u64) % self.ring.len() as u64) as usize;
             let (rq, routes, rw) = self.ring[at].clone();
-            let mut cache: HashMap<u32, i64> = HashMap::new();
+            let mut cache: HashMap<u32, i64> = HashMap::default();
             let mut best: Option<(i64, usize)> = None;
             let mut good: Option<(i64, usize)> = None;
             for (r, (f, v)) in routes.iter().enumerate() {
@@ -1995,8 +2107,8 @@ impl Situation {
             }
             v
         };
-        let mut memo: HashMap<(usize, usize, u32), i64> = HashMap::new();
-        let mut cache: HashMap<u32, i64> = HashMap::new();
+        let mut memo: HashMap<(usize, usize, u32), i64> = HashMap::default();
+        let mut cache: HashMap<u32, i64> = HashMap::default();
         let mut out: Vec<(Vec<u32>, u32, i64)> = vec![];
         for (j, &e) in cue.iter().enumerate() {
             let ke = self.kk(e) as u64;
@@ -2152,7 +2264,7 @@ impl Situation {
             let mut top = i64::MIN;
             for j in 0..4 {
                 let f = self.route_feats(j, x, &hops);
-                let mut cache: HashMap<u32, i64> = HashMap::new();
+                let mut cache: HashMap<u32, i64> = HashMap::default();
                 let mut s = 0i64;
                 for q in &self.qring {
                     cache.clear();
@@ -2307,6 +2419,9 @@ impl Situation {
 
     /// The candidates for the next word: (value, weight), best first.
     pub fn recall(&mut self) -> Vec<(u32, f64)> {
+        if self.cfg.fast {
+            self.rcache.get_mut().clear(); // keys may have drifted since the last read
+        }
         let ctx = self.ctx_key();
         let cue: Vec<u32> = self.cue_words();
         if self.cfg.query {
@@ -2613,6 +2728,9 @@ impl Situation {
     }
     /// Learn from word w (after it has been predicted).
     pub fn observe(&mut self, w: u32) {
+        if self.cfg.fast {
+            self.rcache.get_mut().clear();
+        }
         let ctx = self.ctx_key();
         let cue: Vec<u32> = self.cue_words();
         self.wcount[w as usize] += 1;
@@ -2891,6 +3009,10 @@ impl Situation {
         if !self.seen[w as usize] {
             self.seen[w as usize] = true;
             self.words.push(w);
+            if self.cfg.fast {
+                self.bg_total += self.bg[w as usize] as i128;
+                self.members.entry(self.kind[w as usize]).or_default().push(w);
+            }
         }
         // the clocks: slot i steps its phase every clock * 2^(i mod 7) words
         if self.cfg.clock > 0 {
