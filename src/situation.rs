@@ -1999,7 +1999,7 @@ impl Situation {
         let mut cache: HashMap<u32, i64> = HashMap::default();
         let mut cands: Vec<(Vec<u32>, u32, i64, u64, Route, (u32, u32))> = vec![];
         let anchors = if self.cfg.ranges && self.after_q { self.anchors(cue) } else { vec![] };
-        let dbg = std::env::var("SIT_QDBG").is_ok();
+        let dbg = std::env::var("SIT_QDBG").is_ok() && std::env::var("SIT_QDBG_FROM").ok().and_then(|x| x.parse::<u64>().ok()).map_or(true, |f| self.t >= f);
         let mut desc: Vec<String> = vec![];
         for (j, &e) in cue.iter().enumerate() {
             if !self.seen[e as usize] {
@@ -2153,7 +2153,7 @@ impl Situation {
         self.qroute = order.iter().map(|&i| qroute[i]).collect();
         let lo = cands.iter().map(|x| x.2).min().unwrap_or(0);
         let props: Vec<(u32, u32)> = cands.iter().map(|x| ((x.2 - lo + 1).min(u32::MAX as i64) as u32, x.1)).collect();
-        if std::env::var("SIT_QDBG").is_ok() && !cands.is_empty() {
+        if dbg && !cands.is_empty() {
             let vals: Vec<String> = cands.iter().take(12).map(|x| format!("{}:{}", x.1, x.2)).collect();
             eprintln!("QDBG {} n {} top {}", self.t, cands.len(), vals.join(" "));
         }
