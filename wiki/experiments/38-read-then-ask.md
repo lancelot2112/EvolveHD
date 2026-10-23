@@ -42,7 +42,7 @@ On `ld2m_pq` (book A, then book B, questions in the text), scored on book B:
 | before (`R_ab_seq`) | 93.8% | 93.8% | 93.9% | 92.2% | 56.6% | 69.1% |
 | **`--sit-scope` (`R_ab_scope`)** | **98.9%** | **99.7%** | **99.4%** | **99.3%** | **99.4%** | **100%** |
 
-- **Far-found errors fall from 792 to 9 of 1,916.** Right-chapter, wrong-part errors fall from 548 to 5.
+- **Far-found errors fall from 792 to 9 of 1,916.** Right-chapter errors (wrong part or wrong book, counting every wrong answer that equals one of X's finds in that chapter) fall from 548 to 5.
 - **Other questions:** home 100% and owner 99.5–100% in every bucket; local questions 100 / 98.7 / 91.7%.
 - **The prediction (≥88–90%) is met.**
 - **On a single book** (the 200k book, `R_sc200` against `R_ns200`, same load): found 98.3 / 96.7 / 97.3 / 96.8 / 93.7% against 100 / 96.2 / 97.0 / 97.0 / 94.3%. Who-has is 88.1% against 90.6%. The run takes 438 s against 422 s.
@@ -63,10 +63,13 @@ On `ld2m_pq` (book A, then book B, questions in the text), scored on book B:
 
 Question counts: found 15 / 186 / 1,442 / 1,320, home 17, owner 7.
 
-- **Reading by the index pass matches the full read** (found within ±3 points) **at about an eighth of the time.** The full read's time is estimated: its total of 4,816 s, less the 2,732 s that book A took in `R_ar_ans`. Predicting every word is not needed to answer.
-- **The book level removes most of the earlier-book errors.** Of 2,762 far-found questions, `R_ar_ans` gives book A's answer at the same part and chapter 178 times, and `R_ar_epoch2` 14 times (`why_wrong.py`). These are the errors `--sit-scope` cannot fix here: book A never repeats a label, so the scope features never learned to tell occurrences apart.
-- **Home and owner without echoes are weak.** The right answer is often not among the 8 candidates (home recall@8 41%).
-  - In the in-stream books, nearly every far home or owner question had been asked and answered before. On `ld1m_p`, 4,473 home questions at 8k+ words have an earlier echo and 5 have none. So their 99–100% was mostly echo.
+- **Reading by the index pass matches the full read** (found within 3.3 points) **at about an eighth of the time.** The full read's time is estimated: its total of 4,816 s, less the 2,732 s that book A took in `R_ar_ans`. This assumes book A took as long in both runs; under heavier load, book A took 3,864–3,948 s in other runs here. Predicting every word is not needed to answer.
+- **The book level removes most of the earlier-book errors.** Of 2,762 far-found questions, `R_ar_ans` gives book A's answer at the same part and chapter 178 times, and `R_ar_epoch2` 14 times (`why_wrong.py`). These are the errors `--sit-scope` cannot fix here: book A never repeats a part label, so the scope features never learned to tell outer occurrences apart. Earlier-book errors overall fall from 230 to 87, though "same chapter, other part, earlier book" rises from 52 to 73.
+- **Home and owner without echoes are weak.**
+  - For home, the right answer is often not among the 8 candidates (recall@8 41%).
+  - For owner it always is (recall@8 100%), so its low scores (42.9% and 28.6%) are a ranking failure.
+  - Owner has only 7 questions.
+  - In the in-stream books, nearly every far home or owner question had been asked and answered before. On `ld1m_p`, 4,473 scored home questions at 8k+ words have an earlier echo and 5 have none; for owner it is 4,441 and 2. So their 99–100% was mostly echo.
   - Training on a book with no echoes (`ld1m_pn`, each fact asked once at a log-spread delay) does not fix it. On that book's own questions, home at 8k–64k scores 93% (43) and owner 71% (24). On book C (`R_nec_ans`) they score 29% (17) and 14% (7).
   - A route-logging run is under way.
 - **A failure mode found on the way.** In a first `--sit-epoch` run, a bug (the inner span limited to the current epoch) made book C's first answers wrong. The question mood counter then dropped below its threshold, and the reader stopped answering after 84 of 3,000 questions. The question detector keeps adapting while skill is frozen, so a run of wrong answers can switch answering off.
@@ -75,10 +78,10 @@ Question counts: found 15 / 186 / 1,442 / 1,320, home 17, owner 7.
 
 - **Question replay** (`R_p1m_rq4`: 4 replays per question of kept question mistakes) does not speed learning. Far found (fact at least 64k back), by 100k-word window from 0 to 1M words:
   - without replay: 59 / 62 / 80 / 98 / 97 / 91 / 98 / 100 / 99 / 99 / 100%;
-  - with replay: 62 / 60 / 81 / 94 / 96 / 87 / 94 / 99 / 100 / 99 / 100%.
+  - with replay: 62 / 60 / 81 / 94 / 96 / 86 / 94 / 99 / 100 / 99 / 100%.
 
   By the forum's own falsifier, the slowness is credit starvation: the nested route can only be practised once there are earlier parts to ask about. It is not too few presentations.
-- **Merging learned skill between shards** (`--sit-shard-learn`, deltas summed; the 200k book, 4 shards from a 20k-word warm-up, `R_sh4learn`) closes about 40% of the gap to the sequential read, and pass 1 then costs a full read.
+- **Merging learned skill between shards** (`--sit-shard-learn`, deltas summed; the 200k book, 4 shards from a 20k-word warm-up, `R_sh4learn`) closes about a third of the gap to the sequential read (36% over the six cells, 15–71% by cell), and pass 1 then costs a full read.
 
 | Stretch (shards 1–3) | Who-has | Owner |
 |---|---|---|
@@ -90,10 +93,10 @@ The prediction (within 3–4 points of sequential) is not met.
 
 ## Step 4: a new vocabulary
 
-Book C′ (`ld1m_s`) is book C with new words for every person, place, object and heading word ("section", "volume"), after book A. It is read by the index pass with skill frozen and `--sit-epoch` (`R_ps_word2`). Found scores 100 / 88.2 / 94.8 / 91.2% (1k–8k / 8k–64k / 64k–512k / 512k+); home at 8k–64k is 64.7% (17). That is as good as the same-vocabulary book (`R_ar_epoch2`), or better.
+Book C′ (`ld1m_s`) is book C with new words for every person, place, object and heading word ("section", "volume"), after book A. It is read by the index pass with skill frozen and `--sit-epoch` (`R_ps_word2`). Found scores 100 / 88.2 / 94.8 / 91.2% (1k–8k / 8k–64k / 64k–512k / 512k+); home at 8k–64k is 64.7% (17). That is as good as the same-vocabulary book (`R_ar_epoch2`) or better at 8k–512k, and slightly lower at 512k+ (91.2% against 92.4%).
 
 - **The TEM seat's prediction for word-id features (at most 25% at 64k+) is falsified.** The reader keeps learning structure while it reads (kinds, classes, boundaries, opener types, all in `observe_only`). The new words join the old kinds, and the frozen route skill still fits. Frozen actions plus continual structure learning carry a trained reader into new words.
-- **The role-features variant (`--sit-roles`) was not run.** It cannot improve on this.
+- **The role-features variant (`--sit-roles`) was not run;** it was not needed for this test.
 
 ## Step 5: a ladder toward natural text
 
@@ -101,19 +104,19 @@ The 200k book with one factor at a time (`R_lad_*`); the plain book is `R_sc200`
 
 | Book | Local (where / who / where-obj) | Home | Owner | Found |
 |---|---|---|---|---|
-| plain | 99.7 / 88.1 / 76.3% | 92–100% | 91–100% | 94–98% |
+| plain | 99.7 / 88.1 / 76.3% | 92–100% | 92–100% | 94–98% |
 | pronouns for 50% of repeat subjects | 86.7 / 42.5 / 33.4% | 85–91% | 85–100% | 71–84% |
 | + `--sit-anaphora` | 91.8 / 67.9 / 50.2% | 90–97% | 83–94% | 79–90% |
 | modifiers in 30% of clauses | 99.4 / 81.8 / 66.9% | 40–45% at 8k+ | 55–77% at 8k+ | 94–100% |
 | + `--sit-skip` | 99.6 / 91.7 / 65.6% | 92–100% | 73–100% | 94–100% |
 | synonym verbs in 50% of statements | 99.8 / 91.6 / 73.5% | 85–98% | 83–100% | 91–98% |
-| plain + `--sit-skip` | 99.7 / 89.4 / 75.4% | 99–100% | 91–100% | 94–98% |
+| plain + `--sit-skip` | 99.7 / 89.4 / 75.4% | 99–100% | 92–100% | 94–98% |
 
 - **Modifiers broke home and owner.** "mary finally lives in the kitchen" made a new exact path, so one relation split into many, and the variants crowded the old fact out of the per-kind cap. With skippable words left out of the path key, home at 8k–64k rises from 40% to 99%. The skippable words are learned from bigram counts; in prose the same rule would drop adjectives.
 - **The modifier is not lost.** Questions about it ("who finally found the lamp in chapter M ?", `qual`, `R_lad_mod03q` and `_skip`) score 83–100% (88–90% at 64k+) with or without `--sit-skip`, with recall@8 at 97–100%. Every pair in a clause is bound, so "finally" keeps its person as a value.
-- **Pronouns break local questions most,** because "she" becomes an entity. Stand-in resolution recovers about half of the loss. It resolved 2,268 clauses, which is fewer than the pronouns present, so its test misses many.
+- **Pronouns break local questions most,** because "she" becomes an entity. Stand-in resolution recovers about half of the loss. It resolved 2,268 clauses, more than the 1,999 pronouns in the book, so its test also fires on clauses that do not start with a pronoun (at least 269). The count does not show how many pronouns it caught.
 - **Synonyms barely hurt.** "discovered" joins the kind of "found".
-- **The language seat's predictions** were found and home at 8k+ ≤55% with pronouns (actual 82–91%), and home at 64k+ ≤60% with modifiers (actual 45%). Both fixes were to recover to within 5 points: met by `--sit-skip` for home, not met by `--sit-anaphora`.
+- **The language seat's predictions** were found and home at 8k+ ≤55% with pronouns (actual 82–91%), and home at 64k+ ≤60% with modifiers (actual 45%). Both fixes were to recover to within 5 points. `--sit-skip` meets it for home at 8k–64k (98.7% against 99.7%) but not at 64k+ (92.1% against 100%); `--sit-anaphora` does not meet it.
 
 ## Step 6: natural text (started)
 
@@ -123,7 +126,11 @@ The pilot stream (`bl_pilot`, 308,702 words, vocabulary 19,018):
 - training: qa1 0k, 1,000 samples; qa1 1k, 200 samples;
 - test, frozen and answer-only: qa1 0k, 100 samples; qa1 4k, 50 samples.
 
-**First runs were too slow.** With the default binding window of 8, a word costs about 23 ms in the book text, against about 1 ms in the synthetic books. 93% of the time went to relation-class lookup, a scan over every class; natural text creates a new class for almost every new path. The class index removed the scan but not the cost: the shared bits are common, and class lookup plus sorting still took 82%. With `--sit-win 4` a word costs about 8 ms. That run is under way.
+**First runs were too slow.**
+- **Cost.** With the default binding window of 8, a word of book text costs about 27 ms (23 ms averaged over words 40k–60k). That compares with about 1 ms on the stream's bAbI-only start, and about 2 ms on this experiment's synthetic books.
+- **Where it goes.** A profile put 93% of the time in relation-class lookup, a scan over every class: natural text creates a new class for almost every new path.
+- **The class index** removed the scan but not the cost. The shared bits are common, and class lookup plus sorting still took 82% (profiles from `perf`, not saved).
+- **With `--sit-win 4`** a word costs about 9 ms (about 10 ms on book text). That run is under way.
 
 ## Lost run
 
