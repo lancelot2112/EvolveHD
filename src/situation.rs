@@ -449,6 +449,43 @@ impl RowW {
         let sat = all().filter(|&&w| w == i8::MAX || w == i8::MIN).count();
         (nz, sat)
     }
+    /// A row as dense weights.
+    fn row(&self, fi: usize) -> Vec<i16> {
+        let mut r = vec![0i16; QD];
+        if !self.dense[fi].is_empty() {
+            for (x, &w) in r.iter_mut().zip(&self.dense[fi]) {
+                *x = w as i16;
+            }
+        } else {
+            for (&b, &w) in self.bits[fi].iter().zip(&self.vals[fi]) {
+                r[b as usize] = w as i16;
+            }
+        }
+        r
+    }
+    /// What was learned since `base`: (feature, bit, change).
+    pub fn delta(&self, base: &RowW) -> Vec<(u32, u16, i16)> {
+        let mut d = vec![];
+        for fi in 0..self.bits.len() {
+            let (a, b) = (self.row(fi), base.row(fi));
+            for (i, (&x, &y)) in a.iter().zip(&b).enumerate() {
+                if x != y {
+                    d.push((fi as u32, i as u16, x - y));
+                }
+            }
+        }
+        d
+    }
+    /// Add learned changes (saturating at 8 bits, as learning does).
+    pub fn apply(&mut self, d: &[(u32, u16, i16)]) {
+        for &(fi, b, mut x) in d {
+            while x != 0 {
+                let step = x.clamp(-127, 127);
+                self.add(fi, b, step as i8);
+                x -= step;
+            }
+        }
+    }
     pub fn dense_rows(&self) -> usize {
         self.dense.iter().filter(|v| !v.is_empty()).count()
     }
@@ -2811,6 +2848,18 @@ impl Situation {
         self.idx_only = true;
         self.observe(w);
         self.idx_only = false;
+    }
+    /// The query weights learned since `base` (a copy of this reader from earlier): for merging shards.
+    pub fn learned_since(&self, base: &RowW) -> Vec<(u32, u16, i16)> {
+        self.qr.delta(base)
+    }
+    /// A copy of the query weights (a shard's starting point, to measure what it learned).
+    pub fn query_weights(&self) -> RowW {
+        self.qr.clone()
+    }
+    /// Add query weights another shard learned.
+    pub fn add_learned(&mut self, d: &[(u32, u16, i16)]) {
+        self.qr.apply(d);
     }
     /// The time (words read).
     pub fn time(&self) -> u64 {

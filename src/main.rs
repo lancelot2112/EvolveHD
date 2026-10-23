@@ -188,6 +188,9 @@ fn sharded_read(args: &[String], ids: &[u32], nw: usize) -> (Vec<u8>, Vec<u32>, 
     let lead = num("--sit-leadin", 256);
     let threads = num("--sit-threads", std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1)).max(1);
     let merge = !flag(args, "--sit-shard-nomerge");
+    // --sit-shard-learn: pass 1 also predicts (and so learns); what each shard's query learner learned is added to
+    // every later shard in pass 2
+    let learn = flag(args, "--sit-shard-learn");
     fn span(x: &mut Situation, ids: &[u32], lo: usize, hi: usize, predict: bool, out: &mut Vec<u8>, top: &mut Vec<u32>) {
         for t in lo..hi {
             let w = ids[t];
@@ -240,12 +243,14 @@ fn sharded_read(args: &[String], ids: &[u32], nw: usize) -> (Vec<u8>, Vec<u32>, 
     // the copies of the warm reader, made here (a reader is moved into its thread, never shared)
     let copies = |m: usize| std::sync::Mutex::new((0..m).map(|_| Some(r0.clone())).collect::<Vec<Option<Situation>>>());
     let c1 = copies(if merge { ns - 1 } else { 0 });
-    let p1: Vec<(LtIndex, f64)> = if merge && ns > 1 {
+    let base_w = r0.query_weights();
+    let p1: Vec<((LtIndex, Vec<(u32, u16, i16)>), f64)> = if merge && ns > 1 {
         pool(ns - 1, threads, &|k| {
             let mut r = c1.lock().unwrap()[k].take().unwrap();
             start(&mut r, k);
-            span(&mut r, ids, st[k], st[k + 1], false, &mut vec![], &mut vec![]);
-            r.export_index(st[k] as u64, st[k + 1] as u64)
+            span(&mut r, ids, st[k], st[k + 1], learn, &mut vec![], &mut vec![]);
+            let d = if learn { r.learned_since(&base_w) } else { vec![] };
+            (r.export_index(st[k] as u64, st[k + 1] as u64), d)
         })
     } else {
         vec![]
@@ -259,10 +264,11 @@ fn sharded_read(args: &[String], ids: &[u32], nw: usize) -> (Vec<u8>, Vec<u32>, 
         let mut got = 0;
         if merge {
             let lo = st[k].saturating_sub(lead).max(warm) as u64;
-            for (j, (ix, _)) in p1.iter().enumerate().take(k) {
+            for (j, ((ix, d), _)) in p1.iter().enumerate().take(k) {
                 let part = ix.range(st[j] as u64, lo);
                 got += part.len();
                 r.install_index(&part);
+                r.add_learned(d);
             }
         }
         start(&mut r, k);
@@ -275,8 +281,9 @@ fn sharded_read(args: &[String], ids: &[u32], nw: usize) -> (Vec<u8>, Vec<u32>, 
     let mut last = None;
     for (k, ((o, tp, r, got), secs)) in p2.into_iter().enumerate() {
         let s1 = p1.get(k).map(|x| x.1).unwrap_or(0.0);
-        let ixn = p1.get(k).map(|x| x.0.len()).unwrap_or(0);
-        eprintln!("shard {k}: words {}..{}; pass 1 {s1:.1} s (index entries written {ixn}); pass 2 {secs:.1} s (index entries installed {got})", st[k], st[k + 1]);
+        let ixn = p1.get(k).map(|x| x.0 .0.len()).unwrap_or(0);
+        let dn = p1.get(k).map(|x| x.0 .1.len()).unwrap_or(0);
+        eprintln!("shard {k}: words {}..{}; pass 1 {s1:.1} s (index entries written {ixn}, query weights changed {dn}); pass 2 {secs:.1} s (index entries installed {got})", st[k], st[k + 1]);
         out.extend(o);
         top.extend(tp);
         if r.is_some() {
