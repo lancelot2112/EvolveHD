@@ -512,8 +512,8 @@ pub struct Situation {
     qset_memo: std::cell::RefCell<(Vec<u32>, Vec<u8>)>,        // the last query's bit counts (built once per query)
     qh: Vec<i8>,                                    // ... or superposed in one vector of 8-bit cells (--sit-qsparse 3)
     qform: u64,                                     // the current question form (--sit-qslots)
-    heads_tab: HashMap<(u32, u32, u32), (u32, u64, u32)>, // --sit-heads: (entity, path or class, kind) -> (value, time, class)
-    heads_of: HashMap<u32, Vec<(u32, u32)>>,       // entity -> its head keys (path or class, kind)
+    heads_tab: HashMap<(u32, u32, u32), (u32, u64, u32, u32)>, // --sit-heads: (entity, path or class, kind) -> (value, time, class, index in heads_of)
+    heads_of: HashMap<u32, Vec<(u32, u32, u32, u64, u32)>>, // entity -> its heads (path or class, kind, value, time, class), a copy kept in step
     bufp: Vec<u32>,                                 // the exact path of each buffered binding (aligned with buf)
     ctext: HashMap<u64, (Vec<u64>, u32)>,           // --sit-ranges: clause text -> (every start, ascending; first word)
     opener_pos: HashMap<u32, Vec<u64>>,             // first word -> start positions of its clauses (ascending)
@@ -1106,7 +1106,7 @@ impl Situation {
         if self.cfg.heads {
             // the heads follow their classes (the newer entry wins where two classes merge)
             let hd = std::mem::take(&mut self.heads_tab);
-            for ((e, key, k), (v, t, c)) in hd {
+            for ((e, key, k), (v, t, c, _)) in hd {
                 // a path key stays (whatever happens to its class); a class key follows its class
                 let c2 = match map.get(&c) {
                     Some(&c2) => c2,
@@ -1114,15 +1114,16 @@ impl Situation {
                     None => continue,
                 };
                 let key2 = if key & 0x8000_0000 != 0 { key } else { c2 };
-                let ent = self.heads_tab.entry((e, key2, k)).or_insert((v, t, c2));
+                let ent = self.heads_tab.entry((e, key2, k)).or_insert((v, t, c2, u32::MAX));
                 if t > ent.1 {
-                    *ent = (v, t, c2);
+                    *ent = (v, t, c2, u32::MAX);
                 }
             }
             self.heads_of.clear();
-            let keys: Vec<(u32, u32, u32)> = self.heads_tab.keys().copied().collect();
-            for (e, c, k) in keys {
-                self.heads_of.entry(e).or_default().push((c, k));
+            for (&(e, key, k), ent) in self.heads_tab.iter_mut() {
+                let l = self.heads_of.entry(e).or_default();
+                ent.3 = l.len() as u32;
+                l.push((key, k, ent.0, ent.1, ent.2));
             }
         }
         let stamp = std::mem::take(&mut self.stamp);
@@ -1901,9 +1902,9 @@ impl Situation {
                     .get(&e)
                     .map(|v| {
                         v.iter()
-                            .filter_map(|&(key, k)| {
+                            .map(|&(key, k, val, t, c)| {
                                 // the value's kind as it is now (kinds settle after a head is written)
-                                self.heads_tab.get(&(e, key, k)).map(|&(val, t, c)| (t, c, if self.cfg.heads_path { self.kk(val) } else { k }, val, key))
+                                (t, c, if self.cfg.heads_path { self.kk(val) } else { k }, val, key)
                             })
                             // fast: only content values (kinds of 3 or more), before the sort
                             .filter(|h| !self.fm(4) || self.ksize.get(&h.2).copied().unwrap_or(0) >= 3)
@@ -1946,8 +1947,7 @@ impl Situation {
             }
             if self.cfg.ranges && self.after_q && !anchors.is_empty() && content_cue {
                 if let Some(keys) = self.heads_of.get(&e) {
-                    for &(key, k0) in keys {
-                        let Some(&(_, _, c)) = self.heads_tab.get(&(e, key, k0)) else { continue };
+                    for &(key, k0, _, _, c) in keys {
                         let Some(hist) = self.posts.get(&(e, key, k0)) else { continue };
                         for &(a, b, fw, which, len, ofw, olen) in &anchors {
                             // the history inside the unit [a, b), newest first, at most 2
@@ -3225,8 +3225,14 @@ impl Situation {
             let content_val = !self.fm(5) || kd == self.kn || self.ksize.get(&kd).copied().unwrap_or(0) >= 3;
             if self.cfg.heads && c < COMP && content_val {
                 let key = if self.cfg.heads_path { bufp.get(bi).copied().unwrap_or(c) | 0x8000_0000 } else { c };
-                if self.heads_tab.insert((x, key, kd), (v, self.t, c)).is_none() {
-                    self.heads_of.entry(x).or_default().push((key, kd));
+                let now = self.t;
+                if let Some(ent) = self.heads_tab.get_mut(&(x, key, kd)) {
+                    (ent.0, ent.1, ent.2) = (v, now, c);
+                    self.heads_of.get_mut(&x).unwrap()[ent.3 as usize] = (key, kd, v, now, c);
+                } else {
+                    let l = self.heads_of.entry(x).or_default();
+                    self.heads_tab.insert((x, key, kd), (v, now, c, l.len() as u32));
+                    l.push((key, kd, v, now, c));
                 }
                 if self.cfg.ranges {
                     self.posts.entry((x, key, kd)).or_default().push((self.t, v));

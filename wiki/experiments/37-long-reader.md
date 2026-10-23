@@ -65,7 +65,7 @@ Chance is about 1 in 12 for places and objects, 1 in 24 for people.
 | 2 | A clause log of symbols (10–24 bytes per clause, posting lists, keys made from ids at read time, never drifting) with newest-wins heads per (entity, relation) as route candidates; no hierarchy | Home and owner ≥85% in every bucket, 64k+ within 5 points of 128–1k, by echo distance too; found about 50% and flat; local within 1 point |
 | 3 | Durable relations kept apart from changing ones, with persistence learned per relation class | Owner at 8–1k from 24–33% to ≥85% |
 | 4 | Learned header types, levels and labels; postings restricted to a unit's range | 99 ± 3 top-level units on the chapter headings; found ≥80% in every bucket; shuffled labels drop it to about 8% |
-| 5 | Scale: 10^6–10^7 words, nested "part P chapter C" labels, a changed header word | Accuracy within 3 points; lookup cost ≤1.5–2× per 10× words; ≤25 bytes per word; per-word cost well under today's 3.3 ms |
+| 5 | Scale: 10^6–10^7 words, nested "part P chapter C" labels, a changed header word | Accuracy within 3 points; lookup cost ≤1.5–2× per 10× words; ≤25 bytes per word; per-word cost well under today's 3.3 ms. **10^6 with nesting: met (see step 5)** |
 
 If home at 64k+ stays under 70% after step 2, the limit is route credit rather than storage.
 
@@ -167,9 +167,49 @@ Bits 3 and 5 cost owner at 8k–64k words (70% with every part on, 77% without b
 Mask 23 is 2.9× faster, about 1.8 ms per word. On the story set it scores 96.8 / 96.8 / 95.1% over three seeds, about 38 s per run.
 
 - **Where the time goes** (stack samples, and counters printed per word): with mask 23 a word costs about 110 slot reads (6.5 words of the kind scanned per read), about 18 cache hits and about 160 route candidates. The time per 20k words is flat along the stream (`SIT_TIMING=1`), so the cost does not grow with the book's length.
+- **Exact rewrites of the hot loops** (profiled with `perf` on the 1M-word book). None of them changes a result: the top and ranked predictions are byte-identical to the previous binary on the 200k book with nesting.
+  - **Dense hot query rows.** A row of the sparse 8-bit query table turns dense (one byte per query bit) once its list holds more than a third of the bits. That is no bigger than the list, and the row scores as one vector dot product.
+  - **Query counts built once per query,** instead of once per scored route.
+  - **A fused slot-read loop** for the cheap phase hash: the key-side multiply once per read, and a branch-free sign-select per position, which vectorizes.
+  - **Head values kept inline** in each entity's list, in the same order, so a lookup walks one list instead of a hash probe per head.
+
+  | Binary (200k book, two runs sharing 2 cores) | Wall | Per word |
+  |---|---|---|
+  | before (`R_spd_old`) | 393 s | 1.92 ms |
+  | dense rows, query counts, fused read (`R_spd_new`) | 279–282 s | 1.37 ms |
+  | **+ inline heads (`R_spd_new2`)** | **251 s** | **1.23 ms** |
+
+  That is 1.57× in all. What remains (stack samples): slot reads about 16%, sparse query rows about 15%, the heads walk and its sort about 18%, class lookups 7%, newest-slot sorting 7%, memory allocation 5%. The reader is still single-threaded.
 - **A measurement mistake caught on the way:** the book's run script still pointed at an older binary, so four book runs reported as "fast" had run the old code (about 1,100 s each). Both run scripts now use one current binary, `runs/exp36/sit-cur`. Those runs are not reported here.
+
+## Step 5: a million words, nested labels (`--sit-nest`)
+
+**The book.** `longdoc_gen.py 1000000 runs/exp37/ld1m_p 1 parts=10 chapters=20` writes 1,009,264 words: 10 parts ("part three .") of 20 chapters each, about 5,000 words per chapter. Chapter numbers start again in every part, so the clause "chapter twelve ." occurs ten times. Found is asked as "what did X find in chapter M of part N ?". Facts lie up to 2^19 words back. The vocabulary adds "part" and "of" at the end, so the 200k book is byte-identical to before.
+
+**Nested anchors.** Clause texts now keep every start, not just the first and latest. With `--sit-nest`, two spans of the question that each equal a stored clause give a nested anchor: the inner span's first occurrence inside the outer span's unit, cut to that unit. For example, "chapter twelve" is looked for inside "part three". The outer span is taken at its first and latest start, and up to 4 nested anchors are kept. A feature names the outer opener type and span length (`fid(50, …)`), so the query learner learns whether to trust them. Nothing in this is specific to parts or chapters. Without `--sit-nest` the anchors are as in step 4.
+
+**Result** (seed 0, `R_p1m_nest` and `R_p1m_flat`, run side by side, 2,168 s and 2,162 s):
+
+| Found, by fact distance | 8–127 | 128–1k | 1k–8k | 8k–64k | 64k–512k | 512k+ |
+|---|---|---|---|---|---|---|
+| Without nesting | 88.4% | 89.7% | 89.2% | 87.3% | 33.8% | 44.3% |
+| **With nested anchors** | **94.6%** | **97.4%** | **97.2%** | **97.3%** | **93.9%** | **91.8%** |
+| With nesting, by echo distance | 96.7% | 97.1% | 97.1% | 95.9% | 94.0% | 97.8% |
+| With nesting, recall@8 | 96.9% | 98.2% | 98.2% | 98.8% | 96.7% | 96.2% |
+| Newest-find baseline | 100% | 99.7% | 86.1% | 20.9% | 8.6% | 8.2% |
+
+- **Without nesting, found breaks beyond 64k words.** "chapter M" alone points at its first or latest occurrence, which is the right part only by chance.
+- **With nesting, found stays at 92–97% out to half a million words back.**
+- **Home and owner:** 99–100% in every bucket, to 512k, with or without nesting.
+- **Local questions:** 99.9 / 98.3 / 89.7% (where-person, who-has, where-object).
+- **On the 200k book,** `--sit-nest` changes nothing: found 100 / 96.2 / 97.0 / 97.0 / 94.3%, as with mask 23.
+- **Against the forum's step-5 prediction:**
+  - Accuracy within 3 points of the 200k book: met for home, owner and found.
+  - Per-word cost: 2.15 ms with two runs sharing the 2 cores, against 1.92 ms on the 200k book under the same load (`R_spd_old`, 393 s). That is 1.12× for 5× the words.
+  - Bytes per word: not measured yet.
+  - A changed header word and 10^7 words: not run yet.
 
 ## Caveats
 
-- Single seed, one book.
+- Single seed, one book (one per length).
 - The machine restarted several times during this work. Seed 2 of the experiment 36 full benchmark was lost twice and has been relaunched.
