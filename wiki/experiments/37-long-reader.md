@@ -113,6 +113,31 @@ This meets the forum's step-2 prediction: ≥85% in every bucket, 64k+ within 5 
 - **The cost on the story set:** 96.5% (seed 0) against 98.2% without heads. Facts from earlier stories never fade, and the learner sometimes trusts them.
 - **Step 3** (durable relations apart from changing ones) was needed in part for step 2: exact-path keys and the exact-path feature keep "owns" apart from "got" without learning persistence per class.
 
+## Step 4: units and labels (`--sit-ranges`)
+
+The design is the simplest that every seat's proposal contains, with no part specific to chapters:
+- **Labels:** every committed clause's text (its words in order, the boundary left out) is indexed with the start of its first and latest occurrence. Questions are not committed, so they never index anything.
+- **Units:** every clause's first word is an opener type, with the sorted start positions of its clauses. A unit runs from a clause of a type to the next clause of the same type, so units nest by how often each type recurs: about 130 words for "scene", about 2,070 for "chapter".
+- **History:** every long-term head keeps its history as a posting list of (time, value).
+- **Lookup:** after a learned question boundary, every span of 1–4 words of the question clause that equals a stored clause's text is an anchor. "chapter twenty two" equals the clause "chapter twenty two ."; a span must match a whole clause, so "twenty" does not match "twenty two". Each anchor's unit gives a range. The cue entity's history inside the range, newest first and at most 2 per key, gives route candidates.
+- **What is learned:** which candidates to trust, by the query learner, with features for the opener type that addressed the range, first or latest occurrence, span length, the exact path and the rank within the range.
+
+**Result** (`R_rg_0`, seed 0, 1,100 s):
+
+| | 8–127 | 128–1k | 1k–8k | 8k–64k | 64k+ |
+|---|---|---|---|---|---|
+| Found, before (step 2) | 60.3% | 63.3% | 43.0% | 15.3% | 12.6% |
+| **Found, with units and labels** | **98.3%** | **96.7%** | **97.5%** | **97.0%** | **93.7%** |
+| Found, by echo distance | 98.9% | 97.5% | 96.8% | 95.5% | 97.5% |
+| Found, recall@8 | 100% | 100% | 99.3% | 98.5% | 95.6% |
+| Newest-find baseline | 100% | 99.5% | 73.6% | 19.2% | 8.8% |
+| Home | 100% | 98.8% | 99.7% | 99.3% | 99.3% |
+| Owner | 100% | 85.9% | 93.0% | 89.8% | 100% |
+
+- **The forum's step-4 prediction is met:** found ≥80% in every bucket. Beyond 8k words, where X's newest find is right only 9–19% of the time, the reader is right 94–97%, so the chapter address is doing the work.
+- **Local questions:** 99.7 / 90.8 / 78.2% (where-person, who-has, where-object). On the story set: 96.6% (seed 0), unchanged.
+- **Not yet run:** the forum's shuffled-label control, a second seed, and the scale test (step 5).
+
 ## Caveats
 
 - Single seed, one book.

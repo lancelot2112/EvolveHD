@@ -120,6 +120,13 @@ pub struct SitCfg {
     /// With heads_path: the newest heads offered per value kind of 3 or more members (8 by default), one per smaller
     /// kind, up to 48 in all.
     pub heads_per_kind: u32,
+    /// Units and labels (with heads_path). Every committed clause's text (its words, in order) is indexed with its
+    /// first and latest position; every clause's first word is an opener type with the start positions of its
+    /// clauses; a unit runs from a clause of a type to the next clause of the same type. Every head keeps its history
+    /// (time, value). At a learned question boundary, spans of the question clause that equal a stored clause's text
+    /// are anchors; the cue entity's history inside each anchor's unit gives candidates, with features for the opener
+    /// type, first or latest occurrence, span length, the path and the rank within the range.
+    pub ranges: bool,
     pub win: usize,
     pub ntop: usize,
     pub pool: f64,
@@ -440,6 +447,9 @@ pub struct Situation {
     heads_tab: HashMap<(u32, u32, u32), (u32, u64, u32)>, // --sit-heads: (entity, path or class, kind) -> (value, time, class)
     heads_of: HashMap<u32, Vec<(u32, u32)>>,       // entity -> its head keys (path or class, kind)
     bufp: Vec<u32>,                                 // the exact path of each buffered binding (aligned with buf)
+    ctext: HashMap<u64, (u64, u64, u32)>,           // --sit-ranges: clause text -> (first start, latest start, first word)
+    opener_pos: HashMap<u32, Vec<u64>>,             // first word -> start positions of its clauses (ascending)
+    posts: HashMap<(u32, u32, u32), Vec<(u64, u32)>>, // head key -> its history (time, value), ascending
     qre: Vec<i8>,                                   // the question slots' own ternary phasor store (an area of its own)
     qim: Vec<i8>,
     qroute: Vec<(usize, u32)>,                      // each route's (cue position, cue word's kind), aligned with qcands
@@ -574,6 +584,9 @@ impl Situation {
             qform: 0,
             heads_tab: HashMap::new(),
             bufp: vec![],
+            ctext: HashMap::new(),
+            opener_pos: HashMap::new(),
+            posts: HashMap::new(),
             heads_of: HashMap::new(),
             qre: if cfg.qslots { vec![0; cfg.d] } else { vec![] },
             qim: if cfg.qslots { vec![0; cfg.d] } else { vec![] },
@@ -1691,6 +1704,7 @@ impl Situation {
         }
         let mut cache: HashMap<u32, i64> = HashMap::new();
         let mut cands: Vec<(Vec<u32>, u32, i64, u64, Route, (u32, u32))> = vec![];
+        let anchors = if self.cfg.ranges && self.after_q { self.anchors(cue) } else { vec![] };
         let dbg = std::env::var("SIT_QDBG").is_ok();
         let mut desc: Vec<String> = vec![];
         for (j, &e) in cue.iter().enumerate() {
@@ -1742,6 +1756,41 @@ impl Situation {
                     taken += 1;
                     if taken >= cap {
                         break;
+                    }
+                }
+            }
+            if self.cfg.ranges && self.after_q && !anchors.is_empty() {
+                if let Some(keys) = self.heads_of.get(&e) {
+                    for &(key, k0) in keys {
+                        let Some(&(_, _, c)) = self.heads_tab.get(&(e, key, k0)) else { continue };
+                        let Some(hist) = self.posts.get(&(e, key, k0)) else { continue };
+                        for &(a, b, fw, which, len) in &anchors {
+                            // the history inside the unit [a, b), newest first, at most 2
+                            let lo = hist.partition_point(|x| x.0 < a);
+                            let hi = hist.partition_point(|x| x.0 < b);
+                            for (rank, &(t, val)) in hist[lo..hi].iter().rev().take(2).enumerate() {
+                                if cue.contains(&val) {
+                                    continue;
+                                }
+                                let k = self.kk(val);
+                                if self.ksize.get(&k).copied().unwrap_or(0) < 3 {
+                                    continue; // only content values
+                                }
+                                let mut f1 = self.route_feats(j, e, &[(c, k, rank as u32)]);
+                                f1.push(Self::fid(45, 1, 0)); // the source: a unit's range
+                                f1.push(Self::fid(46, which as u64, len as u64));
+                                f1.push(Self::fid(48, fw as u64, 0)); // the opener type that addressed it
+                                f1.push(Self::fid(44, key as u64, 1));
+                                f1.push(Self::fid(49, rank as u64, k as u64));
+                                let ke = self.kk(e);
+                                let sc = if self.cfg.qslots { self.qslot_score(j, ke, &[(c, k, rank as u32)], &mut memo) } else { self.qscore(&q, &f1, &mut cache) };
+                                if dbg {
+                                    desc.push(format!("j{}:{}>R{}-{} c{}k{}={}", j, e, a, b, c, k, val));
+                                }
+                                cands.push((f1, val, sc, t, (c, k, u32::MAX, u32::MAX), (rank as u32, u32::MAX)));
+                                qroute.push((j, ke));
+                            }
+                        }
                     }
                 }
             }
@@ -2512,6 +2561,37 @@ impl Situation {
         out
     }
 
+    /// A word sequence's hash (for clause texts and question spans).
+    fn text_hash(ws: &[u32]) -> u64 {
+        ws.iter().fold(0x7E47u64, |h, &w| hash(h, w as u64))
+    }
+    /// The anchors of a cue (newest word first): spans of 1-4 words of the cue, in text order, that equal a stored
+    /// clause's text; each with its unit (from the clause to the next clause with the same first word), as
+    /// (start, end, first word, 0 = first occurrence / 1 = latest, span length).
+    fn anchors(&self, cue: &[u32]) -> Vec<(u64, u64, u32, u32, u32)> {
+        let text: Vec<u32> = cue.iter().rev().copied().collect();
+        let mut out = vec![];
+        for len in 1..=4usize.min(text.len()) {
+            for i in 0..=text.len() - len {
+                let h = Self::text_hash(&text[i..i + len]);
+                let Some(&(first, latest, fw)) = self.ctext.get(&h) else { continue };
+                let ps = self.opener_pos.get(&fw);
+                let end_of = |st: u64| -> u64 {
+                    ps.and_then(|v| {
+                        let at = v.partition_point(|&x| x <= st);
+                        v.get(at).copied()
+                    })
+                    .unwrap_or(u64::MAX)
+                };
+                out.push((first, end_of(first), fw, 0, len as u32));
+                if latest != first {
+                    out.push((latest, end_of(latest), fw, 1, len as u32));
+                }
+            }
+        }
+        out.truncate(6);
+        out
+    }
     /// The cue words, newest first: the last `cue` words, or with `cue_clause` back to the clause start (at least
     /// `cue`, at most 12). The newest word may itself be a boundary ("?" before an answer); the walk stops at the
     /// first boundary behind it.
@@ -2772,6 +2852,24 @@ impl Situation {
                 self.bufp.clear();
                 self.dropped += 1;
             } else {
+                if self.cfg.ranges && self.boundary[w as usize] {
+                    // the clause's words (in order, the boundary left out), its start, and its first word
+                    let mut ws: Vec<u32> = vec![];
+                    for &u in self.clause.iter().rev() {
+                        if self.boundary[u as usize] {
+                            break;
+                        }
+                        ws.push(u);
+                    }
+                    ws.reverse();
+                    if let Some(&fw) = ws.first() {
+                        let st = self.t.saturating_sub(ws.len() as u64);
+                        let h = Self::text_hash(&ws);
+                        let e = self.ctext.entry(h).or_insert((st, st, fw));
+                        e.1 = st;
+                        self.opener_pos.entry(fw).or_default().push(st);
+                    }
+                }
                 self.commit();
                 self.committed += 1;
             }
@@ -2863,6 +2961,9 @@ impl Situation {
                 let key = if self.cfg.heads_path { bufp.get(bi).copied().unwrap_or(c) | 0x8000_0000 } else { c };
                 if self.heads_tab.insert((x, key, kd), (v, self.t, c)).is_none() {
                     self.heads_of.entry(x).or_default().push((key, kd));
+                }
+                if self.cfg.ranges {
+                    self.posts.entry((x, key, kd)).or_default().push((self.t, v));
                 }
             }
             if self.cfg.sq_max > 0 {
