@@ -211,6 +211,10 @@ pub struct SitCfg {
     /// 16-bit counters, 512 KB, the minimum of the four). Paths seen once or twice (almost every path in prose)
     /// stay in working memory and fade. 0 = store every binding.
     pub lt_min: u32,
+    /// Long-term tier kept by credit: a recurring path may enter it for its first `lt_credit` bindings; after
+    /// that, only if a route through a long-term head or range of that path has answered a question right (the
+    /// next word after a learned question boundary). Relations that never help answer stop being stored. 0 = off.
+    pub lt_credit: u32,
     pub vlsh_band: usize, // positions per band (default 4)
     pub vlsh_hits: usize, // bands a value must match to be a candidate (default 1)
     pub lsh_bands: usize,
@@ -668,6 +672,9 @@ pub struct Situation {
     qre: Vec<i8>,                                   // the question slots' own ternary phasor store (an area of its own)
     qim: Vec<i8>,
     qroute: Vec<(usize, u32)>,                      // each route's (cue position, cue word's kind), aligned with qcands
+    qsrc: Vec<(u8, u32)>,                           // each route's source (0 slot, 1 head, 2 range) and path key
+    key_credit: HashMap<u32, u32>,                  // --sit-lt-credit: path key -> questions answered through it
+    key_writes: HashMap<u32, u32>,                  // --sit-lt-credit: path key -> bindings stored for it
     qbits: Vec<u32>,                                // the query code of the current prediction
     qcands: Vec<(Vec<u32>, u32, i64)>,             // its routes: (features, value, score), best first
     ring: Vec<(Vec<u32>, Vec<(Vec<u32>, u32)>, u32)>, // replayed mistakes: (query, routes (features, value), answer)
@@ -825,6 +832,9 @@ impl Situation {
             qre: if cfg.qslots { vec![0; cfg.d] } else { vec![] },
             qim: if cfg.qslots { vec![0; cfg.d] } else { vec![] },
             qroute: vec![],
+            qsrc: vec![],
+            key_credit: HashMap::default(),
+            key_writes: HashMap::default(),
             qbits: vec![],
             qcands: vec![],
             ring: vec![],
@@ -2207,6 +2217,7 @@ impl Situation {
         };
         let mut memo: HashMap<(usize, u32, u32, u32), i64> = HashMap::default();
         let mut qroute: Vec<(usize, u32)> = vec![];
+        let mut csrc: Vec<(u8, u32)> = vec![];
         self.after_q = self.hist.last().map_or(false, |&u| self.boundary[u as usize] && self.mood[u as usize] >= 8);
         if self.cfg.sq_max > 0 && self.cfg.sq_mode > 0 && self.after_q {
             if self.qring.len() < 32 {
@@ -2282,6 +2293,7 @@ impl Situation {
                         desc.push(format!("j{}:{}>H c{}k{}r{}={}", j, e, c, k, rr, val));
                     }
                     cands.push((f1, val, sc, t, (c, k, u32::MAX, u32::MAX), (rr, u32::MAX)));
+                    csrc.push((1, key));
                     qroute.push((j, ke));
                     taken += 1;
                     if taken >= cap {
@@ -2332,6 +2344,7 @@ impl Situation {
                                     desc.push(format!("j{}:{}>R{}-{} c{}k{}={}", j, e, a, b, c, k, val));
                                 }
                                 cands.push((f1, val, sc, t, (c, k, u32::MAX, u32::MAX), (rank as u32, u32::MAX)));
+                                csrc.push((2, key));
                                 qroute.push((j, ke));
                             }
                         }
@@ -2347,6 +2360,7 @@ impl Situation {
                     desc.push(format!("j{}:{}>c{}k{}r{}={}", j, e, c, k, r, m));
                 }
                 cands.push((f1, m, sc, self.stamp_of(e, c, k), (c, k, u32::MAX, u32::MAX), (r, u32::MAX)));
+                csrc.push((0, 0));
                 qroute.push((j, ke));
                 if self.fm(2) && (j >= 4 || !is_content_e) {
                     continue; // fast: second hops only from the 4 nearest cue words, and only content ones
@@ -2361,6 +2375,7 @@ impl Situation {
                         desc.push(format!("j{}:{}>c{}k{}r{}={}>c{}k{}r{}={}", j, e, c, k, r, m, c2, k2, r2, v));
                     }
                     cands.push((f2, v, sc, self.stamp_of(e, c, k), (c, k, c2, k2), (r, r2)));
+                    csrc.push((0, 0));
                     qroute.push((j, ke));
                 }
             }
@@ -2383,6 +2398,7 @@ impl Situation {
         let mut slots: Vec<Option<(Vec<u32>, u32, i64, u64, Route, (u32, u32))>> = cands.into_iter().map(Some).collect();
         let cands: Vec<(Vec<u32>, u32, i64, u64, Route, (u32, u32))> = order.iter().map(|&i| slots[i].take().unwrap()).collect();
         self.qroute = order.iter().map(|&i| qroute[i]).collect();
+        self.qsrc = order.iter().map(|&i| csrc[i]).collect();
         let lo = cands.iter().map(|x| x.2).min().unwrap_or(0);
         let props: Vec<(u32, u32)> = cands.iter().map(|x| ((x.2 - lo + 1).min(u32::MAX as i64) as u32, x.1)).collect();
         if dbg && !cands.is_empty() {
@@ -2404,6 +2420,17 @@ impl Situation {
         let hops = std::mem::take(&mut self.qhops);
         let ranks = std::mem::take(&mut self.qranks);
         let qroute = std::mem::take(&mut self.qroute);
+        let qsrc = std::mem::take(&mut self.qsrc);
+        if self.cfg.lt_credit > 0 && self.after_q {
+            // credit the path behind the best-ranked long-term route that held the answer
+            if let Some(i) = cands.iter().position(|x| x.1 == w) {
+                if let Some(&(src, key)) = qsrc.get(i) {
+                    if src > 0 {
+                        *self.key_credit.entry(key).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
         if self.cfg.sq_max > 0 && self.after_q {
             // which two-hop patterns answered (candidates to open), and which open queries' slots did (credit), at
             // the answers to questions (after a boundary the mood counter has learned closes a question)
@@ -3811,6 +3838,15 @@ impl Situation {
                     m = m.min(self.path_sketch[i]);
                 }
                 recurring = m as u32 >= self.cfg.lt_min;
+            }
+            if recurring && self.cfg.lt_credit > 0 && self.cfg.heads && c < COMP && content_val {
+                // kept by credit: a path's first lt_credit bindings, then only if it has helped answer
+                let key = if self.cfg.heads_path { bufp.get(bi).copied().unwrap_or(c) | 0x8000_0000 } else { c };
+                if self.key_credit.get(&key).copied().unwrap_or(0) == 0 {
+                    let n = self.key_writes.entry(key).or_insert(0);
+                    *n += 1;
+                    recurring = *n <= self.cfg.lt_credit;
+                }
             }
             if self.cfg.heads && c < COMP && content_val && recurring {
                 let key = if self.cfg.heads_path { bufp.get(bi).copied().unwrap_or(c) | 0x8000_0000 } else { c };
