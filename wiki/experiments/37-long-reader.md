@@ -136,7 +136,38 @@ The design is the simplest that every seat's proposal contains, with no part spe
 
 - **The forum's step-4 prediction is met:** found ≥80% in every bucket. Beyond 8k words, where X's newest find is right only 9–19% of the time, the reader is right 94–97%, so the chapter address is doing the work.
 - **Local questions:** 99.7 / 90.8 / 78.2% (where-person, who-has, where-object). On the story set: 96.6% (seed 0), unchanged.
-- **Not yet run:** the forum's shuffled-label control, a second seed, and the scale test (step 5).
+- **Since run:** the shuffled-heading control and a second seed (next section); the scale test (step 5) is still to do.
+
+## The control, a second seed, and speed
+
+**The shuffled-heading control.** `longdoc_gen.py 200000 runs/exp37/ld200k_shuf 1 shuffle` writes a book whose chapter headings print a permuted chapter number: every chapter moves, and the questions keep the true number. The book is not word-for-word the same as `ld200k`, because the lengths of the headings shift the scenes, but it has the same distribution. On it (`R_shuf_0`, seed 0), found falls to **62.5 / 54.8 / 41.0 / 17.3 / 4.4%** by fact distance. That follows X's newest find (100 / 99.5 / 74 / 19 / 9%), and at 64k+ it falls below chance (1 in 12). So the 94–98% comes from navigating by the heading. Home and owner are unaffected (99–100% and 82–99%).
+
+**A second seed** (`R_rg_1`): found 98.3 / 96.7 / 97.0 / 97.8 / 94.3%, home 92–100%, owner 97–100%. It replicates seed 0.
+
+**Speed (`--sit-fast`, with `--sit-fast-mask`).** Seven parts, each tested by leaving it out:
+
+| Part | What it does | Keep? |
+|---|---|---|
+| — | std's SipHash replaced by a fast integer hasher for every map | yes; results identical to the decimal |
+| bit 0 | a per-word cache of ranked slot reads, kind member lists, a running background total | yes |
+| bit 1 | a cheaper multiplicative phase hash | yes |
+| bit 2 | second hops only from the 4 nearest cue words of content kinds | yes |
+| bit 3 | heads and ranges only from cue words of content kinds | no |
+| bit 4 | heads filtered to content values before the sort | yes |
+| bit 5 | heads stored only for content values | no |
+
+Bits 3 and 5 cost owner at 8k–64k words (70% with every part on, 77% without bit 3, 81% without bit 5) and saved little time. The default mask is 23 (bits 0, 1, 2 and 4).
+
+| Book, seed 0 | Wall | Home | Owner | Found |
+|---|---|---|---|---|
+| without `--sit-fast` (`R_rg_0`) | 1,100 s | 99–100% | 86–100% | 94–98% |
+| `--sit-fast`, all bits (mask 63) | 276 s | 92–100% | 70–100% | 91–98% |
+| **`--sit-fast`, mask 23 (`R_mask23_0`)** | **378 s** | **98–100%** | **90–100%** | **94–100%** |
+
+Mask 23 is 2.9× faster, about 1.8 ms per word. On the story set it scores 96.8 / 96.8 / 95.1% over three seeds, about 38 s per run.
+
+- **Where the time goes** (stack samples, and counters printed per word): with mask 23 a word costs about 110 slot reads (6.5 words of the kind scanned per read), about 18 cache hits and about 160 route candidates. The time per 20k words is flat along the stream (`SIT_TIMING=1`), so the cost does not grow with the book's length.
+- **A measurement mistake caught on the way:** the book's run script still pointed at an older binary, so four book runs reported as "fast" had run the old code (about 1,100 s each). Both run scripts now use one current binary, `runs/exp36/sit-cur`. Those runs are not reported here.
 
 ## Caveats
 

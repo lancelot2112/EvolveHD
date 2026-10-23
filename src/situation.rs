@@ -156,6 +156,11 @@ pub struct SitCfg {
     /// Speed: slot reads cached within a word (cleared on any write), kind member lists kept with the kinds, the
     /// background total kept as a running sum, and a cheaper multiplicative phase hash for values.
     pub fast: bool,
+    /// Which parts of the fast path are on (bits, with `fast`): 0 read cache, member lists and running background;
+    /// 1 cheap phase hash; 2 second hops only from the 4 nearest content cue words; 3 heads and ranges only from
+    /// content cue words; 4 heads filtered to content values when read; 5 heads stored only for content values.
+    /// Default 23 (bits 0, 1, 2, 4): bits 3 and 5 cost long-range accuracy (owner at 8k-64k words) for little speed.
+    pub fast_mask: u32,
     pub win: usize,
     pub ntop: usize,
     pub pool: f64,
@@ -1282,7 +1287,7 @@ impl Situation {
             }
         }
         self.kind = newk;
-        if self.cfg.fast {
+        if self.fm(0) {
             self.members.clear();
             for &w in &self.words {
                 self.members.entry(self.kind[w as usize]).or_default().push(w);
@@ -1356,7 +1361,7 @@ impl Situation {
     }
     #[inline]
     fn vph(&self, v: u32, e: u32) -> u8 {
-        if self.cfg.fast {
+        if self.fm(1) {
             // a cheaper phase: two multiplies and a fold
             let h = (v as u64 ^ self.cfg.seed.wrapping_mul(0x1000_0001).wrapping_add(0x7777)).wrapping_mul(0x9E37_79B9_7F4A_7C15)
                 ^ (e as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
@@ -1374,7 +1379,7 @@ impl Situation {
             self.im[x] = (self.im[x] + m * DIM[p]).clamp(-1, 1);
         }
         self.bg[v as usize] += 1;
-        if self.cfg.fast {
+        if self.fm(0) {
             if self.seen[v as usize] {
                 self.bg_total += 1;
             }
@@ -1383,7 +1388,7 @@ impl Situation {
     }
     /// The best value in e's slot for class c (by excess over its background, by subtraction), and its excess.
     fn read_best(&self, e: u32, c: u32, kd: u32, excl: &[u32]) -> Option<(u32, i128)> {
-        if self.cfg.fast {
+        if self.fm(0) {
             // the slot's ranked values, read once per word (the background share over all the kind's words, so the
             // exclusions only filter the ranking)
             if let Some(r) = self.rcache.borrow().get(&(e, c, kd)) {
@@ -1823,7 +1828,8 @@ impl Situation {
             if !self.seen[e as usize] {
                 continue;
             }
-            let content_cue = !self.cfg.fast || self.ksize.get(&self.kk(e)).copied().unwrap_or(0) >= 3;
+            let is_content_e = self.ksize.get(&self.kk(e)).copied().unwrap_or(0) >= 3;
+            let content_cue = !self.fm(3) || is_content_e;
             if self.cfg.heads && content_cue {
                 // long-term heads: the newest two per value kind, ranked within kind, newest first
                 let mut hs: Vec<(u64, u32, u32, u32, u32)> = self
@@ -1836,7 +1842,7 @@ impl Situation {
                                 self.heads_tab.get(&(e, key, k)).map(|&(val, t, c)| (t, c, if self.cfg.heads_path { self.kk(val) } else { k }, val, key))
                             })
                             // fast: only content values (kinds of 3 or more), before the sort
-                            .filter(|h| !self.cfg.fast || self.ksize.get(&h.2).copied().unwrap_or(0) >= 3)
+                            .filter(|h| !self.fm(4) || self.ksize.get(&h.2).copied().unwrap_or(0) >= 3)
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1919,7 +1925,7 @@ impl Situation {
                 }
                 cands.push((f1, m, sc, self.stamp_of(e, c, k), (c, k, u32::MAX, u32::MAX), (r, u32::MAX)));
                 qroute.push((j, ke));
-                if self.cfg.fast && (j >= 4 || !content_cue) {
+                if self.fm(2) && (j >= 4 || !is_content_e) {
                     continue; // fast: second hops only from the 4 nearest cue words, and only content ones
                 }
                 for (c2, k2, r2) in self.newest_slots(m, 8) {
@@ -2430,7 +2436,7 @@ impl Situation {
 
     /// The candidates for the next word: (value, weight), best first.
     pub fn recall(&mut self) -> Vec<(u32, f64)> {
-        if self.cfg.fast {
+        if self.fm(0) {
             self.rcache.get_mut().clear(); // keys may have drifted since the last read
         }
         let ctx = self.ctx_key();
@@ -2687,6 +2693,11 @@ impl Situation {
         out
     }
 
+    /// Whether part `b` of the fast path is on.
+    #[inline]
+    fn fm(&self, b: u32) -> bool {
+        self.cfg.fast && (self.cfg.fast_mask >> b) & 1 == 1
+    }
     /// A word sequence's hash (for clause texts and question spans).
     fn text_hash(ws: &[u32]) -> u64 {
         ws.iter().fold(0x7E47u64, |h, &w| hash(h, w as u64))
@@ -2739,8 +2750,25 @@ impl Situation {
     }
     /// Learn from word w (after it has been predicted).
     pub fn observe(&mut self, w: u32) {
-        if self.cfg.fast {
+        if self.fm(0) {
             self.rcache.get_mut().clear();
+        }
+        if self.t % 20000 == 0 && std::env::var("SIT_TIMING").is_ok() {
+            // elapsed time and the counters since the last report, with the sizes of the growing tables
+            thread_local!(static LAST: std::cell::RefCell<(std::time::Instant, [u64; 6])> = std::cell::RefCell::new((std::time::Instant::now(), [0; 6])));
+            let st = *self.stat.borrow();
+            LAST.with(|l| {
+                let mut l = l.borrow_mut();
+                let dt = l.0.elapsed().as_millis();
+                let q = (st[5] - l.1[5]).max(1);
+                eprintln!(
+                    "TIMING t {} {} ms / 20k words | per word: reads {} hits {} cands {} | heads {} posts {} ctext {} sq {} occ {} stamp {} classes {}",
+                    self.t, dt, (st[0] - l.1[0]) / q, (st[1] - l.1[1]) / q, (st[2] - l.1[2]) / q,
+                    self.heads_tab.len(), self.posts.values().map(|v| v.len()).sum::<usize>(), self.ctext.len(), self.sq.len(),
+                    self.occ.len(), self.stamp.len(), self.class_count.len()
+                );
+                *l = (std::time::Instant::now(), st);
+            });
         }
         let ctx = self.ctx_key();
         let cue: Vec<u32> = self.cue_words();
@@ -3020,7 +3048,7 @@ impl Situation {
         if !self.seen[w as usize] {
             self.seen[w as usize] = true;
             self.words.push(w);
-            if self.cfg.fast {
+            if self.fm(0) {
                 self.bg_total += self.bg[w as usize] as i128;
                 self.members.entry(self.kind[w as usize]).or_default().push(w);
             }
@@ -3090,7 +3118,10 @@ impl Situation {
                 cl.push(c);
             }
             self.stamp.insert((x, c, kd), self.t);
-            if self.cfg.heads && c < COMP {
+            // fast: long-term heads only for content values (a value kind of 3 or more members); heads to "." or "the"
+            // multiply with every distinct clause tail and only grow the lists every lookup walks
+            let content_val = !self.fm(5) || kd == self.kn || self.ksize.get(&kd).copied().unwrap_or(0) >= 3;
+            if self.cfg.heads && c < COMP && content_val {
                 let key = if self.cfg.heads_path { bufp.get(bi).copied().unwrap_or(c) | 0x8000_0000 } else { c };
                 if self.heads_tab.insert((x, key, kd), (v, self.t, c)).is_none() {
                     self.heads_of.entry(x).or_default().push((key, kd));
