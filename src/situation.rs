@@ -482,6 +482,7 @@ pub struct Situation {
     rcache: std::cell::RefCell<HashMap<(u32, u32, u32), Vec<(u32, i128)>>>, // --sit-fast: slot reads this word
     members: HashMap<u32, Vec<u32>>,                // --sit-fast: kind -> its seen words
     bg_total: i128,                                 // --sit-fast: the background summed over seen words
+    pub stat: std::cell::RefCell<[u64; 6]>,         // counters: reads computed, read cache hits, candidates, members scanned, words, query words
     qre: Vec<i8>,                                   // the question slots' own ternary phasor store (an area of its own)
     qim: Vec<i8>,
     qroute: Vec<(usize, u32)>,                      // each route's (cue position, cue word's kind), aligned with qcands
@@ -622,6 +623,7 @@ impl Situation {
             rcache: std::cell::RefCell::new(HashMap::default()),
             members: HashMap::default(),
             bg_total: 0,
+            stat: std::cell::RefCell::new([0; 6]),
             heads_of: HashMap::default(),
             qre: if cfg.qslots { vec![0; cfg.d] } else { vec![] },
             qim: if cfg.qslots { vec![0; cfg.d] } else { vec![] },
@@ -1385,8 +1387,10 @@ impl Situation {
             // the slot's ranked values, read once per word (the background share over all the kind's words, so the
             // exclusions only filter the ranking)
             if let Some(r) = self.rcache.borrow().get(&(e, c, kd)) {
+                self.stat.borrow_mut()[1] += 1;
                 return r.iter().find(|x| !excl.contains(&x.0)).copied();
             }
+            self.stat.borrow_mut()[0] += 1;
             let r = self.read_ranked(e, c, kd);
             let out = r.iter().find(|x| !excl.contains(&x.0)).copied();
             self.rcache.borrow_mut().insert((e, c, kd), r);
@@ -1454,6 +1458,7 @@ impl Situation {
         let typed = self.cfg.kinds && kd != self.kn;
         let empty: Vec<u32> = vec![];
         let cands: &Vec<u32> = if typed { self.members.get(&kd).unwrap_or(&empty) } else { &self.words };
+        self.stat.borrow_mut()[3] += cands.len() as u64;
         let mut sc: Vec<(u32, i64)> = cands
             .iter()
             .map(|&v| {
@@ -1818,7 +1823,8 @@ impl Situation {
             if !self.seen[e as usize] {
                 continue;
             }
-            if self.cfg.heads {
+            let content_cue = !self.cfg.fast || self.ksize.get(&self.kk(e)).copied().unwrap_or(0) >= 3;
+            if self.cfg.heads && content_cue {
                 // long-term heads: the newest two per value kind, ranked within kind, newest first
                 let mut hs: Vec<(u64, u32, u32, u32, u32)> = self
                     .heads_of
@@ -1868,7 +1874,7 @@ impl Situation {
                     }
                 }
             }
-            if self.cfg.ranges && self.after_q && !anchors.is_empty() {
+            if self.cfg.ranges && self.after_q && !anchors.is_empty() && content_cue {
                 if let Some(keys) = self.heads_of.get(&e) {
                     for &(key, k0) in keys {
                         let Some(&(_, _, c)) = self.heads_tab.get(&(e, key, k0)) else { continue };
@@ -1913,8 +1919,8 @@ impl Situation {
                 }
                 cands.push((f1, m, sc, self.stamp_of(e, c, k), (c, k, u32::MAX, u32::MAX), (r, u32::MAX)));
                 qroute.push((j, ke));
-                if self.cfg.fast && j >= 4 {
-                    continue; // fast: second hops only from the 4 nearest cue words
+                if self.cfg.fast && (j >= 4 || !content_cue) {
+                    continue; // fast: second hops only from the 4 nearest cue words, and only content ones
                 }
                 for (c2, k2, r2) in self.newest_slots(m, 8) {
                     let mut ex = cue.to_vec();
@@ -1936,6 +1942,11 @@ impl Situation {
             ix.sort_by(|&a, &b| cands[b].2.cmp(&cands[a].2).then(cands[b].3.cmp(&cands[a].3)));
             let parts: Vec<String> = ix.iter().take(10).map(|&i| format!("{}[{}]", desc[i], cands[i].2)).collect();
             eprintln!("QROUTES {} {}", self.t, parts.join(" "));
+        }
+        {
+            let mut st = self.stat.borrow_mut();
+            st[2] += cands.len() as u64;
+            st[5] += 1;
         }
         // sort (stable), keeping each route's (cue position, cue kind) aligned
         let mut order: Vec<usize> = (0..cands.len()).collect();

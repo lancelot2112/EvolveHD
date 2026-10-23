@@ -755,6 +755,11 @@ fn main() {
                 let name = |w: u32| voc.get(w as usize).cloned().unwrap_or(w.to_string());
                 eprintln!("learned boundaries: {} | paths {} | relation classes {}", x.boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.n_paths(), x.n_classes());
                 eprintln!("question boundaries: {} | clauses committed {}, dropped {}", x.question_boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.committed, x.dropped);
+                {
+                    let st = x.stat.borrow();
+                    let q = st[5].max(1);
+                    eprintln!("cost per predicted word: {:.1} slot reads computed, {:.1} read cache hits, {:.1} candidates, {:.1} kind members scanned per computed read", st[0] as f64 / q as f64, st[1] as f64 / q as f64, st[2] as f64 / q as f64, st[3] as f64 / st[0].max(1) as f64);
+                }
                 if x.cfg.curious {
                     eprintln!("curiosity: unsure at {} predictions, answered {} from the window, {} unknown; at questions: {} of {} unsure, {} from the window, {} unknown", x.cur_asked, x.cur_window, x.cur_unknown, x.cur_q[0], x.cur_q[3], x.cur_q[1], x.cur_q[2]);
                 }
