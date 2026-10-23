@@ -60,6 +60,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         lsh: flag(args, "--sit-lsh"),
         vlsh: flag(args, "--sit-vlsh"),
         heads_nokind: flag(args, "--sit-heads-nokind"),
+        slotlog: arg(args, "--sit-slotlog").map(|s| s.parse().unwrap()).unwrap_or(0),
         vlsh_band: arg(args, "--sit-vlsh-band").map(|s| s.parse().unwrap()).unwrap_or(4),
         vlsh_hits: arg(args, "--sit-vlsh-hits").map(|s| s.parse().unwrap()).unwrap_or(1),
         lsh_bands: arg(args, "--sit-lsh-bands").map(|s| s.parse().unwrap()).unwrap_or(8),

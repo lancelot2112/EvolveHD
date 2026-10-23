@@ -196,6 +196,9 @@ pub struct SitCfg {
     /// Long-term heads keyed by (entity, exact path) only, not also by the value's kind at write time: when
     /// kinds are renumbered, a path's old and new heads would otherwise both stay and crowd the per-kind cap.
     pub heads_nokind: bool,
+    /// Slot reads from the slot's own write log: every slot (entity, class, kind) keeps the last `slotlog` values
+    /// written to it, found by hashing the slot, and a read scores only those (0 = scan the kind).
+    pub slotlog: usize,
     pub vlsh_band: usize, // positions per band (default 4)
     pub vlsh_hits: usize, // bands a value must match to be a candidate (default 1)
     pub lsh_bands: usize,
@@ -605,7 +608,8 @@ pub struct Situation {
     proto_by_bit: Vec<Vec<u32>>,
     lsh_bucket: HashMap<u64, u32>,                  // --sit-lsh: band key -> relation class
     vband: HashMap<u64, Vec<u32>>,                  // --sit-vlsh: band key -> the values whose code has it
-    vcodes: Vec<u128>,                              // --sit-vlsh: each value's code, 2 bits per key position                    // relation classes by the bits of their prototypes (an inverted index)
+    vcodes: Vec<u128>,
+    slot_log: HashMap<(u32, u32, u32), Vec<u32>>,   // --sit-slotlog: slot -> its last values written, newest last                              // --sit-vlsh: each value's code, 2 bits per key position                    // relation classes by the bits of their prototypes (an inverted index)
     pscratch: Vec<u32>,                             // shared-bit counts per class, for one lookup
     class_count: Vec<u64>,
     senses: HashMap<u32, Vec<Sense>>,
@@ -762,6 +766,7 @@ impl Situation {
             lsh_bucket: HashMap::default(),
             vband: HashMap::default(),
             vcodes: vec![],
+            slot_log: HashMap::default(),
             pscratch: vec![],
             class_count: vec![],
             senses: HashMap::default(),
@@ -1643,6 +1648,16 @@ impl Situation {
             self.im[x] = (self.im[x] + m * DIM[p]).clamp(-1, 1);
         }
         self.bg[v as usize] += 1;
+        if self.cfg.slotlog > 0 {
+            let l = self.slot_log.entry((e, c, kd)).or_default();
+            if let Some(at) = l.iter().position(|&x| x == v) {
+                l.remove(at);
+            }
+            l.push(v);
+            if l.len() > self.cfg.slotlog {
+                l.remove(0);
+            }
+        }
         if self.fm(0) {
             if self.seen[v as usize] {
                 self.bg_total += 1;
@@ -1727,7 +1742,11 @@ impl Situation {
         let typed = self.cfg.kinds && kd != self.kn;
         let empty: Vec<u32> = vec![];
         let found: Vec<u32>;
-        let cands: &Vec<u32> = if self.cfg.vlsh {
+        let logged: Vec<u32>;
+        let cands: &Vec<u32> = if self.cfg.slotlog > 0 {
+            logged = self.slot_log.get(&(e, c, kd)).cloned().unwrap_or_default();
+            &logged
+        } else if self.cfg.vlsh {
             // the values whose code matches a fully estimated band of the unbound slot
             // each position's possible phases: those its unbound component favours most (one, or two when the
             // real and imaginary parts tie, all four when both are zero)
