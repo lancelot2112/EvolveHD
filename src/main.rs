@@ -55,6 +55,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         scope: flag(args, "--sit-scope"),
         roles: flag(args, "--sit-roles"),
         skip: flag(args, "--sit-skip"),
+        anaphora: flag(args, "--sit-anaphora"),
         freeze_from: arg(args, "--sit-freeze-from").map(|s| s.parse().unwrap()).unwrap_or(u64::MAX),
         fast: flag(args, "--sit-fast"),
         fast_mask: g("--sit-fast-mask", "23").parse().unwrap(),
@@ -917,6 +918,9 @@ fn main() {
                 let name = |w: u32| voc.get(w as usize).cloned().unwrap_or(w.to_string());
                 eprintln!("learned boundaries: {} | paths {} | relation classes {}", x.boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.n_paths(), x.n_classes());
                 eprintln!("question boundaries: {} | clauses committed {}, dropped {}", x.question_boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.committed, x.dropped);
+                if x.cfg.anaphora {
+                    eprintln!("stand-in first words resolved: {}", x.anaphora_resolved);
+                }
                 {
                     let st = x.stat.borrow();
                     let q = st[5].max(1);

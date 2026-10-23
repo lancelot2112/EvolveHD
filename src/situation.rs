@@ -173,6 +173,11 @@ pub struct SitCfg {
     /// followed by the word after it ("mary finally lives": "mary lives" occurs too). Modifiers, and in prose
     /// adjectives, then do not split one relation into many paths.
     pub skip: bool,
+    /// Stand-in words: a clause whose first word belongs to a small kind (under 3 members) whose contexts are
+    /// nearly all contexts of a content kind (its kind code three quarters inside the code of that kind's most
+    /// frequent word) has its facts filed under the newest clause-initial word of that kind ("she went to the
+    /// garden" after "ella picked up the ring": ella). Pronouns, learned from contexts, nothing named.
+    pub anaphora: bool,
     /// Speed: slot reads cached within a word (cleared on any write), kind member lists kept with the kinds, the
     /// background total kept as a running sum, and a cheaper multiplicative phase hash for values.
     pub fast: bool,
@@ -658,7 +663,9 @@ pub struct Situation {
     pub sq_closed: u64,
     mood: Vec<u8>,
     succ: HashMap<(u32, u32), u32>,                 // bigram counts (word, next word), for mood2
-    skip_n: Vec<(u32, u32)>,                        // --sit-skip: per word (occurrences, occurrences that were skippable)
+    skip_n: Vec<(u32, u32)>,
+    last_subj: HashMap<u32, u32>,                   // --sit-anaphora: content kind -> its newest clause-initial word
+    pub anaphora_resolved: u64,                        // --sit-skip: per word (occurrences, occurrences that were skippable)
     succ_top: HashMap<u32, (u32, u32)>,             // per word: its most frequent successor and that count
     buf: Vec<(u32, u32, u8, u32)>,                  // buffered bindings: (entity, class, direction, value)
     stamp: HashMap<(u32, u32, u32), u64>,           // last write time per slot (entity, class, kind)
@@ -804,6 +811,8 @@ impl Situation {
             mood: vec![0; nw],
             succ: HashMap::default(),
             skip_n: vec![(0, 0); nw],
+            last_subj: HashMap::default(),
+            anaphora_resolved: 0,
             succ_top: HashMap::default(),
             buf: vec![],
             stamp: HashMap::default(),
@@ -3369,6 +3378,9 @@ impl Situation {
                         self.opener_pos.entry(fw).or_default().push(st);
                     }
                 }
+                if self.cfg.anaphora {
+                    self.resolve_standin();
+                }
                 self.commit();
                 self.committed += 1;
             }
@@ -3430,6 +3442,52 @@ impl Situation {
     }
 
     /// Write the buffered bindings of a clause into their slots.
+    /// --sit-anaphora: file the clause's facts under the referent of a stand-in first word (see `anaphora`).
+    fn resolve_standin(&mut self) {
+        let mut fw = None;
+        for &u in self.clause.iter().rev() {
+            if self.boundary[u as usize] {
+                break;
+            }
+            fw = Some(u);
+        }
+        let Some(fw) = fw else { return };
+        let k = self.kk(fw);
+        let size = |k: u32| self.ksize.get(&k).copied().unwrap_or(0);
+        if size(k) >= 3 {
+            self.last_subj.insert(k, fw);
+            return;
+        }
+        let code = self.kind_code(fw);
+        let n: u64 = code.iter().map(|&b| b as u64).sum();
+        if n == 0 {
+            return;
+        }
+        // the content kind whose leading word's contexts hold this word's
+        let mut best: Option<(u64, u32)> = None;
+        for (&c, ws) in &self.members {
+            if c == k || size(c) < 3 {
+                continue;
+            }
+            let Some(&lead) = ws.iter().max_by_key(|&&x| (self.wcount[x as usize], std::cmp::Reverse(x))) else { continue };
+            let lc = self.kind_code(lead);
+            let inter: u64 = code.iter().zip(&lc).map(|(&a, &b)| (a && b) as u64).sum();
+            if 4 * inter >= 3 * n && best.map_or(true, |b| inter > b.0) {
+                best = Some((inter, c));
+            }
+        }
+        let Some((_, c)) = best else { return };
+        let Some(&ante) = self.last_subj.get(&c) else { return };
+        for b in self.buf.iter_mut() {
+            if b.0 == fw {
+                b.0 = ante;
+            }
+            if b.3 == fw {
+                b.3 = ante;
+            }
+        }
+        self.anaphora_resolved += 1;
+    }
     fn commit(&mut self) {
         let buf = std::mem::take(&mut self.buf);
         let bufp = std::mem::take(&mut self.bufp);
