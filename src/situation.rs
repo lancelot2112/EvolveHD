@@ -199,6 +199,9 @@ pub struct SitCfg {
     /// Slot reads from the slot's own write log: every slot (entity, class, kind) keeps the last `slotlog` values
     /// written to it, found by hashing the slot, and a read scores only those (0 = scan the kind).
     pub slotlog: usize,
+    /// An entity's newest slots from a recency list kept as slots are written (its last `recent` (class, kind)
+    /// slots, move to front), not by gathering and sorting all of its slots at every read (0 = gather all).
+    pub recent: usize,
     pub vlsh_band: usize, // positions per band (default 4)
     pub vlsh_hits: usize, // bands a value must match to be a candidate (default 1)
     pub lsh_bands: usize,
@@ -609,7 +612,8 @@ pub struct Situation {
     lsh_bucket: HashMap<u64, u32>,                  // --sit-lsh: band key -> relation class
     vband: HashMap<u64, Vec<u32>>,                  // --sit-vlsh: band key -> the values whose code has it
     vcodes: Vec<u128>,
-    slot_log: HashMap<(u32, u32, u32), Vec<u32>>,   // --sit-slotlog: slot -> its last values written, newest last                              // --sit-vlsh: each value's code, 2 bits per key position                    // relation classes by the bits of their prototypes (an inverted index)
+    slot_log: HashMap<(u32, u32, u32), Vec<u32>>,   // --sit-slotlog: slot -> its last values written, newest last
+    recent_slots: HashMap<u32, Vec<(u32, u32)>>,    // --sit-recent: entity -> its last slots written, newest last                              // --sit-vlsh: each value's code, 2 bits per key position                    // relation classes by the bits of their prototypes (an inverted index)
     pscratch: Vec<u32>,                             // shared-bit counts per class, for one lookup
     class_count: Vec<u64>,
     senses: HashMap<u32, Vec<Sense>>,
@@ -767,6 +771,7 @@ impl Situation {
             vband: HashMap::default(),
             vcodes: vec![],
             slot_log: HashMap::default(),
+            recent_slots: HashMap::default(),
             pscratch: vec![],
             class_count: vec![],
             senses: HashMap::default(),
@@ -1931,7 +1936,14 @@ impl Situation {
     /// e's live slots, newest first (at most n): (class, kind, rank).
     fn newest_slots(&self, e: u32, n: usize) -> Vec<(u32, u32, u32)> {
         let mut v: Vec<(u64, u32, u32)> = vec![];
-        for c in self.live_classes(e, None) {
+        if self.cfg.recent > 0 {
+            for &(c, k) in self.recent_slots.get(&e).map(|l| l.as_slice()).unwrap_or(&[]) {
+                if self.occ.get(&(e, c)).map_or(false, |ks| ks.contains(&k)) {
+                    v.push((self.stamp_of(e, c, k), c, k));
+                }
+            }
+        }
+        for c in self.live_classes(e, None).into_iter().filter(|_| self.cfg.recent == 0) {
             if let Some(ks) = self.occ.get(&(e, c)) {
                 for &k in ks {
                     v.push((self.stamp_of(e, c, k), c, k));
@@ -2792,6 +2804,21 @@ impl Situation {
             cl.push(cs);
         }
         self.stamp.insert((x, cs, kd), self.t);
+        self.touch(x, cs, kd);
+    }
+    /// --sit-recent: (class, kind) is the entity's newest slot.
+    fn touch(&mut self, e: u32, c: u32, k: u32) {
+        if self.cfg.recent == 0 {
+            return;
+        }
+        let l = self.recent_slots.entry(e).or_default();
+        if let Some(at) = l.iter().position(|&x| x == (c, k)) {
+            l.remove(at);
+        }
+        l.push((c, k));
+        if l.len() > self.cfg.recent {
+            l.remove(0);
+        }
     }
     /// The most counted candidate patterns (diagnostics): (pattern, count).
     pub fn sq_top_cands(&self, n: usize) -> Vec<(((u32, u32), (u32, u32)), u32)> {
@@ -3756,6 +3783,7 @@ impl Situation {
                 cl.push(c);
             }
             self.stamp.insert((x, c, kd), self.t);
+            self.touch(x, c, kd);
             // fast: long-term heads only for content values (a value kind of 3 or more members); heads to "." or "the"
             // multiply with every distinct clause tail and only grow the lists every lookup walks
             let content_val = !self.fm(5) || kd == self.kn || self.ksize.get(&kd).copied().unwrap_or(0) >= 3;
@@ -3810,6 +3838,7 @@ impl Situation {
                             cl.push(cs);
                         }
                         self.stamp.insert((x, cs, p2.1), self.t);
+                        self.touch(x, cs, p2.1);
                     }
                 }
             }
