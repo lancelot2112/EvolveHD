@@ -31,6 +31,9 @@ generator of their own):
   pron=P  a statement whose subject is the previous statement's subject in the same scene says "he" or "she"
           instead, with probability P (coreference)
   mod=P   a modifier after the subject ("mary finally found the lamp"), with probability P
+  qual    (with mod) questions about the modifier: "who finally found the lamp in chapter M [of part N] ?",
+          asked for a third of the long-range question points when such a find (unique for its modifier, object
+          and chapter) is at least 8 words back; kind "qual", answer the person
   syn=P   the statement's verb said with a synonym the questions never use ("discovered", "possesses", "resides"),
           with probability P (paraphrase between question and text)
 No echoes ("noecho"): every long-range fact is asked exactly once, at a delay after its (latest) statement drawn
@@ -61,6 +64,10 @@ vocab = func + names + places + objects + units + teens + tens + ["part", "of"] 
 H_CH, H_PT = "chapter", "part"
 fx = lambda k: next((float(x.split("=")[1]) for x in extra if x.startswith(k + "=")), 0.0)
 p_pron, p_mod, p_syn = fx("pron"), fx("mod"), fx("syn")
+p_qual = "qual" in extra
+qrng = random.Random(6061)
+qualified = {}   # (modifier, object, part, chapter) -> [(person, position of the statement)]
+last_mod = [None]
 lrng = random.Random(9173)                       # the ladder's own choices; the story's generator is untouched
 SHE = set("mary sandra emma julie anna lucy nina clara rosa irene tess ella".split())
 MODS = "finally quickly then later also".split()
@@ -104,9 +111,9 @@ def st(p, verb, *rest):
     subj = p
     if p_pron and p == last_subj[0] and lrng.random() < p_pron:
         subj = "she" if p in SHE else "he"
-    words = [subj]
+    words = [subj]; last_mod[0] = None
     if p_mod and lrng.random() < p_mod:
-        words.append(lrng.choice(MODS))
+        last_mod[0] = lrng.choice(MODS); words.append(last_mod[0])
     if p_syn and verb in SYN and lrng.random() < p_syn:
         verb = lrng.choice(SYN[verb])
     say(*words, verb, *rest)
@@ -130,6 +137,17 @@ erng = random.Random(5150)
 def plan(kind, key):
     """noecho: schedule the one question about a fact just stated"""
     if noecho: pending[(kind, key)] = len(toks) + int(2 ** erng.uniform(3, 19))
+def qual_question():
+    """a question about a modifier: who MOD found the O in chapter M [of part N] ? (unique finds, log-spread)"""
+    pos = len(toks)
+    cands = [(k, v[0]) for k, v in qualified.items() if len(v) == 1 and pos - v[0][1] >= 8]
+    if not cands: return False
+    buckets = {}
+    for k, (pr, t) in cands: buckets.setdefault(int(math.log2(pos - t)), []).append((k, pr, t))
+    (m, o, pt, ch), pr, t = qrng.choice(buckets[qrng.choice(sorted(buckets))])
+    tail = [H_CH, *number_words(ch)] + ([ "of", H_PT, *number_words(pt)] if pt else [])
+    ask("qual", t, "who", m, "found", "the", o, "in", *tail, "?", pr); say(".")
+    return True
 def due_question():
     """noecho: the most overdue planned question, asked once"""
     pos = len(toks); due = [(t, k) for k, t in pending.items() if t <= pos]
@@ -201,6 +219,7 @@ for pt, ch in units_list:
                     o = rng.choice(mine); q = rng.choice(others); st(p, "gave", "the", o, "to", q, "."); held[o] = q
             elif r < 0.84 and (p, pt, ch) not in found:
                 o = rng.choice(objects); st(p, "found", "the", o, "."); found[(p, pt, ch)] = (o, len(toks) - 2); plan("found", (p, pt, ch))
+                if last_mod[0]: qualified.setdefault((last_mod[0], o, pt, ch), []).append((p, len(toks) - 2))
             # long-range facts: first statements when due; rare restatements with a new value
             pos = len(toks)
             for q in people:
@@ -228,7 +247,9 @@ for pt, ch in units_list:
                 if held[o] in loc:
                     ask("where-object", -1, "where", "is", "the", o, "?", loc[held[o]]); say(".")
             elif u < 0.46:
-                due_question() if noecho else long_question()
+                if p_qual and qrng.random() < 1 / 3 and qual_question(): pass
+                elif noecho: due_question()
+                else: long_question()
 
 book_end = len(toks)
 for _ in range(qend):

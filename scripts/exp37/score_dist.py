@@ -37,7 +37,8 @@ for i in range(n):
         start = i + 1
 def table(name, rows, right, by):
     out = []
-    for kind in ("home", "owner", "found"):
+    for kind in ("home", "owner", "found", "qual"):
+        if not any(k == kind for _, k, _, _ in rows): continue
         cells = []
         for lo, hi, g in groups:
             ps = [p for p, k, d, e in rows if k == kind and lo <= (d if by == "fact" else e) < hi]
