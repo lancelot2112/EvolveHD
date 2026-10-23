@@ -3017,7 +3017,7 @@ impl Situation {
     /// 0 first / 1 latest / 2 nested, span length, the outer span's first word or MAX, the outer span's length).
     fn anchors(&self, cue: &[u32]) -> Vec<(u64, u64, u32, u32, u32, u32, u32, u32)> {
         let text: Vec<u32> = cue.iter().rev().copied().collect();
-        let mut spans: Vec<(&[u64], u32, u32)> = vec![];
+        let mut spans: Vec<(&[u64], u32, u32, &[u64])> = vec![]; // (occurrences in the epoch, type, length, all)
         for len in 1..=4usize.min(text.len()) {
             for i in 0..=text.len() - len {
                 let h = Self::text_hash(&text[i..i + len]);
@@ -3032,12 +3032,12 @@ impl Situation {
                             }
                         }
                     }
-                    spans.push((o, *fw, len as u32));
+                    spans.push((o, *fw, len as u32, occ));
                 }
             }
         }
         let mut out = vec![];
-        for &(occ, fw, len) in &spans {
+        for &(occ, fw, len, _) in &spans {
             let (first, latest) = (occ[0], *occ.last().unwrap());
             out.push((first, self.unit_end(fw, first), fw, 0, len, u32::MAX, 0, (occ.len() - 1).min(2) as u32));
             if latest != first {
@@ -3047,8 +3047,9 @@ impl Situation {
         out.truncate(6); // as without nesting
         // nested: an inner span's occurrence inside an outer span's unit (each outer at its first and latest start)
         let mut nested = vec![];
-        for &(oc, ofw, olen) in spans.iter().filter(|_| self.cfg.nest) {
-            for &(ic, ifw, ilen) in &spans {
+        for &(oc, ofw, olen, _) in spans.iter().filter(|_| self.cfg.nest) {
+            for &(_, ifw, ilen, ic) in &spans {
+                // the inner span is looked for inside the outer unit: all its occurrences, not just this epoch's
                 if std::ptr::eq(oc, ic) || ofw == ifw {
                     continue;
                 }
