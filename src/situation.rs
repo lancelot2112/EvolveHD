@@ -585,6 +585,8 @@ pub struct Situation {
     path_count: HashMap<Vec<u32>, u64>, // dir-tagged path -> uses
     path_class: HashMap<Vec<u32>, u32>,
     protos: Vec<Proto>,
+    proto_by_bit: Vec<Vec<u32>>,                    // relation classes by the bits of their prototypes (an inverted index)
+    pscratch: Vec<u32>,                             // shared-bit counts per class, for one lookup
     class_count: Vec<u64>,
     senses: HashMap<u32, Vec<Sense>>,
     // slow memory
@@ -736,6 +738,8 @@ impl Situation {
             path_count: HashMap::default(),
             path_class: HashMap::default(),
             protos: vec![],
+            proto_by_bit: vec![vec![]; cfg.mdim],
+            pscratch: vec![],
             class_count: vec![],
             senses: HashMap::default(),
             c1: HashMap::default(),
@@ -1025,24 +1029,29 @@ impl Situation {
         // cross-multiplication: no floats, no division
         let mut best = (0u64, 1u64, usize::MAX);
         if !code.is_empty() && self.pool_pm > 0 {
-            for (i, p) in self.protos.iter().enumerate() {
+            // only classes sharing a bit can pass the overlap test: count shared bits through the inverted index,
+            // then take them in class order (the same choice as a scan over all classes)
+            if self.pscratch.len() < self.protos.len() {
+                self.pscratch.resize(self.protos.len(), 0);
+            }
+            let mut touched: Vec<u32> = vec![];
+            for &b in &code {
+                for &pi in &self.proto_by_bit[b as usize] {
+                    if self.pscratch[pi as usize] == 0 {
+                        touched.push(pi);
+                    }
+                    self.pscratch[pi as usize] += 1;
+                }
+            }
+            touched.sort_unstable();
+            for &pi in &touched {
+                let i = pi as usize;
+                let sh = std::mem::take(&mut self.pscratch[i]) as u64;
+                let p = &self.protos[i];
                 if p.dir != dir || p.bits.is_empty() {
                     continue;
                 }
-                // overlap: shared bits over the larger of the two sizes (both sorted)
-                let (mut a, mut b, mut sh) = (0, 0, 0);
-                while a < code.len() && b < p.bits.len() {
-                    if code[a] == p.bits[b] {
-                        sh += 1;
-                        a += 1;
-                        b += 1;
-                    } else if code[a] < p.bits[b] {
-                        a += 1;
-                    } else {
-                        b += 1;
-                    }
-                }
-                let (sh, den) = (sh as u64, code.len().max(p.bits.len()) as u64);
+                let den = code.len().max(p.bits.len()) as u64;
                 if sh * 1000 >= self.pool_pm * den && (best.2 == usize::MAX || sh * best.1 > best.0 * den) {
                     best = (sh, den, i);
                 }
@@ -1050,6 +1059,10 @@ impl Situation {
         }
         let c = if best.2 == usize::MAX {
             self.protos.push(Proto { counts: vec![0; self.cfg.mdim], bits: code.clone(), dir, n: 0 });
+            let id = self.protos.len() as u32 - 1;
+            for &b in &code {
+                self.proto_by_bit[b as usize].push(id);
+            }
             self.class_count.push(0);
             self.protos.len() - 1
         } else {
@@ -1069,7 +1082,16 @@ impl Situation {
                 idx.truncate(k);
             }
             idx.sort_unstable();
-            p.bits = idx;
+            let old = std::mem::replace(&mut p.bits, idx.clone());
+            for b in old {
+                let l = &mut self.proto_by_bit[b as usize];
+                if let Some(at) = l.iter().position(|&x| x == c as u32) {
+                    l.swap_remove(at);
+                }
+            }
+            for b in idx {
+                self.proto_by_bit[b as usize].push(c as u32);
+            }
         }
         self.path_class.insert(path.to_vec(), c as u32);
         c as u32
@@ -1091,6 +1113,9 @@ impl Situation {
             }
         }
         self.protos.clear();
+        for l in self.proto_by_bit.iter_mut() {
+            l.clear();
+        }
         self.class_count.clear();
         self.path_class.clear();
         self.learning = false;
@@ -1133,6 +1158,14 @@ impl Situation {
         }
         self.protos = protos;
         self.class_count = counts;
+        for l in self.proto_by_bit.iter_mut() {
+            l.clear();
+        }
+        for (i, p) in self.protos.iter().enumerate() {
+            for &b in &p.bits {
+                self.proto_by_bit[b as usize].push(i as u32);
+            }
+        }
         for v in self.path_class.values_mut() {
             *v = fin[*v as usize];
         }
