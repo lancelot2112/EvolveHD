@@ -213,7 +213,7 @@ Mask 23 is 2.9× faster, about 1.8 ms per word. On the story set it scores 96.8 
 
 Several copies of the reader read separate stretches of one book in parallel, and their state is merged.
 - **The warm-up.** One reader reads the first `--sit-warm` words, then the rest of the book is cut into N equal stretches.
-- **Pass 1, in parallel: an index pass.** A copy of the warm reader reads each stretch without predicting. It reads a lead-in of 256 words first, the same way. It exports the long-term index it wrote: heads, head histories, clause texts and opener starts, all symbols stamped with positions, so they merge exactly. Reading without predicting skips route scoring, mood and route credit, and costs about 0.13–0.16 ms per word, about a tenth of a full read.
+- **Pass 1, in parallel: an index pass.** A copy of the warm reader reads each stretch without predicting. It reads a lead-in of 256 words first, the same way. It exports the long-term index it wrote: heads, head histories, clause texts and opener starts, all symbols stamped with positions, so they merge without loss. Head keys also carry relation-class numbers, and a copy can create new classes after the warm-up, so two shards' new class numbers could clash; this has not been tested. Reading without predicting skips route scoring, mood and route credit, and costs 0.12–0.16 ms per word, about a tenth of a full read.
 - **Pass 2, in parallel.** A copy of the warm reader takes the merged index of every earlier stretch, reads its lead-in, then reads its stretch predicting every word. For the head histories, merging means concatenating lists in time order; for heads, the newest wins.
 - **Check:** one shard is byte-identical to the sequential read (`R_sh1`).
 
@@ -223,12 +223,12 @@ Several copies of the reader read separate stretches of one book in parallel, an
 |---|---|---|---|---|---|---|---|
 | sequential (`R_spd_new2`) | — | 98–100% | 90–100% | 94–100% | 99.7 / 90.6 / 76.7% | 251 s | — |
 | 4 shards (`R_sh4`) | 20k | 87–100% | 46–100% | 89–93% | 99.5 / 79.7 / 62.1% | 145 s | 85 s |
-| 4 shards (`R_sh4w100`) | 100k | 91–100% | 89–100% | 95–98% | 99.7 / 90.6 / 75.7% | 190 s | 154 s |
+| 4 shards (`R_sh4w100`) | 100k | 91–100% | 89–100% | 95–98% | 99.7 / 90.6 / 75.7% | 191 s | 154 s |
 | 4 shards, no merge (`R_sh4w100nm`) | 100k | 73–92% | 56–89% | 75–97% | 99.6 / 88.9 / 76.3% | 182 s | 148 s |
 
-- **Facts merge; skill does not.** With a 20k-word warm-up, the first shard matches the sequential reader word for word (it is the same reader). The later shards fall behind on local questions too: who-has 75–87% against 92–98% in the same stretches (`scripts/exp37/by_region.py`). The sequential reader keeps learning which routes to trust for hundreds of thousands of words. In the 1M-word run, far found questions (fact 64k+ back) are right 59–65% at 50k–200k words and 96–100% after 300k. Each shard restarts from the warm reader and repeats that curve.
+- **Facts merge; skill does not.** With a 20k-word warm-up, the first shard matches the sequential reader word for word (it is the same reader). The later shards fall behind on local questions too: who-has 75–87% against 92–98% in the same stretches (`scripts/exp37/by_region.py`). The sequential reader keeps learning which routes to trust for hundreds of thousands of words. In the 1M-word run, far found questions (fact 64k+ back) are right 59–65% at 50k–200k words, 78–81% at 200k–300k, and 90–100% after 300k (96–100% except 90–93% at 500k–600k). Each shard restarts from the warm reader and repeats that curve.
 - **With a 100k-word warm-up the shards match the sequential reader,** apart from home at 64k+ (90.6% against 99.3%).
-- **Without the merge, long-range questions collapse** (home 73–92%, owner 56–89%), and local questions do not change. So the merged index is what answers across shards.
+- **Without the merge, long-range questions collapse** (home 73–92%, owner 56–89%), and local questions barely change (who-has 88.9% against 90.6%). So the merged index is what answers across shards.
 
 **A trained reader reads a new book.** As a trained transformer would, the reader first learns on one book and then reads another. `scripts/exp37/concat_books.py` joins `ld1m_p` (book A) and `ld1m_q` (book B, the same generator with seed 2, 1,009,748 words) and scores only book B's questions. Seed 0; each run on one thread, the two side by side:
 
@@ -239,10 +239,10 @@ Several copies of the reader read separate stretches of one book in parallel, an
 
 - **The sharded read matches the sequential one** in every bucket, within 4 points either way.
 - **Cost of book B:**
-  - sequentially, about 1,584 s (3,030 s for both books, less the 1,446 s that book A took under the same load);
-  - sharded, 1,650 s of work (pass 1 131 s, pass 2 1,519 s), so the index pass adds 4% work;
+  - sequentially, about 1,584 s: 3,030 s for both books, less 1,446 s for book A. That 1,446 s is the sharded run's warm-up on book A, under the same load, not a timing from the sequential run.
+  - sharded, 1,650 s of work, 4% more than the sequential read. The index pass costs 131 s, but pass 2 (1,519 s) takes 65 s less than reading B sequentially.
   - with one core per shard, 171 s (the slowest pass-1 shard, 16.3 s, plus the slowest pass-2 shard, 154.9 s), about 9× faster for 10 shards. This figure is computed from the per-shard times; it was not run on 10 cores.
-- **A new weakness, not caused by sharding:** in book B, found 64k+ back falls to 57–69% in both runs, against 92–94% in book A alone. The labels recur across books: "part three" names a part of A and a part of B. Of 792 wrong far-found answers in the sequential run, 172 are X's find in the same chapter of another part, and 544 another of X's finds. Route features are added one by one, with no conjunction of an anchor's opener type with first/latest, and no flag for which outer occurrence a nested anchor came from. So "the latest part three" and "the first part three" look alike to the learner. Not yet fixed.
+- **A new weakness, not caused by sharding:** in book B, found 64k+ back falls to 57–69% in both runs, against 92–94% in book A alone. The labels recur across books: "part three" names a part of A and a part of B. Of 792 wrong far-found answers in the sequential run, 548 are X's find in the right chapter of another part: 325 in another part of book B, the rest in book A, 121 of them at the same part and chapter of book A. By then every person has found all 12 objects, so any object is one of X's finds. So the reader finds the chapter but often the wrong part. A likely cause: route features are added one by one, with no conjunction of an anchor's opener type with first/latest, and no flag for which outer occurrence a nested anchor came from, so "the latest part three" and "the first part three" look alike to the learner. Not yet tested or fixed.
 
 **Learning in parallel, from scratch** (`--sit-shard-learn`, built, not yet run): pass 1 also predicts, so each shard learns, and each shard's change to the query table is added to every later shard in pass 2.
 
@@ -250,4 +250,4 @@ Several copies of the reader read separate stretches of one book in parallel, an
 
 - Single seed, one book (one per length).
 - Every experiment 37 run chooses routes with the sparse 8-bit query table (`--sit-qsparse 2`). The weight-free question slots of experiment 36 (`--sit-qslots`) have no route fields for the long-term source, anchor type, nesting or exact path, so they have not been run on the books.
-- The machine restarted several times during this work. Seed 2 of the experiment 36 full benchmark was lost twice and has been relaunched.
+- The machine restarted several times during this work. Seeds 1 and 2 of the experiment 36 full benchmark have since finished: 97.8% and 98.0%, against 98.0% for seed 0.

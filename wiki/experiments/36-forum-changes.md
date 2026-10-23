@@ -272,7 +272,7 @@ Also tried, seed 0:
 - **Seed 1's failure:** the slots settled on a verb-mediated route, "apple → the verb 'took' → the latest person who took anything", instead of the object's holder. The direct one-hop route was a candidate but scored lower. Why is not yet diagnosed. One guess was that two-hop routes collect more evidence; both lengths have the same 10 fields, but the one-hop route's fixed "none" symbols may not be reinforced the way real symbols are.
 - **Tying every field's symbol to the hop count does not fix it** (`--sit-qslot-hopconj`, which keeps one- and two-hop evidence apart): 92.1 / 86.7 / 89.8% (mean 89.5%), with who-has at 90.0 / 70.0 / 66.2%.
 
-**Caveats:** seed 0 only, except the three-seed tables. The full benchmark is one seed of one configuration.
+**Caveats:** seed 0 only, except the three-seed tables. The full benchmark here is one seed of one configuration; seeds 1 and 2 of the final configuration are in the full-benchmark table further down.
 
 ### Curiosity: look it up when unsure, and say "unknown" if it is still not found (`--sit-curious`)
 
@@ -339,6 +339,8 @@ With the lower cut, the small set's places, objects (book and key included) and 
 | leak fix + slow merges | 97.0% | 56.8% | 95.3% | 90.8% | 34 min |
 | **leak fix + slow merges + lower cut (weight table)** | **99.3%** | **90.0%** | **99.7%** | **98.0%** | 32 min |
 | the same, weight-free (question slots) | 96.3% | 89.6% | 97.2% | 95.4% | 41 min |
+| leak fix + slow merges + lower cut (weight table), seed 1 | 99.3% | 88.6% | 99.8% | 97.8% | 33 min |
+| the same, seed 2 | 99.3% | 90.0% | 99.8% | 98.0% | 33 min |
 
 Where-object by eighth of the questions (5,619 where-object answers over the whole stream, split into 8 equal groups). The shift at word 402,081 falls inside the 4th eighth (66 of its 702 answers come after it); the 4th/5th boundary is where scoring starts:
 
@@ -352,4 +354,4 @@ Where-object by eighth of the questions (5,619 where-object answers over the who
 - **The halfway collapse was the kind merge.** With the kinds held apart, the second half is better than the first.
 - **The run with the merge still in it (leak fix and slow merges) gained only +5.4 points on where-object.** The CPU seat's prediction for the leak fix (≥61%) was not met by that run; its time prediction (≤2.5 ms per word) was.
 - **Open queries still churn on the long stream** (the weight-table run with all fixes): 1,808 opened and 1,776 closed, with 14.5 open on average (peak 37) and 3.6 upkeep per word.
-- **Single seed** on the full set. The wall times come from a 2-core machine with two runs overlapping for most of each, so treat small differences in time loosely.
+- **Three seeds for the weight table with all fixes** (97.8–98.0%); single seed for the other rows. The wall times come from a 2-core machine with two runs overlapping for most of each, so treat small differences in time loosely.
