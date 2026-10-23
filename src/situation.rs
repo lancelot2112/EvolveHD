@@ -311,6 +311,7 @@ pub struct SitCfg {
 
 /// Sparse 8-bit weights: an open-addressing hash table (linear probing, power-of-two capacity, grown at half full)
 /// of 32-bit keys and saturating 8-bit values. A key never updated reads 0.
+#[derive(Clone)]
 pub struct SparseW {
     keys: Vec<u32>,
     vals: Vec<i8>,
@@ -378,6 +379,7 @@ impl SparseW {
 /// weights (8 bits, saturating). A feature's score under a query is the sum of its weights, each times the number of
 /// times its bit is in the query. A row whose list grows past a third of the query bits is kept dense (one byte per
 /// bit), which is no bigger than its list and scores as one vector dot product; the sums are the same.
+#[derive(Clone)]
 pub struct RowW {
     bits: Vec<Vec<u16>>,
     vals: Vec<Vec<i8>>,
@@ -454,12 +456,14 @@ impl RowW {
 
 /// A learned sense of a word: a prototype of the contexts it is used in (counts over the identity bits of the
 /// clause words around it).
+#[derive(Clone)]
 struct Sense {
     counts: Vec<u32>,
     n: u32,
 }
 
 /// A pooled relation class: a prototype (bit counts) and its name (its first path).
+#[derive(Clone)]
 struct Proto {
     counts: Vec<u32>,
     bits: Vec<u32>,
@@ -467,6 +471,35 @@ struct Proto {
     n: u32,
 }
 
+/// A shard's long-term index (see `export_index`).
+#[derive(Clone, Default)]
+pub struct LtIndex {
+    pub heads: Vec<((u32, u32, u32), (u32, u64, u32))>,
+    pub posts: Vec<((u32, u32, u32), Vec<(u64, u32)>)>,
+    pub ctext: Vec<(u64, u32, Vec<u64>)>,
+    pub opener: Vec<(u32, Vec<u64>)>,
+}
+impl LtIndex {
+    /// The entries at times in [from, to).
+    pub fn range(&self, from: u64, to: u64) -> LtIndex {
+        let inr = |t: u64| t >= from && t < to;
+        LtIndex {
+            heads: self.heads.iter().filter(|x| inr(x.1 .1)).copied().collect(),
+            posts: self.posts.iter().map(|(k, h)| (*k, h.iter().filter(|x| inr(x.0)).copied().collect::<Vec<_>>())).filter(|x| !x.1.is_empty()).collect(),
+            ctext: self.ctext.iter().map(|(h, fw, o)| (*h, *fw, o.iter().filter(|&&x| inr(x)).copied().collect::<Vec<_>>())).filter(|x| !x.2.is_empty()).collect(),
+            opener: self.opener.iter().map(|(f, p)| (*f, p.iter().filter(|&&x| inr(x)).copied().collect::<Vec<_>>())).filter(|x| !x.1.is_empty()).collect(),
+        }
+    }
+    /// Entries (heads + postings + clause starts + opener starts).
+    pub fn len(&self) -> usize {
+        self.heads.len()
+            + self.posts.iter().map(|x| x.1.len()).sum::<usize>()
+            + self.ctext.iter().map(|x| x.2.len()).sum::<usize>()
+            + self.opener.iter().map(|x| x.1.len()).sum::<usize>()
+    }
+}
+
+#[derive(Clone)]
 pub struct Situation {
     pub cfg: SitCfg,
     nw: usize,
@@ -509,7 +542,8 @@ pub struct Situation {
     qw: Vec<i16>,                                   // the query learner: QD x NF signed 16-bit weights (dense)
     qs: SparseW,                                    // ... or the same weights sparse, 8-bit (--sit-qsparse 1)
     qr: RowW,                                       // ... or per feature, (bit, weight) lists (--sit-qsparse 2)
-    qset_memo: std::cell::RefCell<(Vec<u32>, Vec<u8>)>,        // the last query's bit counts (built once per query)
+    qset_memo: std::cell::RefCell<(Vec<u32>, Vec<u8>)>,
+    idx_only: bool,                                 // reading without a prediction (observe_only)        // the last query's bit counts (built once per query)
     qh: Vec<i8>,                                    // ... or superposed in one vector of 8-bit cells (--sit-qsparse 3)
     qform: u64,                                     // the current question form (--sit-qslots)
     heads_tab: HashMap<(u32, u32, u32), (u32, u64, u32, u32)>, // --sit-heads: (entity, path or class, kind) -> (value, time, class, index in heads_of)
@@ -653,6 +687,7 @@ impl Situation {
             qs: SparseW::new(),
             qr: RowW::new(if cfg.query && cfg.qsparse == 2 { NF } else { 0 }),
             qset_memo: std::cell::RefCell::new((vec![], vec![0u8; QD])),
+            idx_only: false,
             qh: if cfg.query && cfg.qsparse == 3 { vec![0; 1 << cfg.qholo] } else { vec![] },
             qform: 0,
             heads_tab: HashMap::default(),
@@ -2769,6 +2804,82 @@ impl Situation {
     fn text_hash(ws: &[u32]) -> u64 {
         ws.iter().fold(0x7E47u64, |h, &w| hash(h, w as u64))
     }
+    /// Read a word without predicting it (a shard's index pass, or a lead-in): everything is learned as usual except
+    /// what needs a prediction (mood, route credit).
+    pub fn observe_only(&mut self, w: u32) {
+        self.last.clear();
+        self.idx_only = true;
+        self.observe(w);
+        self.idx_only = false;
+    }
+    /// The time (words read).
+    pub fn time(&self) -> u64 {
+        self.t
+    }
+    /// Move the clock forward to `t` (a shard's reader starting further along the book; the words in between are
+    /// read by other shards).
+    pub fn jump_to(&mut self, t: u64) {
+        self.t = self.t.max(t);
+    }
+    /// The long-term index written at times in [from, to): heads, head histories, clause texts and opener starts,
+    /// all symbols stamped with positions (for merging the shards of a sharded read).
+    pub fn export_index(&self, from: u64, to: u64) -> LtIndex {
+        let inr = |t: u64| t >= from && t < to;
+        let mut ix = LtIndex::default();
+        for (&k, &(v, t, c, _)) in &self.heads_tab {
+            if inr(t) {
+                ix.heads.push((k, (v, t, c)));
+            }
+        }
+        for (&k, h) in &self.posts {
+            let e: Vec<(u64, u32)> = h.iter().filter(|x| inr(x.0)).copied().collect();
+            if !e.is_empty() {
+                ix.posts.push((k, e));
+            }
+        }
+        for (&h, (occ, fw)) in &self.ctext {
+            let e: Vec<u64> = occ.iter().filter(|&&x| inr(x)).copied().collect();
+            if !e.is_empty() {
+                ix.ctext.push((h, *fw, e));
+            }
+        }
+        for (&fw, ps) in &self.opener_pos {
+            let e: Vec<u64> = ps.iter().filter(|&&x| inr(x)).copied().collect();
+            if !e.is_empty() {
+                ix.opener.push((fw, e));
+            }
+        }
+        ix.heads.sort_unstable_by_key(|x| x.0);
+        ix.posts.sort_unstable_by_key(|x| x.0);
+        ix.ctext.sort_unstable_by_key(|x| x.0);
+        ix.opener.sort_unstable_by_key(|x| x.0);
+        ix
+    }
+    /// Add a long-term index written before this reader's own entries (time order is kept: install the earlier
+    /// shards first, before reading). Heads: the newer value wins.
+    pub fn install_index(&mut self, ix: &LtIndex) {
+        for &((e, key, k), (v, t, c)) in &ix.heads {
+            if let Some(ent) = self.heads_tab.get_mut(&(e, key, k)) {
+                if t > ent.1 {
+                    (ent.0, ent.1, ent.2) = (v, t, c);
+                    self.heads_of.get_mut(&e).unwrap()[ent.3 as usize] = (key, k, v, t, c);
+                }
+            } else {
+                let l = self.heads_of.entry(e).or_default();
+                self.heads_tab.insert((e, key, k), (v, t, c, l.len() as u32));
+                l.push((key, k, v, t, c));
+            }
+        }
+        for (k, h) in &ix.posts {
+            self.posts.entry(*k).or_default().extend_from_slice(h);
+        }
+        for (h, fw, occ) in &ix.ctext {
+            self.ctext.entry(*h).or_insert((vec![], *fw)).0.extend_from_slice(occ);
+        }
+        for (fw, ps) in &ix.opener {
+            self.opener_pos.entry(*fw).or_default().extend_from_slice(ps);
+        }
+    }
     /// The end of the unit that starts at `st` with a clause whose first word is `fw`: the next clause with that
     /// first word.
     fn unit_end(&self, fw: u32, st: u64) -> u64 {
@@ -2886,7 +2997,8 @@ impl Situation {
             }
         }
         // mood: after a boundary, was the store's top proposal this word? (up on a hit, down on half the misses)
-        if let Some(&u) = self.hist.last() {
+        // (not when reading without predicting: there was no proposal)
+        if let Some(&u) = self.hist.last().filter(|_| !self.idx_only) {
             if self.boundary[u as usize] {
                 let ok = self.last.first().map(|x| x.1) == Some(w);
                 let trivial = self.cfg.mood2 && self.succ_top.get(&u).map_or(false, |t| t.0 == w);

@@ -52,6 +52,7 @@ impl Default for MeaningCfg {
     }
 }
 
+#[derive(Clone)]
 pub struct Meaning {
     pub cfg: MeaningCfg,
     pub nw: usize,
@@ -398,6 +399,7 @@ fn top_of(mut cands: Vec<u32>, val: impl Fn(u32) -> f64, k: usize) -> Vec<u32> {
 }
 
 /// Rows keyed by code bits, each counting the next word: a counts readout over a code (as in the prototype).
+#[derive(Clone)]
 pub struct BitRows {
     d: usize,
     nw: usize,

@@ -172,6 +172,126 @@ fn assoc_cfg(args: &[String]) -> evolvehd::assoc::AssocCfg {
     }
 }
 
+/// A sharded read (--sit-shards N): one reader reads the first --sit-warm words (default a tenth), then the rest is
+/// cut into N stretches. Pass 1, in parallel: a copy of the warm reader reads each stretch without predicting
+/// (after a lead-in of --sit-leadin words, default 256, read the same way) and exports the long-term index it
+/// wrote there (heads, head histories, clause texts, opener starts: symbols stamped with positions). Pass 2, in
+/// parallel: a copy of the warm reader takes the merged index of every earlier stretch (unless
+/// --sit-shard-nomerge), reads its lead-in, then reads its stretch predicting every word. --sit-threads (default:
+/// the machine's cores) readers run at once. Returns the ranks and top-8 lists in book order, and the last reader.
+fn sharded_read(args: &[String], ids: &[u32], nw: usize) -> (Vec<u8>, Vec<u32>, evolvehd::situation::Situation) {
+    use evolvehd::situation::{LtIndex, Situation};
+    let n = ids.len();
+    let num = |k: &str, d: usize| arg(args, k).map(|s| s.parse::<usize>().unwrap()).unwrap_or(d);
+    let ns = num("--sit-shards", 1).max(1);
+    let warm = num("--sit-warm", n / 10).min(n);
+    let lead = num("--sit-leadin", 256);
+    let threads = num("--sit-threads", std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1)).max(1);
+    let merge = !flag(args, "--sit-shard-nomerge");
+    fn span(x: &mut Situation, ids: &[u32], lo: usize, hi: usize, predict: bool, out: &mut Vec<u8>, top: &mut Vec<u32>) {
+        for t in lo..hi {
+            let w = ids[t];
+            if predict {
+                let s = x.recall();
+                out.push(s.iter().position(|y| y.0 == w).map(|p| p as u8).unwrap_or(255));
+                for i in 0..8 {
+                    top.push(s.get(i).map(|y| y.0).unwrap_or(u32::MAX));
+                }
+                x.observe(w);
+            } else {
+                x.observe_only(w);
+            }
+        }
+    }
+    // run jobs 0..m on `threads` workers; each job's result and its wall time
+    fn pool<T: Send>(m: usize, threads: usize, f: &(dyn Fn(usize) -> T + Sync)) -> Vec<(T, f64)> {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let res: std::sync::Mutex<Vec<Option<(T, f64)>>> = std::sync::Mutex::new((0..m).map(|_| None).collect());
+        std::thread::scope(|sc| {
+            for _ in 0..threads.min(m) {
+                sc.spawn(|| loop {
+                    let j = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if j >= m {
+                        break;
+                    }
+                    let t0 = Instant::now();
+                    let r = f(j);
+                    res.lock().unwrap()[j] = Some((r, t0.elapsed().as_secs_f64()));
+                });
+            }
+        });
+        res.into_inner().unwrap().into_iter().map(|x| x.unwrap()).collect()
+    }
+    let t0 = Instant::now();
+    let mut r0 = Situation::new(sit_cfg(args), nw);
+    let (mut out, mut top) = (vec![], vec![]);
+    span(&mut r0, ids, 0, warm, true, &mut out, &mut top);
+    let tw = t0.elapsed().as_secs_f64();
+    let st: Vec<usize> = (0..=ns).map(|k| warm + (n - warm) * k / ns).collect();
+    let start = |r: &mut Situation, k: usize| {
+        if k > 0 {
+            let lo = st[k].saturating_sub(lead).max(warm);
+            r.jump_to(lo as u64);
+            span(r, ids, lo, st[k], false, &mut vec![], &mut vec![]);
+        }
+    };
+    // pass 1: each stretch's index (the last stretch's is never needed)
+    let t1 = Instant::now();
+    // the copies of the warm reader, made here (a reader is moved into its thread, never shared)
+    let copies = |m: usize| std::sync::Mutex::new((0..m).map(|_| Some(r0.clone())).collect::<Vec<Option<Situation>>>());
+    let c1 = copies(if merge { ns - 1 } else { 0 });
+    let p1: Vec<(LtIndex, f64)> = if merge && ns > 1 {
+        pool(ns - 1, threads, &|k| {
+            let mut r = c1.lock().unwrap()[k].take().unwrap();
+            start(&mut r, k);
+            span(&mut r, ids, st[k], st[k + 1], false, &mut vec![], &mut vec![]);
+            r.export_index(st[k] as u64, st[k + 1] as u64)
+        })
+    } else {
+        vec![]
+    };
+    let tp1 = t1.elapsed().as_secs_f64();
+    // pass 2: each stretch read with the index of every earlier one
+    let t2 = Instant::now();
+    let c2 = copies(ns);
+    let p2: Vec<((Vec<u8>, Vec<u32>, Option<Situation>, usize), f64)> = pool(ns, threads, &|k| {
+        let mut r = c2.lock().unwrap()[k].take().unwrap();
+        let mut got = 0;
+        if merge {
+            let lo = st[k].saturating_sub(lead).max(warm) as u64;
+            for (j, (ix, _)) in p1.iter().enumerate().take(k) {
+                let part = ix.range(st[j] as u64, lo);
+                got += part.len();
+                r.install_index(&part);
+            }
+        }
+        start(&mut r, k);
+        let (mut o, mut tp) = (vec![], vec![]);
+        span(&mut r, ids, st[k], st[k + 1], true, &mut o, &mut tp);
+        (o, tp, if k + 1 == ns { Some(r) } else { None }, got)
+    });
+    let tp2 = t2.elapsed().as_secs_f64();
+    let m2 = p2.iter().map(|x| x.1).fold(0.0, f64::max);
+    let mut last = None;
+    for (k, ((o, tp, r, got), secs)) in p2.into_iter().enumerate() {
+        let s1 = p1.get(k).map(|x| x.1).unwrap_or(0.0);
+        let ixn = p1.get(k).map(|x| x.0.len()).unwrap_or(0);
+        eprintln!("shard {k}: words {}..{}; pass 1 {s1:.1} s (index entries written {ixn}); pass 2 {secs:.1} s (index entries installed {got})", st[k], st[k + 1]);
+        out.extend(o);
+        top.extend(tp);
+        if r.is_some() {
+            last = r;
+        }
+    }
+    let m1 = p1.iter().map(|x| x.1).fold(0.0, f64::max);
+    eprintln!(
+        "sharded read: {ns} shards on {threads} threads, warm-up {warm} words; wall: warm-up {tw:.1} s, pass 1 {tp1:.1} s, pass 2 {tp2:.1} s, total {:.1} s; with one core per shard: {:.1} s (the warm-up, the slowest pass-1 shard, the slowest pass-2 shard)",
+        t0.elapsed().as_secs_f64(),
+        tw + m1 + m2
+    );
+    (out, top, last.unwrap_or(r0))
+}
+
 fn arg<'a>(args: &'a [String], k: &str) -> Option<&'a str> {
     args.iter()
         .position(|a| a == k)
@@ -710,7 +830,13 @@ fn main() {
             let mut out: Vec<u8> = Vec::with_capacity(ids.len() * hops);
             let mut top: Vec<u32> = Vec::with_capacity(ids.len() * hops);
             let mut chans: Vec<u32> = vec![];
-            for &w in &ids {
+            if flag(&args, "--sit") && arg(&args, "--sit-shards").is_some() {
+                let (o, tp, x) = sharded_read(&args, &ids, nw);
+                out = o;
+                top = tp;
+                a = St::S(x);
+            }
+            for &w in ids.iter().filter(|_| !(flag(&args, "--sit") && arg(&args, "--sit-shards").is_some())) {
                 let sets = a.recall();
                 for h in 0..hops {
                     let r = sets
