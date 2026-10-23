@@ -168,6 +168,11 @@ pub struct SitCfg {
     /// log2 of its mean recurrence interval, without a division), so a new book's headings in new words reuse the
     /// skill learned on old ones.
     pub roles: bool,
+    /// Skippable words left out of exact relation paths (with --sit-heads-path): a word is skippable when, at
+    /// three quarters or more of its (at least 16) occurrences, the word before it has already been seen directly
+    /// followed by the word after it ("mary finally lives": "mary lives" occurs too). Modifiers, and in prose
+    /// adjectives, then do not split one relation into many paths.
+    pub skip: bool,
     /// Speed: slot reads cached within a word (cleared on any write), kind member lists kept with the kinds, the
     /// background total kept as a running sum, and a cheaper multiplicative phase hash for values.
     pub fast: bool,
@@ -653,6 +658,7 @@ pub struct Situation {
     pub sq_closed: u64,
     mood: Vec<u8>,
     succ: HashMap<(u32, u32), u32>,                 // bigram counts (word, next word), for mood2
+    skip_n: Vec<(u32, u32)>,                        // --sit-skip: per word (occurrences, occurrences that were skippable)
     succ_top: HashMap<u32, (u32, u32)>,             // per word: its most frequent successor and that count
     buf: Vec<(u32, u32, u8, u32)>,                  // buffered bindings: (entity, class, direction, value)
     stamp: HashMap<(u32, u32, u32), u64>,           // last write time per slot (entity, class, kind)
@@ -797,6 +803,7 @@ impl Situation {
             sq_closed: 0,
             mood: vec![0; nw],
             succ: HashMap::default(),
+            skip_n: vec![(0, 0); nw],
             succ_top: HashMap::default(),
             buf: vec![],
             stamp: HashMap::default(),
@@ -3110,8 +3117,17 @@ impl Situation {
                 }
             }
         }
+        // skippable words: was the word before last seen directly followed by this one?
+        if self.cfg.skip && self.hist.len() >= 2 {
+            let (a, u) = (self.hist[self.hist.len() - 2], self.hist[self.hist.len() - 1]);
+            let e = &mut self.skip_n[u as usize];
+            e.0 += 1;
+            if self.succ.get(&(a, w)).copied().unwrap_or(0) > 0 {
+                e.1 += 1;
+            }
+        }
         // the bigram counts behind mood2 and bnd2 (after the mood update, so they hold only the words before this one)
-        if self.cfg.mood2 || self.cfg.bnd2 {
+        if self.cfg.mood2 || self.cfg.bnd2 || self.cfg.skip {
             if let Some(&u) = self.hist.last() {
                 let c = self.succ.entry((u, w)).or_insert(0);
                 *c += 1;
@@ -3317,7 +3333,12 @@ impl Situation {
                     } else {
                         self.buf.push((w, c, 1, s));
                     }
-                    self.bufp.push((hash(p.iter().fold(0x9A7, |h, &x| hash(h, x as u64)), 77) & 0x7FFF_FFFF) as u32);
+                    let skippable = |x: u32| {
+                        let e = self.skip_n.get(x as usize).copied().unwrap_or((0, 0));
+                        self.cfg.skip && e.0 >= 16 && e.1 * 4 >= e.0 * 3
+                    };
+                    let pk = p.iter().enumerate().filter(|(i, &x)| *i == 0 || !skippable(x)).fold(0x9A7, |h, (_, &x)| hash(h, x as u64));
+                    self.bufp.push((hash(pk, 77) & 0x7FFF_FFFF) as u32);
                 }
             }
             path.push(s);
