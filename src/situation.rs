@@ -604,7 +604,8 @@ pub struct Situation {
     protos: Vec<Proto>,
     proto_by_bit: Vec<Vec<u32>>,
     lsh_bucket: HashMap<u64, u32>,                  // --sit-lsh: band key -> relation class
-    vband: HashMap<u64, Vec<u32>>,                  // --sit-vlsh: band key -> the values whose code has it                    // relation classes by the bits of their prototypes (an inverted index)
+    vband: HashMap<u64, Vec<u32>>,                  // --sit-vlsh: band key -> the values whose code has it
+    vcodes: Vec<u128>,                              // --sit-vlsh: each value's code, 2 bits per key position                    // relation classes by the bits of their prototypes (an inverted index)
     pscratch: Vec<u32>,                             // shared-bit counts per class, for one lookup
     class_count: Vec<u64>,
     senses: HashMap<u32, Vec<Sense>>,
@@ -760,6 +761,7 @@ impl Situation {
             proto_by_bit: vec![vec![]; cfg.mdim],
             lsh_bucket: HashMap::default(),
             vband: HashMap::default(),
+            vcodes: vec![],
             pscratch: vec![],
             class_count: vec![],
             senses: HashMap::default(),
@@ -1602,6 +1604,13 @@ impl Situation {
         }
         (hash(v as u64 + 0x7777 + self.cfg.seed.wrapping_mul(0x1000_0001), e as u64) & 3) as u8
     }
+    /// --sit-vlsh: a value's phase at a key's i-th position, from its stored code.
+    fn vc(&self, v: u32, i: usize) -> u8 {
+        match self.vcodes.get(v as usize) {
+            Some(&c) if i < 64 => ((c >> (2 * i)) & 3) as u8,
+            _ => self.vcode(v, i),
+        }
+    }
     /// --sit-vlsh: a value's phase at a key's i-th position (its fixed code).
     fn vcode(&self, v: u32, i: usize) -> u8 {
         let h = (v as u64 ^ self.cfg.seed.wrapping_mul(0x1000_0001).wrapping_add(0x5A5A)).wrapping_mul(0x9E37_79B9_7F4A_7C15)
@@ -1615,6 +1624,10 @@ impl Situation {
     /// --sit-vlsh: file a newly seen value's code under its bands.
     fn vband_add(&mut self, v: u32) {
         let code: Vec<u8> = (0..self.cfg.k).map(|i| self.vcode(v, i)).collect();
+        if self.vcodes.len() <= v as usize {
+            self.vcodes.resize(v as usize + 1, 0);
+        }
+        self.vcodes[v as usize] = code.iter().take(64).enumerate().fold(0u128, |c, (i, &p)| c | (p as u128) << (2 * i));
         let w = self.cfg.vlsh_band;
         for b in 0..self.cfg.k / w {
             self.vband.entry(Self::vband_key(b, &code[b * w..b * w + w])).or_default().push(v);
@@ -1778,7 +1791,7 @@ impl Situation {
                     let s: i64 = z
                         .iter()
                         .enumerate()
-                        .map(|(i, &(zr, zi))| match self.vcode(v, i) {
+                        .map(|(i, &(zr, zi))| match self.vc(v, i) {
                             0 => zr,
                             1 => zi,
                             2 => -zr,
