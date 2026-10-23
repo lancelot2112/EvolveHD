@@ -188,6 +188,13 @@ pub struct SitCfg {
     /// row), and two paths share a class when a band collides. A new path costs bands x rows hashes over its bits,
     /// whatever the number of classes; a band that hits gives the class, the other bands are filed under it.
     pub lsh: bool,
+    /// Slot reads without a scan: a value's phase at a key's i-th position depends on (value, i) only, so every
+    /// value has one fixed code of K phases, and an unbound slot is an estimate of that code. The codes are
+    /// indexed by bit sampling (8 bands of 8 positions, 16-bit keys); a read takes the phase of each position
+    /// from the unbound slot, looks up the bands it estimates fully, and scores only the values found there.
+    pub vlsh: bool,
+    pub vlsh_band: usize, // positions per band (default 4)
+    pub vlsh_hits: usize, // bands a value must match to be a candidate (default 1)
     pub lsh_bands: usize,
     pub lsh_rows: usize,
     /// Speed: slot reads cached within a word (cleared on any write), kind member lists kept with the kinds, the
@@ -593,7 +600,8 @@ pub struct Situation {
     path_class: HashMap<Vec<u32>, u32>,
     protos: Vec<Proto>,
     proto_by_bit: Vec<Vec<u32>>,
-    lsh_bucket: HashMap<u64, u32>,                  // --sit-lsh: band key -> relation class                    // relation classes by the bits of their prototypes (an inverted index)
+    lsh_bucket: HashMap<u64, u32>,                  // --sit-lsh: band key -> relation class
+    vband: HashMap<u64, Vec<u32>>,                  // --sit-vlsh: band key -> the values whose code has it                    // relation classes by the bits of their prototypes (an inverted index)
     pscratch: Vec<u32>,                             // shared-bit counts per class, for one lookup
     class_count: Vec<u64>,
     senses: HashMap<u32, Vec<Sense>>,
@@ -748,6 +756,7 @@ impl Situation {
             protos: vec![],
             proto_by_bit: vec![vec![]; cfg.mdim],
             lsh_bucket: HashMap::default(),
+            vband: HashMap::default(),
             pscratch: vec![],
             class_count: vec![],
             senses: HashMap::default(),
@@ -1590,11 +1599,29 @@ impl Situation {
         }
         (hash(v as u64 + 0x7777 + self.cfg.seed.wrapping_mul(0x1000_0001), e as u64) & 3) as u8
     }
+    /// --sit-vlsh: a value's phase at a key's i-th position (its fixed code).
+    fn vcode(&self, v: u32, i: usize) -> u8 {
+        let h = (v as u64 ^ self.cfg.seed.wrapping_mul(0x1000_0001).wrapping_add(0x5A5A)).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (i as u64 + 1).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+        ((h ^ (h >> 31)).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 62) as u8
+    }
+    /// --sit-vlsh: the key of band b for a code (its phases at the band's positions).
+    fn vband_key(b: usize, ph: &[u8]) -> u64 {
+        hash(b as u64 + 0xBA4D, ph.iter().fold(0u64, |h, &p| h << 2 | p as u64))
+    }
+    /// --sit-vlsh: file a newly seen value's code under its bands.
+    fn vband_add(&mut self, v: u32) {
+        let code: Vec<u8> = (0..self.cfg.k).map(|i| self.vcode(v, i)).collect();
+        let w = self.cfg.vlsh_band;
+        for b in 0..self.cfg.k / w {
+            self.vband.entry(Self::vband_key(b, &code[b * w..b * w + w])).or_default().push(v);
+        }
+    }
     fn write(&mut self, e: u32, c: u32, kd: u32, v: u32) {
         let (idx, ph) = self.key(e, c, kd);
         let m = self.cfg.mag;
-        for (&x, &kp) in idx.iter().zip(&ph) {
-            let p = ((kp + self.vph(v, x)) & 3) as usize;
+        for (i, (&x, &kp)) in idx.iter().zip(&ph).enumerate() {
+            let p = ((kp + if self.cfg.vlsh { self.vcode(v, i) } else { self.vph(v, x) }) & 3) as usize;
             let x = x as usize;
             self.re[x] = (self.re[x] + m * DRE[p]).clamp(-1, 1);
             self.im[x] = (self.im[x] + m * DIM[p]).clamp(-1, 1);
@@ -1683,9 +1710,83 @@ impl Situation {
             .collect();
         let typed = self.cfg.kinds && kd != self.kn;
         let empty: Vec<u32> = vec![];
-        let cands: &Vec<u32> = if typed { self.members.get(&kd).unwrap_or(&empty) } else { &self.words };
+        let found: Vec<u32>;
+        let cands: &Vec<u32> = if self.cfg.vlsh {
+            // the values whose code matches a fully estimated band of the unbound slot
+            // each position's possible phases: those its unbound component favours most (one, or two when the
+            // real and imaginary parts tie, all four when both are zero)
+            let est: Vec<Vec<u8>> = z
+                .iter()
+                .map(|&(a, b)| {
+                    let s = [a, b, -a, -b];
+                    let m = *s.iter().max().unwrap();
+                    (0..4u8).filter(|&p| s[p as usize] == m).collect()
+                })
+                .collect();
+            let mut f: Vec<u32> = vec![];
+            let bw = self.cfg.vlsh_band;
+            for b in 0..self.cfg.k / bw {
+                // probe every combination of the band's possible phases, when there are at most 16
+                let opts = &est[b * bw..b * bw + bw];
+                let n: usize = opts.iter().map(|o| o.len()).product();
+                if n > 16 {
+                    continue;
+                }
+                for mut r in 0..n {
+                    let band: Vec<u8> = opts
+                        .iter()
+                        .map(|o| {
+                            let p = o[r % o.len()];
+                            r /= o.len();
+                            p
+                        })
+                        .collect();
+                    if let Some(ws) = self.vband.get(&Self::vband_key(b, &band)) {
+                        f.extend(ws.iter().filter(|&&w| !typed || self.kind[w as usize] == kd));
+                    }
+                }
+            }
+            f.sort_unstable();
+            // a candidate: a value matching at least vlsh_hits bands
+            let mut g: Vec<u32> = vec![];
+            let mut i = 0;
+            while i < f.len() {
+                let mut j = i;
+                while j < f.len() && f[j] == f[i] {
+                    j += 1;
+                }
+                if j - i >= self.cfg.vlsh_hits {
+                    g.push(f[i]);
+                }
+                i = j;
+            }
+            found = g;
+            &found
+        } else if typed {
+            self.members.get(&kd).unwrap_or(&empty)
+        } else {
+            &self.words
+        };
         self.stat.borrow_mut()[3] += cands.len() as u64;
-        let mut sc: Vec<(u32, i64)> = if self.fm(1) {
+        let mut sc: Vec<(u32, i64)> = if self.cfg.vlsh {
+            cands
+                .iter()
+                .map(|&v| {
+                    let s: i64 = z
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &(zr, zi))| match self.vcode(v, i) {
+                            0 => zr,
+                            1 => zi,
+                            2 => -zr,
+                            _ => -zi,
+                        } as i64)
+                        .sum();
+                    (v, s)
+                })
+                .filter(|x| x.1 > 0)
+                .collect()
+        } else if self.fm(1) {
             // the cheap phase, unrolled over the key: the key-side multiply once per read, then per value one
             // multiply-xor-shift per position and a sign-select of the unbound slot (vectorizes)
             let s0 = self.cfg.seed.wrapping_mul(0x1000_0001).wrapping_add(0x7777);
@@ -3501,6 +3602,9 @@ impl Situation {
         if !self.seen[w as usize] {
             self.seen[w as usize] = true;
             self.words.push(w);
+            if self.cfg.vlsh {
+                self.vband_add(w);
+            }
             if self.fm(0) {
                 self.bg_total += self.bg[w as usize] as i128;
                 self.members.entry(self.kind[w as usize]).or_default().push(w);
