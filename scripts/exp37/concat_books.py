@@ -1,12 +1,13 @@
 """Two books one after the other, scored on the second only: a reader trained on book A then reads book B.
-usage: concat_books.py A_PREFIX B_PREFIX OUT_PREFIX (the two must share a vocabulary)"""
+usage: concat_books.py A_PREFIX B_PREFIX OUT_PREFIX (B's vocabulary must be A's, or extend it)"""
 import sys, json, shutil
 import numpy as np
 a, b, out = sys.argv[1:4]
-assert open(a + ".txt").read() == open(b + ".txt").read(), "the books must share a vocabulary"
+va, vb = open(a + ".txt").read().split("\n"), open(b + ".txt").read().split("\n")
+assert vb[:len(va)] == va, "book B's vocabulary must extend book A's (A's ids unchanged)"
 ia, ib = np.fromfile(a + ".ids", dtype=np.uint32), np.fromfile(b + ".ids", dtype=np.uint32)
 np.concatenate([ia, ib]).tofile(out + ".ids")
-shutil.copy(a + ".txt", out + ".txt")
+shutil.copy(b + ".txt", out + ".txt")
 info = json.load(open(b + ".info.json"))
 off = len(ia)
 info["answers"] = [[p + off, k] for p, k in info["answers"]]

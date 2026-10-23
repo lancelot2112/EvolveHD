@@ -163,6 +163,11 @@ pub struct SitCfg {
     pub scope: bool,
     /// From this word on, route skill is frozen: no query learning (and no open-query credit). u64::MAX: never.
     pub freeze_from: u64,
+    /// Role features for anchors (with --sit-ranges): an opener type enters the route features as its level, not
+    /// its word: the bit length of the span of its starts minus the bit length of their count less one (about
+    /// log2 of its mean recurrence interval, without a division), so a new book's headings in new words reuse the
+    /// skill learned on old ones.
+    pub roles: bool,
     /// Speed: slot reads cached within a word (cleared on any write), kind member lists kept with the kinds, the
     /// background total kept as a running sum, and a cheaper multiplicative phase hash for values.
     pub fast: bool,
@@ -2046,18 +2051,19 @@ impl Situation {
                                 let mut f1 = self.route_feats(j, e, &[(c, k, rank as u32)]);
                                 f1.push(Self::fid(45, 1, 0)); // the source: a unit's range
                                 f1.push(Self::fid(46, which as u64, len as u64));
-                                f1.push(Self::fid(48, fw as u64, 0)); // the opener type that addressed it
+                                let (fwf, ofwf) = (self.opener_feat(fw), if which == 2 { self.opener_feat(ofw) } else { 0 });
+                                f1.push(Self::fid(48, fwf, 0)); // the opener type that addressed it
                                 if which == 2 {
-                                    f1.push(Self::fid(50, ofw as u64, olen as u64)); // nested inside this outer type
+                                    f1.push(Self::fid(50, ofwf, olen as u64)); // nested inside this outer type
                                 }
                                 f1.push(Self::fid(44, key as u64, 1));
                                 f1.push(Self::fid(49, rank as u64, k as u64));
                                 if self.cfg.scope {
                                     // which occurrence addressed it, conjoined with the opener type
-                                    f1.push(Self::fid(51, fw as u64, (which * 3 + orank) as u64));
+                                    f1.push(Self::fid(51, fwf, (which * 3 + orank) as u64));
                                     if which == 2 {
                                         // the outer type and its occurrence, with the inner type
-                                        f1.push(Self::fid(52, ((ofw as u64) << 20) ^ fw as u64, orank as u64));
+                                        f1.push(Self::fid(52, (ofwf << 20) ^ fwf, orank as u64));
                                     }
                                     // how many of the question's anchor units hold this event
                                     let n_in = anchors.iter().filter(|x| x.0 <= t && t < x.1).count();
@@ -2953,6 +2959,20 @@ impl Situation {
         for (fw, ps) in &ix.opener {
             self.opener_pos.entry(*fw).or_default().extend_from_slice(ps);
         }
+    }
+    /// An opener type as a route feature: its word, or with --sit-roles its level (see `roles`).
+    fn opener_feat(&self, fw: u32) -> u64 {
+        if !self.cfg.roles {
+            return fw as u64;
+        }
+        let bl = |x: u64| 64 - x.leading_zeros() as u64;
+        let lvl = self.opener_pos.get(&fw).map_or(0, |v| {
+            if v.len() < 2 {
+                return 0;
+            }
+            bl(v[v.len() - 1] - v[0]).saturating_sub(bl(v.len() as u64 - 1))
+        });
+        1 << 40 | lvl
     }
     /// The end of the unit that starts at `st` with a clause whose first word is `fw`: the next clause with that
     /// first word.

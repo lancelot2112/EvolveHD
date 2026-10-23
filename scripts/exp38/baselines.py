@@ -16,6 +16,7 @@ w = [V[i] for i in ids]
 info = json.load(open(doc + ".info.json"))
 names, places, objects = set(info["names"]), set(info["places"]), set(info["objects"])
 kind_set = {"found": objects, "home": places, "owner": names}
+H_CH, H_PT = info.get("headings", ["chapter", "part"])
 groups = [(8, 128, "8-127"), (128, 1024, "128-1k"), (1024, 8192, "1k-8k"), (8192, 65536, "8k-64k"), (65536, 524288, "64k-512k"), (524288, 1 << 62, "512k+")]
 qs = [(p, k, d) for (p, k), d in zip(info["answers"], info["dist"]) if k in kind_set and d > 0 and p >= n // 10]
 by = collections.defaultdict(list)
@@ -61,11 +62,11 @@ for i in range(n):
         kind, d = qpos[i]; qw = question_at(i)
         ent = qw[2] if kind != "owner" else qw[3]
         if kind == "found":
-            X = qw[2]; rest = " ".join(qw[qw.index("chapter") + 1:-1]).split(" of part ")
+            X = qw[2]; rest = " ".join(qw[qw.index(H_CH) + 1:-1]).split(f" of {H_PT} ")
             M, N = rest[0], (rest[1] if len(rest) > 1 else None)
             # oracle: the latest part N heading, then chapter M after it, then X's find in that chapter
-            pa = max([h[0] for h in heads if h[1] == "part" and h[2] == N], default=-1) if N else -1
-            cm = [h[0] for h in heads if h[1] == "chapter" and h[2] == M and h[0] > pa]
+            pa = max([h[0] for h in heads if h[1] == H_PT and h[2] == N], default=-1) if N else -1
+            cm = [h[0] for h in heads if h[1] == H_CH and h[2] == M and h[0] > pa]
             res["oracle"][i] = addr.get((X, N, M, cm[0] if cm else -1)) == w[i]
             res["newest"][i] = newest["found"].get(X) == w[i]
         else:
@@ -78,11 +79,11 @@ for i in range(n):
         qw = question_at(i); kind = allq[i]; ent = qw[2] if kind != "owner" else qw[3]
         prior[(kind, ent)][t] += 1; kprior[kind][t] += 1
     # the text as it stands before word i+1
-    if t in ("part", "chapter") and (i == 0 or w[i - 1] == "."):
+    if t in (H_PT, H_CH) and (i == 0 or w[i - 1] == "."):
         j = i + 1; lab = []
         while w[j] != ".": lab.append(w[j]); j += 1
         lab = " ".join(lab); heads.append((i, t, lab))
-        if t == "part": part = lab
+        if t == H_PT: part = lab
         else: ch = (lab, i)
     if t == "found" and w[i + 1] == "the" and ch:
         newest["found"][w[i - 1]] = w[i + 2]; addr[(w[i - 1], part, ch[0], ch[1])] = w[i + 2]
