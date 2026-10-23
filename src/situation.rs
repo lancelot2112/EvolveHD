@@ -178,6 +178,11 @@ pub struct SitCfg {
     /// frequent word) has its facts filed under the newest clause-initial word of that kind ("she went to the
     /// garden" after "ella picked up the ring": ella). Pronouns, learned from contexts, nothing named.
     pub anaphora: bool,
+    /// Epochs, the level above the top labels (with --sit-ranges): an opener type's epoch restarts where its first
+    /// clause text recurs ("part one ." again: a new book; "chapter one ." again: a new part). An anchor looks only
+    /// at its occurrences in the current epoch of its type when there are any, so "part three" means this book's
+    /// part three, the newest context first.
+    pub epoch: bool,
     /// Speed: slot reads cached within a word (cleared on any write), kind member lists kept with the kinds, the
     /// background total kept as a running sum, and a cheaper multiplicative phase hash for values.
     pub fast: bool,
@@ -613,6 +618,8 @@ pub struct Situation {
     bufp: Vec<u32>,                                 // the exact path of each buffered binding (aligned with buf)
     ctext: HashMap<u64, (Vec<u64>, u32)>,           // --sit-ranges: clause text -> (every start, ascending; first word)
     opener_pos: HashMap<u32, Vec<u64>>,             // first word -> start positions of its clauses (ascending)
+    first_text: HashMap<u32, u64>,                  // --sit-epoch: opener type -> the text of its first clause
+    epoch_at: HashMap<u32, u64>,                    // --sit-epoch: opener type -> where its current epoch began
     posts: HashMap<(u32, u32, u32), Vec<(u64, u32)>>, // head key -> its history (time, value), ascending
     rcache: std::cell::RefCell<HashMap<(u32, u32, u32), Vec<(u32, i128)>>>, // --sit-fast: slot reads this word
     members: HashMap<u32, Vec<u32>>,                // --sit-fast: kind -> its seen words
@@ -759,6 +766,8 @@ impl Situation {
             bufp: vec![],
             ctext: HashMap::default(),
             opener_pos: HashMap::default(),
+            first_text: HashMap::default(),
+            epoch_at: HashMap::default(),
             posts: HashMap::default(),
             rcache: std::cell::RefCell::new(HashMap::default()),
             members: HashMap::default(),
@@ -3008,12 +3017,22 @@ impl Situation {
     /// 0 first / 1 latest / 2 nested, span length, the outer span's first word or MAX, the outer span's length).
     fn anchors(&self, cue: &[u32]) -> Vec<(u64, u64, u32, u32, u32, u32, u32, u32)> {
         let text: Vec<u32> = cue.iter().rev().copied().collect();
-        let mut spans: Vec<(&Vec<u64>, u32, u32)> = vec![];
+        let mut spans: Vec<(&[u64], u32, u32)> = vec![];
         for len in 1..=4usize.min(text.len()) {
             for i in 0..=text.len() - len {
                 let h = Self::text_hash(&text[i..i + len]);
                 if let Some((occ, fw)) = self.ctext.get(&h) {
-                    spans.push((occ, *fw, len as u32));
+                    let mut o: &[u64] = occ;
+                    if self.cfg.epoch {
+                        // the occurrences in the current epoch of this type, if any
+                        if let Some(&e) = self.epoch_at.get(fw) {
+                            let at = occ.partition_point(|&x| x < e);
+                            if at < occ.len() {
+                                o = &occ[at..];
+                            }
+                        }
+                    }
+                    spans.push((o, *fw, len as u32));
                 }
             }
         }
@@ -3376,6 +3395,12 @@ impl Situation {
                         let h = Self::text_hash(&ws);
                         self.ctext.entry(h).or_insert((vec![], fw)).0.push(st);
                         self.opener_pos.entry(fw).or_default().push(st);
+                        if self.cfg.epoch {
+                            let f = *self.first_text.entry(fw).or_insert(h);
+                            if f == h {
+                                self.epoch_at.insert(fw, st); // the type's first text again: a new epoch
+                            }
+                        }
                     }
                 }
                 if self.cfg.anaphora {

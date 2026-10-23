@@ -56,6 +56,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         roles: flag(args, "--sit-roles"),
         skip: flag(args, "--sit-skip"),
         anaphora: flag(args, "--sit-anaphora"),
+        epoch: flag(args, "--sit-epoch"),
         freeze_from: arg(args, "--sit-freeze-from").map(|s| s.parse().unwrap()).unwrap_or(u64::MAX),
         fast: flag(args, "--sit-fast"),
         fast_mask: g("--sit-fast-mask", "23").parse().unwrap(),
