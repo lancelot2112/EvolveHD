@@ -183,6 +183,13 @@ pub struct SitCfg {
     /// at its occurrences in the current epoch of its type when there are any, so "part three" means this book's
     /// part three, the newest context first.
     pub epoch: bool,
+    /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
+    /// words' frame bits) gets `lsh_bands` MinHash bands of `lsh_rows` rows each (the least hash of its bits per
+    /// row), and two paths share a class when a band collides. A new path costs bands x rows hashes over its bits,
+    /// whatever the number of classes; a band that hits gives the class, the other bands are filed under it.
+    pub lsh: bool,
+    pub lsh_bands: usize,
+    pub lsh_rows: usize,
     /// Speed: slot reads cached within a word (cleared on any write), kind member lists kept with the kinds, the
     /// background total kept as a running sum, and a cheaper multiplicative phase hash for values.
     pub fast: bool,
@@ -585,7 +592,8 @@ pub struct Situation {
     path_count: HashMap<Vec<u32>, u64>, // dir-tagged path -> uses
     path_class: HashMap<Vec<u32>, u32>,
     protos: Vec<Proto>,
-    proto_by_bit: Vec<Vec<u32>>,                    // relation classes by the bits of their prototypes (an inverted index)
+    proto_by_bit: Vec<Vec<u32>>,
+    lsh_bucket: HashMap<u64, u32>,                  // --sit-lsh: band key -> relation class                    // relation classes by the bits of their prototypes (an inverted index)
     pscratch: Vec<u32>,                             // shared-bit counts per class, for one lookup
     class_count: Vec<u64>,
     senses: HashMap<u32, Vec<Sense>>,
@@ -739,6 +747,7 @@ impl Situation {
             path_class: HashMap::default(),
             protos: vec![],
             proto_by_bit: vec![vec![]; cfg.mdim],
+            lsh_bucket: HashMap::default(),
             pscratch: vec![],
             class_count: vec![],
             senses: HashMap::default(),
@@ -1025,6 +1034,36 @@ impl Situation {
         let dir = path[0] as u8;
         let bare = if self.cfg.sense { 2 } else { 1 };
         let code = if path.len() <= bare { vec![] } else { self.path_code(path) };
+        if self.cfg.lsh {
+            // the band keys: an empty code (adjacency) is its own key per direction
+            let keys: Vec<u64> = if code.is_empty() || self.pool_pm == 0 {
+                vec![hash(0xB0A7, path.iter().fold(0x51, |h, &x| hash(h, x as u64)))]
+            } else {
+                (0..self.cfg.lsh_bands)
+                    .map(|b| {
+                        (0..self.cfg.lsh_rows).fold(hash(dir as u64 + 0x15A, b as u64), |h, r| {
+                            let seed = hash(b as u64 * 977 + r as u64, 0x3E1);
+                            let m = code.iter().map(|&x| hash(x as u64, seed)).min().unwrap_or(0);
+                            hash(h, m)
+                        })
+                    })
+                    .collect()
+            };
+            let c = match keys.iter().find_map(|k| self.lsh_bucket.get(k).copied()) {
+                Some(c) => c,
+                None => {
+                    self.protos.push(Proto { counts: vec![], bits: vec![], dir, n: 0 });
+                    self.class_count.push(0);
+                    self.protos.len() as u32 - 1
+                }
+            };
+            for k in keys {
+                self.lsh_bucket.entry(k).or_insert(c);
+            }
+            self.protos[c as usize].n += 1;
+            self.path_class.insert(path.to_vec(), c);
+            return c;
+        }
         // the best overlap (shared bits over the larger size), as a fraction (shared, size), compared by
         // cross-multiplication: no floats, no division
         let mut best = (0u64, 1u64, usize::MAX);
@@ -1113,6 +1152,7 @@ impl Situation {
             }
         }
         self.protos.clear();
+        self.lsh_bucket.clear();
         for l in self.proto_by_bit.iter_mut() {
             l.clear();
         }
