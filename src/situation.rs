@@ -193,6 +193,9 @@ pub struct SitCfg {
     /// indexed by bit sampling (8 bands of 8 positions, 16-bit keys); a read takes the phase of each position
     /// from the unbound slot, looks up the bands it estimates fully, and scores only the values found there.
     pub vlsh: bool,
+    /// Long-term heads keyed by (entity, exact path) only, not also by the value's kind at write time: when
+    /// kinds are renumbered, a path's old and new heads would otherwise both stay and crowd the per-kind cap.
+    pub heads_nokind: bool,
     pub vlsh_band: usize, // positions per band (default 4)
     pub vlsh_hits: usize, // bands a value must match to be a candidate (default 1)
     pub lsh_bands: usize,
@@ -3726,17 +3729,18 @@ impl Situation {
             let content_val = !self.fm(5) || kd == self.kn || self.ksize.get(&kd).copied().unwrap_or(0) >= 3;
             if self.cfg.heads && c < COMP && content_val {
                 let key = if self.cfg.heads_path { bufp.get(bi).copied().unwrap_or(c) | 0x8000_0000 } else { c };
+                let hk = if self.cfg.heads_nokind { self.kn } else { kd };
                 let now = self.t;
-                if let Some(ent) = self.heads_tab.get_mut(&(x, key, kd)) {
+                if let Some(ent) = self.heads_tab.get_mut(&(x, key, hk)) {
                     (ent.0, ent.1, ent.2) = (v, now, c);
-                    self.heads_of.get_mut(&x).unwrap()[ent.3 as usize] = (key, kd, v, now, c);
+                    self.heads_of.get_mut(&x).unwrap()[ent.3 as usize] = (key, hk, v, now, c);
                 } else {
                     let l = self.heads_of.entry(x).or_default();
-                    self.heads_tab.insert((x, key, kd), (v, now, c, l.len() as u32));
-                    l.push((key, kd, v, now, c));
+                    self.heads_tab.insert((x, key, hk), (v, now, c, l.len() as u32));
+                    l.push((key, hk, v, now, c));
                 }
                 if self.cfg.ranges {
-                    self.posts.entry((x, key, kd)).or_default().push((self.t, v));
+                    self.posts.entry((x, key, hk)).or_default().push((self.t, v));
                 }
             }
             if self.cfg.sq_max > 0 {
