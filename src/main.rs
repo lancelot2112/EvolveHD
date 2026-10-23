@@ -62,6 +62,8 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         heads_nokind: flag(args, "--sit-heads-nokind"),
         slotlog: arg(args, "--sit-slotlog").map(|s| s.parse().unwrap()).unwrap_or(0),
         recent: arg(args, "--sit-recent").map(|s| s.parse().unwrap()).unwrap_or(0),
+        bnd_hyst: flag(args, "--sit-bnd-hyst"),
+        lt_min: arg(args, "--sit-lt-min").map(|s| s.parse().unwrap()).unwrap_or(0),
         vlsh_band: arg(args, "--sit-vlsh-band").map(|s| s.parse().unwrap()).unwrap_or(4),
         vlsh_hits: arg(args, "--sit-vlsh-hits").map(|s| s.parse().unwrap()).unwrap_or(1),
         lsh_bands: arg(args, "--sit-lsh-bands").map(|s| s.parse().unwrap()).unwrap_or(8),

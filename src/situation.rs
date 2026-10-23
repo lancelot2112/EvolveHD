@@ -202,6 +202,15 @@ pub struct SitCfg {
     /// An entity's newest slots from a recency list kept as slots are written (its last `recent` (class, kind)
     /// slots, move to front), not by gathering and sorting all of its slots at every read (0 = gather all).
     pub recent: usize,
+    /// Boundaries learned slowly: a word becomes a boundary at half the maximum openness, as before, but stays
+    /// one until its openness falls below an eighth of it, so new text with more open words (",", "and" in
+    /// prose) adds boundaries without erasing ". ?" learned earlier.
+    pub bnd_hyst: bool,
+    /// Long-term tier for recurring relations only: a binding enters the heads and their histories only once its
+    /// exact path has been seen at least this many times, counted in a fixed count-min sketch (4 rows of 2^16
+    /// 16-bit counters, 512 KB, the minimum of the four). Paths seen once or twice (almost every path in prose)
+    /// stay in working memory and fade. 0 = store every binding.
+    pub lt_min: u32,
     pub vlsh_band: usize, // positions per band (default 4)
     pub vlsh_hits: usize, // bands a value must match to be a candidate (default 1)
     pub lsh_bands: usize,
@@ -613,7 +622,8 @@ pub struct Situation {
     vband: HashMap<u64, Vec<u32>>,                  // --sit-vlsh: band key -> the values whose code has it
     vcodes: Vec<u128>,
     slot_log: HashMap<(u32, u32, u32), Vec<u32>>,   // --sit-slotlog: slot -> its last values written, newest last
-    recent_slots: HashMap<u32, Vec<(u32, u32)>>,    // --sit-recent: entity -> its last slots written, newest last                              // --sit-vlsh: each value's code, 2 bits per key position                    // relation classes by the bits of their prototypes (an inverted index)
+    recent_slots: HashMap<u32, Vec<(u32, u32)>>,    // --sit-recent: entity -> its last slots written, newest last
+    path_sketch: Vec<u16>,                          // --sit-lt-min: count-min sketch of exact paths (4 x 2^16)                              // --sit-vlsh: each value's code, 2 bits per key position                    // relation classes by the bits of their prototypes (an inverted index)
     pscratch: Vec<u32>,                             // shared-bit counts per class, for one lookup
     class_count: Vec<u64>,
     senses: HashMap<u32, Vec<Sense>>,
@@ -772,6 +782,7 @@ impl Situation {
             vcodes: vec![],
             slot_log: HashMap::default(),
             recent_slots: HashMap::default(),
+            path_sketch: if cfg.lt_min > 0 { vec![0; 4 << 16] } else { vec![] },
             pscratch: vec![],
             class_count: vec![],
             senses: HashMap::default(),
@@ -1382,7 +1393,7 @@ impl Situation {
             return; // too early to tell
         }
         for (w, m) in open {
-            let nb = 2 * m >= mx;
+            let nb = if self.cfg.bnd_hyst && self.boundary[w as usize] { 8 * m >= mx } else { 2 * m >= mx };
             if nb != self.boundary[w as usize] && std::env::var("SIT_DEBUG_BND").is_ok() {
                 eprintln!("BND2 {} word {} -> {} (open {} of max {})", self.t, w, nb, m, mx);
             }
@@ -3787,7 +3798,21 @@ impl Situation {
             // fast: long-term heads only for content values (a value kind of 3 or more members); heads to "." or "the"
             // multiply with every distinct clause tail and only grow the lists every lookup walks
             let content_val = !self.fm(5) || kd == self.kn || self.ksize.get(&kd).copied().unwrap_or(0) >= 3;
-            if self.cfg.heads && c < COMP && content_val {
+            let mut recurring = true;
+            if self.cfg.lt_min > 0 && self.cfg.heads && c < COMP && content_val && self.ksize.get(&self.kk(x)).copied().unwrap_or(0) < 3 {
+                recurring = false; // long-term facts are about content words (a kind of 3 or more)
+            } else if self.cfg.lt_min > 0 && self.cfg.heads && c < COMP && content_val {
+                // count the path in the sketch; a relation is long-term once it recurs
+                let pk = bufp.get(bi).copied().unwrap_or(c) as u64;
+                let mut m = u16::MAX;
+                for r in 0..4u64 {
+                    let i = (r << 16 | hash(pk, r + 0x5C) & 0xFFFF) as usize;
+                    self.path_sketch[i] = self.path_sketch[i].saturating_add(1);
+                    m = m.min(self.path_sketch[i]);
+                }
+                recurring = m as u32 >= self.cfg.lt_min;
+            }
+            if self.cfg.heads && c < COMP && content_val && recurring {
                 let key = if self.cfg.heads_path { bufp.get(bi).copied().unwrap_or(c) | 0x8000_0000 } else { c };
                 let hk = if self.cfg.heads_nokind { self.kn } else { kd };
                 let now = self.t;
