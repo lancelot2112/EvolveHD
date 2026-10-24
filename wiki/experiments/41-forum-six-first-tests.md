@@ -1,4 +1,4 @@
-# 41 · Forum round six, first tests: a halving sketch, split boundary roles, boundaries judged by use, a per-entity cap (2026-10-24)
+# 41 · Forum round six, first tests: a halving sketch, split boundary roles, boundaries judged by use, a per-entity cap, a contrast detector (2026-10-24)
 
 *[All experiments](README.md)* · [← 40](40-standard-set-and-qa2.md)
 
@@ -215,8 +215,56 @@ Rerun with the cue on L:
 - **No judge passes yet.** Judges that count hits favour crossing even where it costs accuracy: the story set's where-object falls to 28% when "." is crossed.
 - **What crossing costs is not visible in the routes that hit.** It is the wrong answers that crossing bindings cause elsewhere, and the clause structure they break.
 
+## Third round: the contrast detector, and the fan-out credited only at answers
+
+The owner asked whether the learned fan-out keeps improving with training. It does not. The fair test credits it only at answers, which needs a question detector, so this round builds E3 first. Binaries `sit-41l` to `sit-41n`; script `runs/exp41/e3b.sh`. The first version, `e3.sh` (`sit-41l`), was stopped. As with the second round, the qa2 runs ban "the" by hand and use chains, the budget and the halving sketch; the story set and the pilot do not.
+
+### The contrast detector (`--sit-q-contrast`)
+
+For every word type u, it counts the predictions after u that the bigram did not already make, and how often the store's top proposal was right among them. It compares that rate with the same rate over every word.
+- Q(u) holds when u has at least 16 such predictions and its rate is at least twice the overall rate.
+- No boundary is required.
+- It keeps counting after the freeze. The overall rate stops at the freeze.
+
+**The first version (`sit-41l`) also committed and dropped clauses at Q words.** It learned Q = "milk went apple football", dropped 9,724 fact clauses, and scored 26% on small qa2. It was stopped. In the second version (`sit-41m`), a clause is dropped only at a learned boundary that is also a Q word.
+
+| Test | Before | Contrast detector | Question words learned |
+|---|---|---|---|
+| Small qa2 | 97% (old detector: none learned) | **99%** | milk went apple ? football |
+| Full qa2 + per-entity cap, 0k / 4k | 97 / 90% | 96 / 83% | milk went apple ? football |
+| Story set | 98.5% | 97.3% | ? apple football milk book key pen hat cup |
+| BABILong pilot, 0k / 4k | 100 / 100% | 88 / 96% | sandra went daniel mary ? john object |
+
+**What this means:**
+- **"?" becomes a question word everywhere,** including qa2, where it is not a learned boundary.
+- **Content words qualify too,** because memory predicts the word after a person or an object well.
+- On small qa2 that helps, through credit at answers. Elsewhere it costs 1–12 points:
+  - in answer-only reading, the pilot makes 2,145 predictions instead of 547;
+  - the extra Q words take the routes the real questions use.
+- **The twice-overall bar is a constant, and it lets in too much.**
+
+### The fan-out, credited only at answers (`--sit-chain-learn-q`)
+
+Accuracy per block of 100 training questions, then the test:
+
+| Run | Blocks 1–10 | Test |
+|---|---|---|
+| Small qa2, full walk + detector | 48 84 93 94 96 99 100 99 98 98 | 99% |
+| Small qa2, fan-out credited at answers | 53 87 86 81 77 82 78 76 67 76 | 72% |
+| Small qa2, the same following all 4 of a row's entries (`SIT_CL_TOP=4`, run by hand) | 53 87 86 81 80 85 77 82 74 76 | 90% |
+| Full qa2, full walk + detector + cap | 61 89 96 97 95 97 100 99 99 99 | 96 / 83% |
+| Full qa2, fan-out credited at answers | 62 90 87 84 82 77 81 75 67 75 | 76 / 60% |
+
+**The decline is the same whatever the credit:**
+- The fan-out matches or beats the full walk for the first one or two blocks, during its warm-up.
+- After that it falls. Crediting only at answers does not change the shape, and neither does following all 4 of a row's entries.
+- A row holds 4 classes. When more classes answer than a row can hold, the Misra-Gries wear-down churns the row.
+- The saving is small at best: 349 candidates per word against 436 on small qa2, and 341 against 723 on full qa2, for 20–24 points of accuracy.
+
+**The derived per-entity cap is the better tool for chain cost.**
+
 ## Next
 
 1. **Adopt the per-entity cap.** Choose a clock for recurrence that suits sparse facts, for example one that counts sentences or the entity's own sightings rather than all sketch increments, so qa2's 4k gain and qa1's 64k survive together. Rerun across three seeds.
-2. **The boundary judge needs the cost of crossing,** not only its hits: wrong top answers that a crossing binding caused, counted per binding written. Until then "the" is banned by hand in the chain runs.
-3. **The detector (E3) is untested.**
+2. **The detector needs a sharper contrast,** one that keeps "?" and leaves out content words. For example, require the rate after u to beat the rate after u's own kind, not after every word.
+3. **The boundary judge needs the cost of crossing,** not only its hits: wrong top answers that a crossing binding caused, counted per binding written. Until then "the" is banned by hand in the chain runs.
