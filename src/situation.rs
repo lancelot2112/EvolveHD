@@ -202,9 +202,9 @@ pub struct SitCfg {
     /// An entity's newest slots from a recency list kept as slots are written (its last `recent` (class, kind)
     /// slots, move to front), not by gathering and sorting all of its slots at every read (0 = gather all).
     pub recent: usize,
-    /// Boundaries learned slowly: a word becomes a boundary at half the maximum openness, as before, but stays
-    /// one until its openness falls below an eighth of it, so new text with more open words (",", "and" in
-    /// prose) adds boundaries without erasing ". ?" learned earlier.
+    /// Boundaries learned slowly: a word becomes a boundary at half the maximum openness, as before, and then
+    /// stays one while its own openness holds (at least a quarter of its own peak), whatever more open words new
+    /// text brings (",", "and" in prose): new boundaries are added, learned ones (". ?") are not erased.
     pub bnd_hyst: bool,
     /// Long-term tier for recurring relations only: a binding enters the heads and their histories only once its
     /// exact path has been seen at least this many times, counted in a fixed count-min sketch (4 rows of 2^16
@@ -627,7 +627,8 @@ pub struct Situation {
     vcodes: Vec<u128>,
     slot_log: HashMap<(u32, u32, u32), Vec<u32>>,   // --sit-slotlog: slot -> its last values written, newest last
     recent_slots: HashMap<u32, Vec<(u32, u32)>>,    // --sit-recent: entity -> its last slots written, newest last
-    path_sketch: Vec<u16>,                          // --sit-lt-min: count-min sketch of exact paths (4 x 2^16)                              // --sit-vlsh: each value's code, 2 bits per key position                    // relation classes by the bits of their prototypes (an inverted index)
+    path_sketch: Vec<u16>,
+    bnd_peak: HashMap<u32, u32>,                    // --sit-bnd-hyst: a boundary's peak openness                          // --sit-lt-min: count-min sketch of exact paths (4 x 2^16)                              // --sit-vlsh: each value's code, 2 bits per key position                    // relation classes by the bits of their prototypes (an inverted index)
     pscratch: Vec<u32>,                             // shared-bit counts per class, for one lookup
     class_count: Vec<u64>,
     senses: HashMap<u32, Vec<Sense>>,
@@ -790,6 +791,7 @@ impl Situation {
             slot_log: HashMap::default(),
             recent_slots: HashMap::default(),
             path_sketch: if cfg.lt_min > 0 { vec![0; 4 << 16] } else { vec![] },
+            bnd_peak: HashMap::default(),
             pscratch: vec![],
             class_count: vec![],
             senses: HashMap::default(),
@@ -1403,7 +1405,13 @@ impl Situation {
             return; // too early to tell
         }
         for (w, m) in open {
-            let nb = if self.cfg.bnd_hyst && self.boundary[w as usize] { 8 * m >= mx } else { 2 * m >= mx };
+            let nb = if self.cfg.bnd_hyst && self.boundary[w as usize] {
+                let pk = self.bnd_peak.entry(w).or_insert(m);
+                *pk = (*pk).max(m);
+                4 * m >= *pk
+            } else {
+                2 * m >= mx
+            };
             if nb != self.boundary[w as usize] && std::env::var("SIT_DEBUG_BND").is_ok() {
                 eprintln!("BND2 {} word {} -> {} (open {} of max {})", self.t, w, nb, m, mx);
             }
