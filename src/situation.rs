@@ -3814,7 +3814,10 @@ impl Situation {
                 let mut ls: Vec<usize> = self.heads_of.values().map(|v| v.len()).collect();
                 ls.sort_unstable();
                 let pick = |q: usize| ls.get(ls.len() * q >> 4).copied().unwrap_or(0);
-                eprintln!("HEADS_PER_ENTITY t {} entities {} p50 {} p90 {} max {}", self.t, ls.len(), pick(8), pick(14), ls.last().copied().unwrap_or(0));
+                let mut top: Vec<(usize, u32)> = self.heads_of.iter().map(|(&e, v)| (v.len(), e)).collect();
+                top.sort_unstable_by(|a, b| b.cmp(a));
+                top.truncate(5);
+                eprintln!("HEADS_PER_ENTITY t {} entities {} p50 {} p90 {} max {} top(len,id) {:?}", self.t, ls.len(), pick(8), pick(14), ls.last().copied().unwrap_or(0), top);
                 *l = (std::time::Instant::now(), st);
             });
         }
