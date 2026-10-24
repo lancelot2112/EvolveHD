@@ -237,6 +237,11 @@ pub struct SitCfg {
     /// A boundary must also be a word across which the kind before does not predict the kind after (see
     /// `independent`): "." and "?" end clauses; "the" (whose verb tells place from object) does not.
     pub bnd_indep: bool,
+    /// Split the boundary set's jobs (forum round six, E0): L stays as learned for commits, drift and the question
+    /// detector, but the binding walk and the cue walk stop only at words of L that are also independent (see
+    /// `independent`); the question drop uses the same predicate as `is_q` (the floor included); and the floor's
+    /// samples keep updating the mood counter after the freeze and in answer-only reading.
+    pub bind_indep: bool,
     /// Long-term tier for recurring relations only: a binding enters the heads and their histories only once its
     /// exact path has been seen at least this many times, counted in a fixed count-min sketch (4 rows of 2^16
     /// 16-bit counters, 512 KB, the minimum of the four). Paths seen once or twice (almost every path in prose)
@@ -247,6 +252,9 @@ pub struct SitCfg {
     /// next word after a learned question boundary). Relations that never help answer stop being stored. 0 = off.
     pub lt_credit: u32,
     pub lt_budget: usize,
+    /// The path sketch forgets: every 2^16 increments all its counters halve, so the load per cell stays near 2 and
+    /// a one-off path cannot pass the recurrence gate just because the sketch has filled (forum round six, E1).
+    pub sketch_decay: bool,
     /// (lt_budget) One rule for keeping long-term heads, in place of --sit-lt-min and --sit-lt-credit: every content binding
     /// enters, the store holds at most this many heads, and when full it evicts by a clock hand. Each head carries a
     /// small tag: 1 when written, one more each time it is rewritten; a pass of the hand halves it (takes one off for
@@ -667,6 +675,7 @@ pub struct Situation {
     seg_hits: HashMap<u32, [u64; 3]>,
     seg_n: HashMap<u32, u64>,
     boundary: Vec<bool>,
+    bind_ok: Vec<bool>,                             // --sit-bind-indep: the word is independent (may stop a binding)
     // paths and classes
     mn: Meaning,
     path_count: HashMap<Vec<u32>, u64>, // dir-tagged path -> uses
@@ -678,7 +687,8 @@ pub struct Situation {
     vcodes: Vec<u128>,                              // --sit-vlsh: each value's code, 2 bits per key position
     slot_log: HashMap<(u32, u32, u32), Vec<u32>>,   // --sit-slotlog: slot -> its last values written, newest last
     recent_slots: HashMap<u32, Vec<(u32, u32)>>,    // --sit-recent: entity -> its last slots written, newest last
-    path_sketch: Vec<u16>,                          // --sit-lt-min: count-min sketch of exact paths (4 x 2^16)
+    path_sketch: Vec<u16>,
+    sketch_incs: u32,                               // --sit-sketch-decay: increments since the last halving                          // --sit-lt-min: count-min sketch of exact paths (4 x 2^16)
     bnd_peak: HashMap<u32, u32>,                    // --sit-bnd-hyst: a boundary's peak openness
     path_seen: Vec<u16>,                            // --sit-path-min: count-min sketch of whole paths
     rare_class: [u32; 2],                           // --sit-path-min: the shared class of rare paths, per direction
@@ -841,6 +851,7 @@ impl Situation {
             seg_hits: HashMap::default(),
             seg_n: HashMap::default(),
             boundary: vec![false; nw],
+            bind_ok: vec![true; nw],
             mn,
             path_count: HashMap::default(),
             path_class: HashMap::default(),
@@ -851,6 +862,7 @@ impl Situation {
             vcodes: vec![],
             slot_log: HashMap::default(),
             recent_slots: HashMap::default(),
+            sketch_incs: 0,
             path_sketch: if cfg.lt_min > 0 || cfg.lt_budget > 0 { vec![0; 4 << 16] } else { vec![] },
             bnd_peak: HashMap::default(),
             path_seen: if cfg.path_min > 0 { vec![0; 4 << 16] } else { vec![] },
@@ -992,6 +1004,10 @@ impl Situation {
     }
     pub fn boundaries(&self) -> Vec<u32> {
         (0..self.nw as u32).filter(|&w| self.boundary[w as usize]).collect()
+    }
+    /// The words that may stop a binding walk (with --sit-bind-indep, the independent learned boundaries).
+    pub fn bind_stops(&self) -> Vec<u32> {
+        (0..self.nw as u32).filter(|&w| self.bstop(w)).collect()
     }
     pub fn n_classes(&self) -> usize {
         self.protos.len()
@@ -1549,6 +1565,15 @@ impl Situation {
         if mx < 4 {
             return; // too early to tell
         }
+        if self.cfg.bind_indep {
+            let ws: Vec<u32> = open.iter().map(|x| x.0).collect();
+            for w in ws {
+                let ok = self.independent(w);
+                if let Some(b) = self.bind_ok.get_mut(w as usize) {
+                    *b = ok;
+                }
+            }
+        }
         for (w, m) in open {
             let nb = if self.cfg.bnd_hyst && self.boundary[w as usize] {
                 let pk = self.bnd_peak.entry(w).or_insert(m);
@@ -1873,6 +1898,26 @@ impl Situation {
         for b in 0..self.cfg.k / w {
             self.vband.entry(Self::vband_key(b, &code[b * w..b * w + w])).or_default().push(v);
         }
+    }
+    /// Count one sighting of path `pk` in the count-min sketch and return its estimate (the minimum of 4 rows).
+    /// With --sit-sketch-decay, every 2^16 increments every counter halves (shifts only).
+    fn sketch_bump(&mut self, pk: u64) -> u16 {
+        let mut m = u16::MAX;
+        for r in 0..4u64 {
+            let i = (r << 16 | hash(pk, r + 0x5C) & 0xFFFF) as usize;
+            self.path_sketch[i] = self.path_sketch[i].saturating_add(1);
+            m = m.min(self.path_sketch[i]);
+        }
+        if self.cfg.sketch_decay {
+            self.sketch_incs += 1;
+            if self.sketch_incs >> 16 != 0 {
+                self.sketch_incs = 0;
+                for x in self.path_sketch.iter_mut() {
+                    *x >>= 1;
+                }
+            }
+        }
+        m
     }
     fn write(&mut self, e: u32, c: u32, kd: u32, v: u32) {
         let (idx, ph) = self.key(e, c, kd);
@@ -3508,6 +3553,10 @@ impl Situation {
     pub fn at_question(&self) -> bool {
         self.hist.last().map_or(false, |&u| self.is_q(u))
     }
+    /// May w stop a binding walk? A learned boundary; with --sit-bind-indep, only an independent one.
+    fn bstop(&self, w: u32) -> bool {
+        self.boundary[w as usize] && (!self.cfg.bind_indep || self.bind_ok.get(w as usize).copied().unwrap_or(true))
+    }
     /// Whether boundary u is treated as closing a question now: its mood counter at 8 or more, or with
     /// --sit-mood-floor one time in 16 for any boundary below that, so a detector that fell below threshold keeps
     /// receiving evidence and can climb back (a counter that stops being tested cannot recover).
@@ -3735,7 +3784,7 @@ impl Situation {
         let mut out = vec![];
         for j in 0..n.min(12) {
             let u = self.hist[n - 1 - j];
-            if j > 0 && j >= base && self.boundary[u as usize] {
+            if j > 0 && j >= base && self.bstop(u) {
                 break;
             }
             out.push(u);
@@ -3761,6 +3810,11 @@ impl Situation {
                     self.heads_tab.len(), self.posts.values().map(|v| v.len()).sum::<usize>(), self.ctext.len(), self.sq.len(),
                     self.occ.len(), self.stamp.len(), self.class_count.len()
                 );
+                // heads per entity (the forum's cap question): entities, median, 90th percentile, max list length
+                let mut ls: Vec<usize> = self.heads_of.values().map(|v| v.len()).collect();
+                ls.sort_unstable();
+                let pick = |q: usize| ls.get(ls.len() * q >> 4).copied().unwrap_or(0);
+                eprintln!("HEADS_PER_ENTITY t {} entities {} p50 {} p90 {} max {}", self.t, ls.len(), pick(8), pick(14), ls.last().copied().unwrap_or(0));
                 *l = (std::time::Instant::now(), st);
             });
         }
@@ -3780,7 +3834,8 @@ impl Situation {
         // (not when reading without predicting: there was no proposal)
         // (nor once skill is frozen: the question detector is part of the skill, so a run of wrong answers in a hard
         // test cannot switch answering off)
-        if let Some(&u) = self.hist.last().filter(|_| !self.idx_only && self.t < self.cfg.freeze_from) {
+        let floor_hit = |u: u32| self.cfg.bind_indep && self.cfg.mood_floor && hash(self.t, u as u64 + 999) & 15 == 0;
+        if let Some(&u) = self.hist.last().filter(|&&u| !self.idx_only && self.t < self.cfg.freeze_from || floor_hit(u)) {
             if self.boundary[u as usize] {
                 let ok = self.last.first().map(|x| x.1) == Some(w);
                 let trivial = self.cfg.mood2 && self.succ_top.get(&u).map_or(false, |t| t.0 == w);
@@ -3804,7 +3859,7 @@ impl Situation {
             }
         }
         // --sit-bnd-indep: for the word before this one, count (kind of the word before it, kind of this word)
-        if self.cfg.bnd_indep && self.hist.len() >= 2 {
+        if (self.cfg.bnd_indep || self.cfg.bind_indep) && self.hist.len() >= 2 {
             let (p, u) = (self.hist[self.hist.len() - 2], self.hist[self.hist.len() - 1]);
             let (kp, kn) = (self.kk(p), self.kk(w));
             *self.indep.entry(u).or_default().entry((kp, kn)).or_insert(0) += 1;
@@ -4041,12 +4096,13 @@ impl Situation {
                 }
             }
             path.push(s);
-            if self.boundary[s as usize] {
+            if self.bstop(s) {
                 break;
             }
         }
         if self.boundary[w as usize] || self.buf.len() > 64 {
-            if self.cfg.mood && self.boundary[w as usize] && self.mood[w as usize] >= 8 {
+            let qdrop = if self.cfg.bind_indep { self.is_q(w) } else { self.boundary[w as usize] && self.mood[w as usize] >= 8 };
+            if self.cfg.mood && qdrop {
                 self.buf.clear(); // a question: a cue, not a fact
                 self.bufp.clear();
                 self.dropped += 1;
@@ -4272,12 +4328,7 @@ impl Situation {
                 recurring = !(self.cfg.heads && c < COMP && content_val && self.ksize.get(&self.kk(x)).copied().unwrap_or(0) < 3);
                 if recurring && self.cfg.heads && c < COMP && content_val {
                     let pk = bufp.get(bi).copied().unwrap_or(c) as u64;
-                    let mut m = u16::MAX;
-                    for r in 0..4u64 {
-                        let i = (r << 16 | hash(pk, r + 0x5C) & 0xFFFF) as usize;
-                        self.path_sketch[i] = self.path_sketch[i].saturating_add(1);
-                        m = m.min(self.path_sketch[i]);
-                    }
+                    let m = self.sketch_bump(pk);
                     first_tag = (16 - m.leading_zeros()).min(15) as u8;
                     if self.cfg.lt_min > 0 && (m as u32) < self.cfg.lt_min {
                         recurring = false; // with --sit-lt-min too, a path enters once it recurs (the budget replaces lt-credit)
@@ -4288,12 +4339,7 @@ impl Situation {
             } else if self.cfg.lt_min > 0 && self.cfg.heads && c < COMP && content_val {
                 // count the path in the sketch; a relation is long-term once it recurs
                 let pk = bufp.get(bi).copied().unwrap_or(c) as u64;
-                let mut m = u16::MAX;
-                for r in 0..4u64 {
-                    let i = (r << 16 | hash(pk, r + 0x5C) & 0xFFFF) as usize;
-                    self.path_sketch[i] = self.path_sketch[i].saturating_add(1);
-                    m = m.min(self.path_sketch[i]);
-                }
+                let m = self.sketch_bump(pk);
                 recurring = m as u32 >= self.cfg.lt_min;
             }
             if recurring && self.cfg.lt_budget == 0 && self.cfg.lt_credit > 0 && self.cfg.heads && c < COMP && content_val {

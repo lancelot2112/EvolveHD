@@ -73,9 +73,11 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         recent: arg(args, "--sit-recent").map(|s| s.parse().unwrap()).unwrap_or(0),
         bnd_hyst: flag(args, "--sit-bnd-hyst"),
         bnd_indep: flag(args, "--sit-bnd-indep"),
+        bind_indep: flag(args, "--sit-bind-indep"),
         lt_min: arg(args, "--sit-lt-min").map(|s| s.parse().unwrap()).unwrap_or(0),
         lt_credit: arg(args, "--sit-lt-credit").map(|s| s.parse().unwrap()).unwrap_or(0),
         lt_budget: arg(args, "--sit-lt-budget").map(|s| s.parse().unwrap()).unwrap_or(0),
+        sketch_decay: flag(args, "--sit-sketch-decay"),
         wm_horizon: arg(args, "--sit-wm-horizon").map(|s| s.parse().unwrap()).unwrap_or(0),
         path_min: arg(args, "--sit-path-min").map(|s| s.parse().unwrap()).unwrap_or(0),
         path_forget: arg(args, "--sit-path-forget").map(|s| s.parse().unwrap()).unwrap_or(0),
@@ -944,6 +946,7 @@ fn main() {
                 let voc: Vec<String> = arg(&args, "--vocab").map(|p| std::fs::read_to_string(p).unwrap().lines().map(String::from).collect()).unwrap_or_default();
                 let name = |w: u32| voc.get(w as usize).cloned().unwrap_or(w.to_string());
                 eprintln!("learned boundaries: {} | paths {} | relation classes {}", x.boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.n_paths(), x.n_classes());
+                eprintln!("binding stops: {}", x.bind_stops().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "));
                 eprintln!("question boundaries: {} | clauses committed {}, dropped {}", x.question_boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.committed, x.dropped);
                 if x.cfg.anaphora {
                     eprintln!("stand-in first words resolved: {}", x.anaphora_resolved);
