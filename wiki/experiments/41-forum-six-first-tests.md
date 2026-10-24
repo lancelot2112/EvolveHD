@@ -9,19 +9,19 @@ Forum round six reviewed the equations against the code. It proposed an ordered 
   - On the full qa2 stream with chains, long-term heads at word 520k fall from 147,847 to 25,698, and the run takes 1,449 s instead of 5,724 s. Accuracy is unchanged.
   - Candidates per word still grow, to 3,124 by the end (16,945 before). A few hub entities collect hundreds of heads each (the largest list reaches 970). Which words they are was not logged in this run.
   - It costs nothing on the story set or the BABILong pilot.
-- **E0, splitting the boundary set's jobs, is falsified.** Small qa2 rises from 33% to 74% without the hand ban. But the story set falls to 53.5% and the pilot to 2 / 4%, because the veto also removes "?" and "." as binding stops.
+- **E0, splitting the boundary set's jobs, is falsified.** Small qa2 rises from 33% to 74% without the hand ban. But the story set falls to 53.5% and the pilot to 2 / 4%: the veto also removes "?" and "." as binding stops. Part of that collapse was a fault in this experiment's code, found in the second round: the cue walk was tied to the binding stops. With it fixed, E0 reaches 78.7% and 79 / 96%, still under the bars.
 - **E2, boundaries judged by use, fails with both judges tried.**
   - The forum's rule is biased toward cutting: "the" scored span 1, cut 543.
   - A symmetric rank judge is biased toward crossing: it drops every stop on small qa2 (13%).
   - The 1-in-8 exploration crossings themselves cost accuracy, because they are written into long-term memory.
 
-- **Second round** (with "the" banned by hand so the chains have facts):
-  - The hubs are function words ("of", "and", "the", "in", "that"), growing to about 1,000 heads; the people stop near 85.
+- **Second round** (the qa2 runs ban "the" by hand so the chains have facts; the long BABILong runs do not):
+  - On full qa2 the hubs are function words ("of", "and", "the", "in", "that"), growing to about 1,000 heads; the people stop near 90.
   - A learned hop-2 fan-out saves time but loses 15–27 points.
   - **A derived per-entity cap (a fair share of the budget) works:**
     - full qa2 4k goes from 45% to 90%, with candidates down 2.7× and the run at 946 s instead of 1,700 s;
     - long BABILong 64k goes from 62.5% to 8 of 8.
-  - The halving sketch kills 64k (0 of 8), because sparse facts never recur within its window.
+  - The halving sketch kills 64k (0 of 8), probably because sparse facts do not recur within its window.
   - A normalized use judge also fails, after a cue-walk fault in this experiment's code was fixed.
 
 ## Stacks
@@ -120,18 +120,18 @@ L proposes. On a hash coin (one occurrence in 8), the walk does the opposite of 
 
 The owner asked for the next steps. Binaries `sit-41g` to `sit-41k`; scripts `runs/exp41/e4.sh`, `e5.sh`, `e5c.sh`, `e5b.sh`, `e2n.sh`, `e0e2n_cue.sh`.
 
-**The chains need facts to follow, so these runs ban "the" as a boundary by hand** (`SIT_BND_DENY=2`, the experiment 40 diagnostic, not a learner). Stack: chains + `--sit-lt-budget 131072`.
+**The chains need facts to follow, so the qa2 runs here (full and small) ban "the" as a boundary by hand** (`SIT_BND_DENY=2`, the experiment 40 diagnostic, not a learner). Their stack is chains + `--sit-lt-budget 131072`. The long BABILong runs have no ban and no chains: only the budget plus the flag named, through `bl_split.sh`. The normalized-judge runs have no ban either.
 
 ### The hubs are function words
 
-On the full qa2 stream (with the ban, chains, budget and halving sketch), the five largest head lists at word 520k:
+On the full qa2 stream (with the ban, chains, budget and halving sketch), the five largest head lists at words 120k, 240k and 520k:
 
 | Word 120k | Word 240k | Word 520k |
 |---|---|---|
 | john 84, sandra 83, mary 82, daniel 81, football 54 | of 315, and 303, "," 232, in 226, that 172 | of 1,094, and 1,006, the 991, in 784, that 679 |
 
-- **The people stop at about 84–90 heads.**
-- **The function words keep growing.** They pass the content gate because together they make a kind of 3 or more members. They meet so many different words that their exact paths never repeat.
+- **The people stop at about 85–92 heads.**
+- **The function words keep growing.** Having heads at all means the content gate passed them, so each is in a kind of 3 or more members. They meet so many different words that their exact paths never repeat.
 
 ### A learned hop-2 fan-out fails (`--sit-chain-learn`)
 
@@ -146,7 +146,7 @@ A table from hop 1's relation (its class and direction) to hop-2 classes:
 |---|---|---|---|
 | Small qa2, full walk | 97% | 389 | 66 s |
 | Small qa2, by class | 82% | 293 | 57 s |
-| Small qa2, by value kind | 70% | 272 | 54 s |
+| Small qa2, by value kind (run by hand) | 70% | 272 | 54 s |
 | Full qa2, full walk | 98 / 45% | 1,937 | 1,700 s |
 | Full qa2, by class | 75 / 23% | 576 | 921 s |
 
@@ -172,7 +172,7 @@ The cap is a fair share of the budget, N >> bl(entities with heads), and at leas
 
 | Run | 16k | 64k | Time |
 |---|---|---|---|
-| Budget (exp 38, `R_bl_long_bud17` and `bud17b`) | 83.3 / 80.0% | 62.5 / 62.5% | 1,698 s |
+| Budget (exp 38, `R_bl_long_bud17` and `bud17b`) | 83.3 / 80.0% | 62.5 / 62.5% | 1,698 / 2,120 s (older binary, other core sharing) |
 | + halving sketch + cap | 90.0% | **0.0%** | 810 s |
 | + halving sketch | 90.0% | **0.0%** | 826 s |
 | + cap | **93.3%** | **100.0%** | 820 s |
@@ -190,14 +190,14 @@ The cap is a fair share of the budget, N >> bl(entities with heads), and at leas
 
 ### The use judge, normalized (`--sit-bnd-use-norm`), and the cue walk
 
-The normalized judge:
+The normalized judge (runs with `--sit-sketch-decay`, no ban):
 - span(u) counts predictions whose best-ranked holder of the right word crosses u;
 - cut(u) counts bindings written across u;
 - u stops the walk while span · bindings ≤ hits · cut, so crossing bindings must earn no more per binding than bindings do overall.
 
 | Test | Normalized judge | Stops kept |
 |---|---|---|
-| Small qa2 | 19% | "the" (". " crossed: 2,025 / 57,136 against 24,564 / 1,447,524 overall) |
+| Small qa2 | 19% | "the" ("." crossed: 2,025 / 57,136 against 24,564 / 1,447,524 overall) |
 | Story set | 17.6% | none |
 | Pilot | 0 / 0% | ". , a and of" ("?" crossed) |
 
