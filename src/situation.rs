@@ -221,6 +221,14 @@ pub struct SitCfg {
     /// (with --sit-lt-budget N) a derived per-entity cap on long-term heads: N >> bl(number of entities with heads),
     /// at least 4; a new head on a full list replaces the entity's oldest head
     pub entity_fair: bool,
+    /// The question detector as a contrast, on every word type (forum round six, E3): after word u, how often the
+    /// store's top proposal is right, among predictions the bigram did not already make, against the same rate after
+    /// every word. Q(u) when u has 16 or more such predictions and its rate is at least twice the overall rate
+    /// (cross-multiplied). No boundary is required, the hidden 1/3 accuracy bar is gone, and it keeps counting after
+    /// the freeze (the overall rate stops at the freeze). The question drop and its commit use the same Q.
+    pub q_contrast: bool,
+    /// (with --sit-chain-learn) credit the fan-out table only at answers (after a word with Q)
+    pub chain_learn_q: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
     /// words' frame bits) gets `lsh_bands` MinHash bands of `lsh_rows` rows each (the least hash of its bits per
     /// row), and two paths share a class when a band collides. A new path costs bands x rows hashes over its bits,
@@ -821,6 +829,9 @@ pub struct Situation {
     pub sq_opened: u64,
     pub sq_closed: u64,
     mood: Vec<u8>,
+    qhit: Vec<u32>,                                 // --sit-q-contrast: non-trivial right top proposals after each word
+    qn: Vec<u32>,                                   // --sit-q-contrast: non-trivial predictions after each word
+    qall: (u64, u64),                               // --sit-q-contrast: the same over every word
     succ: HashMap<(u32, u32), u32>,                 // bigram counts (word, next word), for mood2
     skip_n: Vec<(u32, u32)>,
     last_subj: HashMap<u32, u32>,                   // --sit-anaphora: content kind -> its newest clause-initial word
@@ -883,6 +894,9 @@ impl Situation {
             seg_draw: HashMap::default(),
             seg_hits: HashMap::default(),
             seg_n: HashMap::default(),
+            qhit: vec![0; nw],
+            qn: vec![0; nw],
+            qall: (0, 0),
             boundary: vec![false; nw],
             bind_ok: vec![true; nw],
             bnd_span: vec![0; nw],
@@ -1882,6 +1896,9 @@ impl Situation {
     }
     /// The boundaries whose mood counter marks them as closing questions.
     pub fn question_boundaries(&self) -> Vec<u32> {
+        if self.cfg.q_contrast {
+            return (0..self.nw as u32).filter(|&w| self.q_ok(w)).collect();
+        }
         (0..self.nw as u32).filter(|&w| self.boundary[w as usize] && self.mood[w as usize] >= 8).collect()
     }
 
@@ -2881,7 +2898,7 @@ impl Situation {
         }
     }
     fn query_learn(&mut self, w: u32) {
-        if self.cfg.chain_learn {
+        if self.cfg.chain_learn && (!self.cfg.chain_learn_q || self.after_q) {
             // the best-ranked route holding the next word: if a chain, count its hop-2 class in its hop-1 relation's row
             if let Some(b) = self.qcands.iter().position(|x| x.1 == w) {
                 let k1 = self.qkey1.get(b).copied().unwrap_or(u32::MAX);
@@ -3738,7 +3755,15 @@ impl Situation {
     /// --sit-mood-floor one time in 16 for any boundary below that, so a detector that fell below threshold keeps
     /// receiving evidence and can climb back (a counter that stops being tested cannot recover).
     fn is_q(&self, u: u32) -> bool {
+        if self.cfg.q_contrast {
+            return self.q_ok(u) || self.cfg.mood_floor && hash(self.t, u as u64 + 999) & 15 == 0;
+        }
         self.boundary[u as usize] && (self.mood[u as usize] >= 8 || self.cfg.mood_floor && hash(self.t, u as u64 + 999) & 15 == 0)
+    }
+    /// --sit-q-contrast: memory predicts what follows u at least twice as well as it does after words in general.
+    fn q_ok(&self, u: u32) -> bool {
+        let (h, n) = (self.qhit[u as usize] as u64, self.qn[u as usize] as u64);
+        n >= 16 && h * self.qall.1.max(1) >= 2 * self.qall.0 * n
     }
     /// The time (words read).
     pub fn time(&self) -> u64 {
@@ -4016,6 +4041,26 @@ impl Situation {
         // (not when reading without predicting: there was no proposal)
         // (nor once skill is frozen: the question detector is part of the skill, so a run of wrong answers in a hard
         // test cannot switch answering off)
+        if self.cfg.q_contrast && !self.idx_only {
+            if let Some(&u) = self.hist.last() {
+                if !self.succ_top.get(&u).map_or(false, |t| t.0 == w) {
+                    let ok = (self.last.first().map(|x| x.1) == Some(w)) as u32;
+                    let ui = u as usize;
+                    self.qn[ui] += 1;
+                    self.qhit[ui] += ok;
+                    if self.qn[ui] >= 4096 {
+                        self.qn[ui] >>= 1;
+                        self.qhit[ui] >>= 1;
+                    }
+                    if self.t < self.cfg.freeze_from {
+                        self.qall = (self.qall.0 + ok as u64, self.qall.1 + 1);
+                        if self.qall.1 >= 1 << 24 {
+                            self.qall = (self.qall.0 >> 1, self.qall.1 >> 1);
+                        }
+                    }
+                }
+            }
+        }
         let floor_hit = |u: u32| self.cfg.bind_indep && self.cfg.mood_floor && hash(self.t, u as u64 + 999) & 15 == 0;
         if let Some(&u) = self.hist.last().filter(|&&u| !self.idx_only && self.t < self.cfg.freeze_from || floor_hit(u)) {
             if self.boundary[u as usize] {
@@ -4307,8 +4352,8 @@ impl Situation {
                 break;
             }
         }
-        if self.boundary[w as usize] || self.buf.len() > 64 {
-            let qdrop = if self.cfg.bind_indep { self.is_q(w) } else { self.boundary[w as usize] && self.mood[w as usize] >= 8 };
+        if self.boundary[w as usize] || self.buf.len() > 64 || self.cfg.q_contrast && self.is_q(w) {
+            let qdrop = if self.cfg.bind_indep || self.cfg.q_contrast { self.is_q(w) } else { self.boundary[w as usize] && self.mood[w as usize] >= 8 };
             if self.cfg.mood && qdrop {
                 self.buf.clear(); // a question: a cue, not a fact
                 self.bufp.clear();
