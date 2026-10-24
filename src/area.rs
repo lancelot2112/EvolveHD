@@ -56,6 +56,14 @@ pub struct Area {
     /// Sticky membership and consolidation: an item's incumbent matcher keeps it while it still fires (even if
     /// another fires stronger), and a matcher's swaps grow rarer as it wins (one in 2^(bitlen(wins)/2)).
     pub sticky: bool,
+    /// Merging: two matchers that keep near-tying on the same inputs hold the same pattern. When a loser has
+    /// near-tied the same winner this many times (since it last near-tied another), the matcher with fewer wins
+    /// merges into the other (its items take the other's name); 0: never.
+    pub merge_after: u8,
+    shadow: Vec<(u32, u8)>,
+    /// A merged matcher's survivor (itself while alive).
+    pub into: Vec<u32>,
+    pub merges: u64,
     /// 0 none; 1 a shared bit out, a bit outside the input in; 2 a contested bit (input, winner and loser) out,
     /// down to half the mask's first size; 3 as 2, but only for a loser in a near-tie (its Jaccard at least 3/4 of
     /// the winner's), so the swap happens only where the code is crowded.
@@ -79,7 +87,7 @@ pub struct Area {
 
 impl Area {
     pub fn new(th: u64) -> Self {
-        Area { th, hebb: true, sticky: false, anti: 0, masks: vec![], names: vec![], wins: vec![], size0: vec![], post: vec![vec![]; W * 64], stamp: vec![], clock: 0, recruits: 0, swaps: 0, presented: 0, cofired: 0, near: 0 }
+        Area { th, hebb: true, sticky: false, merge_after: 0, shadow: vec![], into: vec![], merges: 0, anti: 0, masks: vec![], names: vec![], wins: vec![], size0: vec![], post: vec![vec![]; W * 64], stamp: vec![], clock: 0, recruits: 0, swaps: 0, presented: 0, cofired: 0, near: 0 }
     }
     fn unindex(&mut self, m: u32, b: u16) {
         let l = &mut self.post[b as usize];
@@ -135,6 +143,8 @@ impl Area {
             self.masks.push(*x);
             self.names.push(name);
             self.wins.push(1);
+            self.shadow.push((u32::MAX, 0));
+            self.into.push(m);
             self.size0.push(xb.len() as u32);
             self.stamp.push(0);
             for &b in &xb {
@@ -151,6 +161,7 @@ impl Area {
                 best = i;
             }
         }
+        let incumbent = if incumbent == u32::MAX { incumbent } else { self.alive_of(incumbent) };
         if self.sticky {
             if let Some(i) = fired.iter().position(|f| f.2 == incumbent) {
                 best = i; // the incumbent keeps the item while it still fires
@@ -166,6 +177,35 @@ impl Area {
             self.cofired += 1;
             if fired.iter().enumerate().any(|(i, f)| i != best && near(f)) {
                 self.near += 1;
+            }
+        }
+        if self.merge_after > 0 {
+            let mut merge: Option<(u32, u32)> = None;
+            for (i, f) in fired.iter().enumerate() {
+                if i == best {
+                    continue;
+                }
+                let m = f.2 as usize;
+                if near(f) {
+                    let sh = &mut self.shadow[m];
+                    *sh = if sh.0 == win { (win, sh.1.saturating_add(1)) } else { (win, 1) };
+                    if sh.1 >= self.merge_after && merge.is_none() {
+                        merge = Some((f.2, win));
+                    }
+                }
+            }
+            if let Some((a, b)) = merge {
+                // the matcher with fewer wins goes into the other
+                let (gone, keep) = if self.wins[a as usize] < self.wins[b as usize] { (a, b) } else { (b, a) };
+                for bit in bits_of(&self.masks[gone as usize]) {
+                    self.unindex(gone, bit);
+                }
+                self.into[gone as usize] = keep;
+                self.wins[keep as usize] += self.wins[gone as usize];
+                self.merges += 1;
+                if gone == win {
+                    return (self.names[keep as usize], keep);
+                }
             }
         }
         if self.hebb && self.plastic(win, salt) {
@@ -236,10 +276,17 @@ impl Area {
         }
         (self.names[win as usize], win)
     }
+    /// The live matcher a (possibly merged) matcher's items now belong to.
+    pub fn alive_of(&self, mut m: u32) -> u32 {
+        while self.into[m as usize] != m {
+            m = self.into[m as usize];
+        }
+        m
+    }
     /// Crowding in one line: matchers, presentations, co-firing and near-tie rates (per mille).
     pub fn report(&self) -> String {
         let pm = |x: u64| if self.presented == 0 { 0 } else { 1000 * x / self.presented };
-        format!("matchers {} | presented {} | co-fired {}‰ | near-ties {}‰ | swaps {}", self.len(), self.presented, pm(self.cofired), pm(self.near), self.swaps)
+        format!("matchers {} | presented {} | co-fired {}‰ | near-ties {}‰ | swaps {} | merges {}", self.len(), self.presented, pm(self.cofired), pm(self.near), self.swaps, self.merges)
     }
     pub fn len(&self) -> usize {
         self.masks.len()

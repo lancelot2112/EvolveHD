@@ -206,6 +206,8 @@ pub struct SitCfg {
     /// The kind area's matchers keep their words while they still fire, and grow less plastic as they win, so
     /// kinds hold still under skill trained on them (see `area`).
     pub area_sticky: bool,
+    /// Matchers that near-tie the same winner this many times in a row merge (0: never; see `area`).
+    pub area_merge: u8,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
     /// words' frame bits) gets `lsh_bands` MinHash bands of `lsh_rows` rows each (the least hash of its bits per
     /// row), and two paths share a class when a band collides. A new path costs bands x rows hashes over its bits,
@@ -932,6 +934,7 @@ impl Situation {
                 let mut a = crate::area::Area::new(2);
                 a.anti = cfg.area_anti;
                 a.sticky = cfg.area_sticky;
+                a.merge_after = cfg.area_merge;
                 a
             },
             kpres: vec![0; nw],
@@ -1703,6 +1706,19 @@ impl Situation {
             self.kind[w as usize] = name;
             self.kmatch[w as usize] = m;
             self.kpres[w as usize] = self.wcount[w as usize];
+        }
+        if self.kind_area.merges > 0 {
+            // words of merged matchers take their survivor's name
+            for w in 0..self.nw {
+                let m = self.kmatch[w];
+                if m != u32::MAX {
+                    let a = self.kind_area.alive_of(m);
+                    if a != m {
+                        self.kmatch[w] = a;
+                        self.kind[w] = self.kind_area.names[a as usize];
+                    }
+                }
+            }
         }
         self.finish_kinds();
     }

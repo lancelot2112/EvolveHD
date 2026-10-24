@@ -64,6 +64,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         area_anti: g("--sit-area-anti", "0").parse().unwrap(),
         kind_bits: g("--sit-kind-bits", "512").parse().unwrap(),
         area_sticky: flag(args, "--sit-area-sticky"),
+        area_merge: g("--sit-area-merge", "0").parse().unwrap(),
         lsh: flag(args, "--sit-lsh"),
         vlsh: flag(args, "--sit-vlsh"),
         heads_nokind: flag(args, "--sit-heads-nokind"),
