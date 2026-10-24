@@ -208,6 +208,9 @@ pub struct SitCfg {
     pub area_sticky: bool,
     /// Matchers that near-tie the same winner this many times in a row merge (0: never; see `area`).
     pub area_merge: u8,
+    /// Chained hops over the long-term heads (see the candidate code): a second lookup keyed by the first's value,
+    /// newest or as of the first's time.
+    pub chain: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
     /// words' frame bits) gets `lsh_bands` MinHash bands of `lsh_rows` rows each (the least hash of its bits per
     /// row), and two paths share a class when a band collides. A new path costs bands x rows hashes over its bits,
@@ -2516,6 +2519,54 @@ impl Situation {
                                 csrc.push((2, key));
                                 qroute.push((j, ke));
                             }
+                        }
+                    }
+                }
+            }
+            if self.cfg.chain && self.cfg.heads && content_cue {
+                // chained hops over the long-term heads: hop 1 is one of e's newest heads whose value has heads of its
+                // own; hop 2 is one of that value's heads, newest or as it was at hop 1's time (from its history), so
+                // "where is the football" can go football > who last had it > where they were then or are now
+                let mut h1: Vec<(u64, u32, u32, u32)> = self
+                    .heads_of
+                    .get(&e)
+                    .map(|v| {
+                        v.iter()
+                            .filter(|h| !cue.contains(&h.2) && self.heads_of.contains_key(&h.2) && self.ksize.get(&self.kk(h.2)).copied().unwrap_or(0) >= 3)
+                            .map(|&(key, _, val, t, c)| (t, key, val, c))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                h1.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+                h1.truncate(4);
+                let ke = self.kk(e);
+                for (r1, &(t1, key1, v1, c1)) in h1.iter().enumerate() {
+                    let Some(hs2) = self.heads_of.get(&v1) else { continue };
+                    for &(key2, k2, val2, t2, c2) in hs2 {
+                        if val2 == e || cue.contains(&val2) || self.ksize.get(&self.kk(val2)).copied().unwrap_or(0) < 3 {
+                            continue;
+                        }
+                        // (which 0) the value now; (which 1) the value at hop 1's time, when it differs
+                        let mut opts = vec![(0u64, val2, t2)];
+                        if let Some(hist) = self.posts.get(&(v1, key2, k2)) {
+                            let i = hist.partition_point(|x| x.0 <= t1);
+                            if i > 0 && hist[i - 1].1 != val2 && !cue.contains(&hist[i - 1].1) {
+                                opts.push((1, hist[i - 1].1, hist[i - 1].0));
+                            }
+                        }
+                        for (which, v, _tv) in opts {
+                            let mut f = self.route_feats(j, e, &[(c1, self.kk(v1), r1 as u32), (c2, self.kk(v), 0)]);
+                            f.push(Self::fid(60, key1 as u64, key2 as u64)); // the two relation paths
+                            f.push(Self::fid(61, which, key1 as u64)); // now or then, by hop 1's relation
+                            f.push(Self::fid(62, r1 as u64, which)); // hop 1's recency, now or then
+                            f.push(Self::fid(63, 1, 0)); // the source: a chain of heads
+                            let sc = self.qscore(&q, &f, &mut cache);
+                            if dbg {
+                                desc.push(format!("j{}:{}>C{}={}>{}w{}={}", j, e, key1, v1, key2, which, v));
+                            }
+                            cands.push((f, v, sc, t1, (c1, self.kk(v1), c2, self.kk(v)), (r1 as u32, which as u32)));
+                            csrc.push((3, key2));
+                            qroute.push((j, ke));
                         }
                     }
                 }
