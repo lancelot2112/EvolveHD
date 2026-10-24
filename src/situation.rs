@@ -285,8 +285,9 @@ pub struct SitCfg {
     pub sense_new: f64,
     pub kinds: bool,
     pub mood: bool,
-    /// An answering floor for the question detector (see `is_q`); its counters then learn only from answers given
-    /// in question mode.
+    /// An answering floor for the question detector (see `is_q`). On the BABILong pilot it does not revive a detector
+    /// that fell because answers were really wrong (kinds from an area without anti-Hebbian swaps); learning the
+    /// counters only from question-mode answers made it worse (leader kinds 8/4% instead of 100/100%).
     pub mood_floor: bool,
     /// The mood counter credits memory only beyond local statistics: it moves only when the boundary word's most
     /// frequent successor (a bigram count) would have missed the next word; then up if the store predicted it, down
@@ -3642,9 +3643,7 @@ impl Situation {
         // (nor once skill is frozen: the question detector is part of the skill, so a run of wrong answers in a hard
         // test cannot switch answering off)
         if let Some(&u) = self.hist.last().filter(|_| !self.idx_only && self.t < self.cfg.freeze_from) {
-            // (with --sit-mood-floor, only answers given in question mode count: the detector is judged by how
-            // well answering works where it answers, and the floor keeps every boundary sampled)
-            if self.boundary[u as usize] && (!self.cfg.mood_floor || self.after_q) {
+            if self.boundary[u as usize] {
                 let ok = self.last.first().map(|x| x.1) == Some(w);
                 let trivial = self.cfg.mood2 && self.succ_top.get(&u).map_or(false, |t| t.0 == w);
                 let m = &mut self.mood[u as usize];
