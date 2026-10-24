@@ -276,6 +276,10 @@ pub struct SitCfg {
     /// crosses u, cut(u) counts bindings written across u; u stops the walk while crossing bindings earn no more per
     /// binding than bindings do overall: span(u) * bindings <= hits * cut(u)
     pub bnd_use_norm: bool,
+    /// (with --sit-bnd-use) credit from the level above: the judge counts only answers (predictions after a word with
+    /// Q), and credits the decision that produced the answer. The answer was right: each proposed word its route
+    /// crossed gets span += 1; wrong: cut += 1. Local next-word hits no longer vote.
+    pub bnd_use_q: bool,
     /// Long-term tier for recurring relations only: a binding enters the heads and their histories only once its
     /// exact path has been seen at least this many times, counted in a fixed count-min sketch (4 rows of 2^16
     /// 16-bit counters, 512 KB, the minimum of the four). Paths seen once or twice (almost every path in prose)
@@ -2847,11 +2851,24 @@ impl Situation {
                 return; // the bigram alone predicts it: no evidence about memory
             }
         }
+        if self.cfg.bnd_use_q && !self.after_q {
+            return; // only the level above's predictions (answers) judge the boundaries
+        }
         let cross = |i: usize| -> Option<u32> {
             let k2 = self.qsrc.get(i).filter(|x| x.0 > 0).map(|x| x.1).unwrap_or(u32::MAX);
             let k1 = self.qkey1.get(i).copied().unwrap_or(u32::MAX);
             [k1, k2].iter().filter(|&&k| k != u32::MAX && k & 0x8000_0000 != 0).find_map(|&k| self.cross_of.get(&(k & 0x7FFF_FFFF)).copied())
         };
+        if self.cfg.bnd_use_q {
+            let Some(u) = cross(0) else { return };
+            if self.qcands[0].1 == w {
+                self.bnd_span[u as usize] += 1;
+            } else {
+                self.bnd_cut[u as usize] += 1;
+            }
+            self.halve_use(u);
+            return;
+        }
         if self.cfg.bnd_use_norm {
             // the best-ranked holder of the right word, if its path is known: one attributable hit; crossing u: span(u)
             let Some(b) = self.qcands.iter().position(|x| x.1 == w) else { return };

@@ -78,6 +78,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         bnd_use: flag(args, "--sit-bnd-use"),
         bnd_use_rank: flag(args, "--sit-bnd-use-rank"),
         bnd_use_norm: flag(args, "--sit-bnd-use-norm"),
+        bnd_use_q: flag(args, "--sit-bnd-use-q"),
         chain_learn: flag(args, "--sit-chain-learn"),
         chain_learn_kind: flag(args, "--sit-chain-learn-kind"),
         entity_fair: flag(args, "--sit-entity-fair"),
