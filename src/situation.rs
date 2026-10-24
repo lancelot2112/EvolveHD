@@ -161,7 +161,8 @@ pub struct SitCfg {
     /// features conjoin the opener type with which occurrence and that rank, a nested anchor's outer type and rank
     /// with its inner type, and count how many anchor units contain the candidate. Nested anchors keep the newest 4.
     pub scope: bool,
-    /// From this word on, route skill is frozen: no query learning (and no open-query credit). u64::MAX: never.
+    /// From this word on, route skill is frozen: no query learning, no open-query credit, and no change to the
+    /// question detector (the mood counters). u64::MAX: never.
     pub freeze_from: u64,
     /// Role features for anchors (with --sit-ranges): an opener type enters the route features as its level, not
     /// its word: the bit length of the span of its starts minus the bit length of their count less one (about
@@ -3444,7 +3445,9 @@ impl Situation {
         }
         // mood: after a boundary, was the store's top proposal this word? (up on a hit, down on half the misses)
         // (not when reading without predicting: there was no proposal)
-        if let Some(&u) = self.hist.last().filter(|_| !self.idx_only) {
+        // (nor once skill is frozen: the question detector is part of the skill, so a run of wrong answers in a hard
+        // test cannot switch answering off)
+        if let Some(&u) = self.hist.last().filter(|_| !self.idx_only && self.t < self.cfg.freeze_from) {
             if self.boundary[u as usize] {
                 let ok = self.last.first().map(|x| x.1) == Some(w);
                 let trivial = self.cfg.mood2 && self.succ_top.get(&u).map_or(false, |t| t.0 == w);
