@@ -4202,6 +4202,9 @@ impl Situation {
                         m = m.min(self.path_sketch[i]);
                     }
                     first_tag = (16 - m.leading_zeros()).min(15) as u8;
+                    if self.cfg.lt_min > 0 && (m as u32) < self.cfg.lt_min {
+                        recurring = false; // with --sit-lt-min too, a path enters once it recurs (the budget replaces lt-credit)
+                    }
                 }
             } else if self.cfg.lt_min > 0 && self.cfg.heads && c < COMP && content_val && self.ksize.get(&self.kk(x)).copied().unwrap_or(0) < 3 {
                 recurring = false; // long-term facts are about content words (a kind of 3 or more)
