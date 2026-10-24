@@ -7,7 +7,7 @@ Forum round six reviewed the equations against the code. It proposed an ordered 
 **Results** (all single runs at seed 0):
 - **E1, the halving sketch, partly holds.**
   - On the full qa2 stream with chains, long-term heads at word 520k fall from 147,847 to 25,698, and the run takes 1,449 s instead of 5,724 s. Accuracy is unchanged.
-  - Candidates per word still grow, to 3,124 by the end (16,945 before). A few hub entities, the bAbI people, collect hundreds of heads each.
+  - Candidates per word still grow, to 3,124 by the end (16,945 before). A few hub entities collect hundreds of heads each (the largest list reaches 970). Which words they are was not logged in this run.
   - It costs nothing on the story set or the BABILong pilot.
 - **E0, splitting the boundary set's jobs, is falsified.** Small qa2 rises from 33% to 74% without the hand ban. But the story set falls to 53.5% and the pilot to 2 / 4%, because the veto also removes "?" and "." as binding stops.
 - **E2, boundaries judged by use, fails with both judges tried.**
@@ -24,7 +24,7 @@ Binaries `sit-41a` to `sit-41f` (each adds a flag; earlier flags behave the same
 
 ## E1: the halving sketch (`--sit-sketch-decay`)
 
-Every 2¹⁶ increments, each counter of the path sketch halves. A path then has to recur recently to pass the recurrence gate. The run also logs heads per entity (`HEADS_PER_ENTITY`, with the five largest lists).
+Every 2¹⁶ increments, each counter of the path sketch halves. A path then has to recur recently to pass the recurrence gate. The run also logs heads per entity (`HEADS_PER_ENTITY`). The five largest lists were added to that line later (from `sit-41c`), so only the small-qa2 runs below show them.
 
 Full qa2 stream (525,866 words; frozen from word 220,618), chains, no budget:
 
@@ -58,7 +58,10 @@ Heads per entity, halving sketch, no budget:
 
 **What this means:**
 - **Most entities stay at 1–3 heads.** The total grows mostly because book text keeps introducing new entities.
-- **The largest lists grow linearly.** On small qa2 the five largest are the four people (about 970 heads each) and "went". A head is one per (entity, exact path), and exact paths through up to 8 words are close to unique, so a person keeps collecting new ones.
+- **The largest lists grow linearly.** Which entities own them on the full stream was not logged. On small qa2 they depend on the stops:
+    - with stops "the ." (E2, forum judge), the largest are apple, football, milk, sandra and kitchen, at 129–148 heads;
+    - with no stops at all (E2, rank judge), they are the four people (921–974 heads) and "went".
+    - A head is one per (entity, exact path). Exact paths through up to 8 words are close to unique, so an entity that appears in many different contexts keeps collecting new heads.
 - **The chain walks those lists, so its cost tracks the hubs.** The fix belongs in hop 2's fan-out, or in what makes a path count as the same relation, not in the sketch.
 
 **The halving sketch costs nothing elsewhere:** story set 98.5% (as before), pilot 100 / 100%.
@@ -70,9 +73,9 @@ L, the learned boundary set, still decides commits, drift and the detector. Only
 | Test | Base | E0 | Binding stops (E0) |
 |---|---|---|---|
 | Small qa2, chain + budget | 33% | **74%** | "." |
-| + `--sit-bind-drift` (drift only at stops) | | 77% | "." |
+| + `--sit-bind-drift` (drift only at stops; run by hand, no script) | | 77% | "." |
 | Story set | 98.5% | **53.5%** | "." ("?" vetoed) |
-| BABILong pilot | 100 / 100% | **2 / 4%** | "of" ("." and "?" vetoed) |
+| BABILong pilot | 100 / 100% | **2 / 4%** | "of" (". ? , a and" vetoed) |
 
 - **The forum set a falsification bar of story set < 90%, and E0 lands at 53.5%.**
 - **Binding across "?" and "." does real damage.** So the veto is the wrong judge even for binding, not only in its wiring.
@@ -80,16 +83,16 @@ L, the learned boundary set, still decides commits, drift and the detector. Only
 
 ## E2: boundaries judged by use (`--sit-bnd-use`)
 
-L proposes. On a hash coin (one occurrence in 8), the walk does the opposite of the current stop decision. Every exact path that crosses a proposed word u records u. At each prediction the bigram did not already make, the routes' path keys decide.
+L proposes. On a hash coin (one occurrence in 8), the walk does the opposite of the current stop decision. Every exact path that crosses a proposed word records the first one it crosses, u. At each prediction the bigram did not already make, the routes' path keys decide.
 
 **The forum's judge:**
-- If the top route crosses u, was right, and no other route held the word: span(u) += 1.
+- If the top route crosses u, was right, and no route that does not cross u held the word: span(u) += 1.
 - If the top route crosses u, was wrong, and a non-crossing route held the word: cut(u) += 1.
-- u stops the walk while span ≤ cut. Both halve at 1,024.
+- u stops the walk while span ≤ cut. Both halve when span + cut reaches 1,024.
 
 **The rank judge (`--sit-bnd-use-rank`):**
 - If the best-ranked holder of the right word crosses u: span(u) += 1.
-- If a route crossing u outranks it: cut(u) += 1.
+- If a route crossing some other proposed word u outranks it: cut(u) += 1.
 
 | Test | Forum judge | Rank judge | Halving sketch only |
 |---|---|---|---|
@@ -98,7 +101,7 @@ L proposes. On a hash coin (one occurrence in 8), the walk does the opposite of 
 | BABILong pilot | 52 / 44% (all stops kept) | 100 / 72% ("?" stops no more: 498 / 372) | 100 / 100% |
 
 **Why it fails:**
-- **The forum's judge is biased toward cutting.** Its "no other route holds the word" condition is almost never met, because hundreds of routes propose, while "a non-crossing route holds it" almost always is.
+- **The forum's judge is biased toward cutting.** Span and cut test the same condition, "a route that does not cross u holds the word", once negated. With hundreds of routes proposing, that condition almost always holds, so span almost never counts.
 - **The rank judge is biased the other way.** Crossing paths are more numerous and more varied, so the best holder crosses u often, whatever u is.
 - **Exploration is not free.** The 1-in-8 crossing bindings enter long-term heads. That costs 5 points on the story set and up to 56 on the pilot even when every stop is kept. The forum meant them to stay in working memory, but working-memory routes carry classes, not exact paths, so they cannot be attributed.
 
