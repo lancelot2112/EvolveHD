@@ -1,6 +1,6 @@
 # 40 · The standard set over three seeds, the store, the question detector, BABILong qa2–qa5 (2026-10-24)
 
-*[All experiments](README.md)* · [← 39](39-one-rule-per-level.md)
+*[All experiments](README.md)* · [← 39](39-one-rule-per-level.md) · [41 →](41-forum-six-first-tests.md)
 
 The owner's go-ahead on the plan after experiment 39:
 1. Run the new stack against today's on the standard set, over three seeds.
