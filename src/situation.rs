@@ -218,6 +218,9 @@ pub struct SitCfg {
     /// (with --sit-chain-learn) the table's hop-2 entries are value kinds, not relation classes: follow every head of
     /// v1 whose value is of a kind that has answered after this hop-1 relation
     pub chain_learn_kind: bool,
+    /// (with --sit-lt-budget N) a derived per-entity cap on long-term heads: N >> bl(number of entities with heads),
+    /// at least 4; a new head on a full list replaces the entity's oldest head
+    pub entity_fair: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
     /// words' frame bits) gets `lsh_bands` MinHash bands of `lsh_rows` rows each (the least hash of its bits per
     /// row), and two paths share a class when a band collides. A new path costs bands x rows hashes over its bits,
@@ -4421,7 +4424,15 @@ impl Situation {
                 self.lt_ring.push_back(k);
                 continue;
             }
-            let (_, _, _, idx) = self.heads_tab.remove(&k).unwrap();
+            self.remove_head(k);
+            return true;
+        }
+        false
+    }
+    /// Remove long-term head k (entity, path, kind), its history and tag, keeping the entity's list's indices right.
+    fn remove_head(&mut self, k: (u32, u32, u32)) {
+        {
+            let Some((_, _, _, idx)) = self.heads_tab.remove(&k) else { return };
             if let Some(l) = self.heads_of.get_mut(&k.0) {
                 let idx = idx as usize;
                 if idx < l.len() {
@@ -4440,9 +4451,7 @@ impl Situation {
             self.posts.remove(&k);
             self.lt_tag.remove(&k);
             self.lt_evicted += 1;
-            return true;
         }
-        false
     }
     fn commit(&mut self) {
         let buf = std::mem::take(&mut self.buf);
@@ -4529,6 +4538,19 @@ impl Situation {
                         while self.heads_tab.len() >= self.cfg.lt_budget && self.lt_evict_one() {}
                         self.lt_tag.insert((x, key, hk), first_tag);
                         self.lt_ring.push_back((x, key, hk));
+                    }
+                    if self.cfg.entity_fair && self.cfg.lt_budget > 0 {
+                        // a fair share of the budget per entity: N >> bl(entities); a full list drops its oldest head
+                        let ne = self.heads_of.len().max(1) as u64;
+                        let cap = (self.cfg.lt_budget as u64 >> (64 - ne.leading_zeros())).max(4) as usize;
+                        if let Some(l) = self.heads_of.get(&x) {
+                            if l.len() >= cap {
+                                let o = l.iter().min_by_key(|h| h.3).map(|h| (x, h.0, h.1));
+                                if let Some(o) = o {
+                                    self.remove_head(o);
+                                }
+                            }
+                        }
                     }
                     let l = self.heads_of.entry(x).or_default();
                     self.heads_tab.insert((x, key, hk), (v, now, c, l.len() as u32));
