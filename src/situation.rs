@@ -244,6 +244,13 @@ pub struct SitCfg {
     pub bind_indep: bool,
     /// (with --sit-bind-indep) the working-memory context drifts only at binding stops, not at every learned boundary
     pub bind_drift: bool,
+    /// Boundaries judged by use (forum round six, step 2). The learned set L proposes; whether a proposed word stops
+    /// the binding walk is learned from the next word. On a hash coin (1 occurrence in 8) the walk does the
+    /// opposite of the current decision, and every binding whose path crosses a proposed word u remembers u. At each
+    /// prediction the bigram did not already make: if the store's top route crosses u and was right while no route
+    /// that does not cross u held the word, span(u) += 1; if it crosses u and was wrong while a route that does not
+    /// cross u held the word, cut(u) += 1. u stops the walk while span(u) <= cut(u); both halve at 1024.
+    pub bnd_use: bool,
     /// Long-term tier for recurring relations only: a binding enters the heads and their histories only once its
     /// exact path has been seen at least this many times, counted in a fixed count-min sketch (4 rows of 2^16
     /// 16-bit counters, 512 KB, the minimum of the four). Paths seen once or twice (almost every path in prose)
@@ -677,7 +684,11 @@ pub struct Situation {
     seg_hits: HashMap<u32, [u64; 3]>,
     seg_n: HashMap<u32, u64>,
     boundary: Vec<bool>,
-    bind_ok: Vec<bool>,                             // --sit-bind-indep: the word is independent (may stop a binding)
+    bind_ok: Vec<bool>,
+    bnd_span: Vec<u32>,                             // --sit-bnd-use: crossing u was needed (the only route to a right word)
+    bnd_cut: Vec<u32>,                              // --sit-bnd-use: crossing u hurt (a wrong top route; a non-crossing one held it)
+    cross_of: HashMap<u32, u32>,                    // --sit-bnd-use: exact path key -> the proposed boundary word it crosses
+    qkey1: Vec<u32>,                                // each route's first-hop path key (chains), aligned with qcands                             // --sit-bind-indep: the word is independent (may stop a binding)
     // paths and classes
     mn: Meaning,
     path_count: HashMap<Vec<u32>, u64>, // dir-tagged path -> uses
@@ -854,6 +865,10 @@ impl Situation {
             seg_n: HashMap::default(),
             boundary: vec![false; nw],
             bind_ok: vec![true; nw],
+            bnd_span: vec![0; nw],
+            bnd_cut: vec![0; nw],
+            cross_of: HashMap::default(),
+            qkey1: vec![],
             mn,
             path_count: HashMap::default(),
             path_class: HashMap::default(),
@@ -2475,6 +2490,7 @@ impl Situation {
         let mut memo: HashMap<(usize, u32, u32, u32), i64> = HashMap::default();
         let mut qroute: Vec<(usize, u32)> = vec![];
         let mut csrc: Vec<(u8, u32)> = vec![];
+        let mut ckey1: Vec<u32> = vec![];
         self.after_q = self.hist.last().map_or(false, |&u| self.is_q(u));
         if self.cfg.sq_max > 0 && self.cfg.sq_mode > 0 && self.after_q {
             if self.qring.len() < 32 {
@@ -2551,6 +2567,7 @@ impl Situation {
                     }
                     cands.push((f1, val, sc, t, (c, k, u32::MAX, u32::MAX), (rr, u32::MAX)));
                     csrc.push((1, key));
+                    ckey1.push(u32::MAX);
                     qroute.push((j, ke));
                     taken += 1;
                     if taken >= cap {
@@ -2602,6 +2619,7 @@ impl Situation {
                                 }
                                 cands.push((f1, val, sc, t, (c, k, u32::MAX, u32::MAX), (rank as u32, u32::MAX)));
                                 csrc.push((2, key));
+                                ckey1.push(u32::MAX);
                                 qroute.push((j, ke));
                             }
                         }
@@ -2683,6 +2701,7 @@ impl Situation {
                             }
                             cands.push((f, v, sc, t1, (c1, self.kk(v1), c2, self.kk(v)), (r1 as u32, which as u32)));
                             csrc.push((3, key2));
+                            ckey1.push(key1);
                             qroute.push((j, ke));
                         }
                     }
@@ -2698,6 +2717,7 @@ impl Situation {
                 }
                 cands.push((f1, m, sc, self.stamp_of(e, c, k), (c, k, u32::MAX, u32::MAX), (r, u32::MAX)));
                 csrc.push((0, 0));
+                ckey1.push(u32::MAX);
                 qroute.push((j, ke));
                 if self.fm(2) && (j >= 4 || !is_content_e) {
                     continue; // fast: second hops only from the 4 nearest cue words, and only content ones
@@ -2713,6 +2733,7 @@ impl Situation {
                     }
                     cands.push((f2, v, sc, self.stamp_of(e, c, k), (c, k, c2, k2), (r, r2)));
                     csrc.push((0, 0));
+                    ckey1.push(u32::MAX);
                     qroute.push((j, ke));
                 }
             }
@@ -2737,6 +2758,7 @@ impl Situation {
         let cands: Vec<(Vec<u32>, u32, i64, u64, Route, (u32, u32))> = order.iter().map(|&i| slots[i].take().unwrap()).collect();
         self.qroute = order.iter().map(|&i| qroute[i]).collect();
         self.qsrc = order.iter().map(|&i| csrc[i]).collect();
+        self.qkey1 = order.iter().map(|&i| ckey1[i]).collect();
         let lo = cands.iter().map(|x| x.2).min().unwrap_or(0);
         let props: Vec<(u32, u32)> = cands.iter().map(|x| ((x.2 - lo + 1).min(u32::MAX as i64) as u32, x.1)).collect();
         if dbg && !cands.is_empty() {
@@ -2752,6 +2774,32 @@ impl Situation {
     /// Learn the query from word w: a mistake-driven (perceptron) three-factor update. When the top route was
     /// wrong, the best-scored route that held w is stepped up (Go) and the top route down (NoGo), for every
     /// (query bit, route feature) pair: pre-synaptic the query, post-synaptic the route, the modulator right or wrong.
+    /// --sit-bnd-use: judge the proposed boundaries crossed by this prediction's routes (see `bnd_use`).
+    fn bnd_use_update(&mut self, w: u32) {
+        if let Some(&u) = self.hist.last() {
+            if self.succ_top.get(&u).map_or(false, |t| t.0 == w) {
+                return; // the bigram alone predicts it: no evidence about memory
+            }
+        }
+        let cross = |i: usize| -> Option<u32> {
+            let k2 = self.qsrc.get(i).filter(|x| x.0 > 0).map(|x| x.1).unwrap_or(u32::MAX);
+            let k1 = self.qkey1.get(i).copied().unwrap_or(u32::MAX);
+            [k1, k2].iter().filter(|&&k| k != u32::MAX && k & 0x8000_0000 != 0).find_map(|&k| self.cross_of.get(&(k & 0x7FFF_FFFF)).copied())
+        };
+        let Some(u) = cross(0) else { return };
+        let right = self.qcands[0].1 == w;
+        let other_holds = (1..self.qcands.len()).any(|i| self.qcands[i].1 == w && cross(i) != Some(u));
+        let ui = u as usize;
+        if right && !other_holds {
+            self.bnd_span[ui] += 1;
+        } else if !right && other_holds {
+            self.bnd_cut[ui] += 1;
+        }
+        if self.bnd_span[ui] + self.bnd_cut[ui] >= 1024 {
+            self.bnd_span[ui] >>= 1;
+            self.bnd_cut[ui] >>= 1;
+        }
+    }
     fn query_learn(&mut self, w: u32) {
         let cands = std::mem::take(&mut self.qcands);
         let q = std::mem::take(&mut self.qbits);
@@ -2759,6 +2807,7 @@ impl Situation {
         let ranks = std::mem::take(&mut self.qranks);
         let qroute = std::mem::take(&mut self.qroute);
         let qsrc = std::mem::take(&mut self.qsrc);
+        self.qkey1.clear();
         if (self.cfg.lt_credit > 0 || self.cfg.lt_budget > 0) && self.after_q {
             // credit the path behind the best-ranked long-term route that held the answer
             if let Some(i) = cands.iter().position(|x| x.1 == w) {
@@ -3557,7 +3606,22 @@ impl Situation {
     }
     /// May w stop a binding walk? A learned boundary; with --sit-bind-indep, only an independent one.
     fn bstop(&self, w: u32) -> bool {
-        self.boundary[w as usize] && (!self.cfg.bind_indep || self.bind_ok.get(w as usize).copied().unwrap_or(true))
+        self.boundary[w as usize]
+            && (!self.cfg.bind_indep || self.bind_ok.get(w as usize).copied().unwrap_or(true))
+            && (!self.cfg.bnd_use || self.bnd_span[w as usize] <= self.bnd_cut[w as usize])
+    }
+    /// The binding walk's stop at word s seen at time ts: with --sit-bnd-use, one occurrence in 8 does the opposite.
+    fn walk_stop(&self, s: u32, ts: u64) -> bool {
+        let st = self.bstop(s);
+        if self.cfg.bnd_use && self.boundary[s as usize] && hash(ts, s as u64 + 4242) & 7 == 0 {
+            !st
+        } else {
+            st
+        }
+    }
+    /// --sit-bnd-use: (word, span, cut) for each proposed boundary.
+    pub fn bnd_use_report(&self) -> Vec<(u32, u32, u32)> {
+        (0..self.nw as u32).filter(|&w| self.boundary[w as usize]).map(|w| (w, self.bnd_span[w as usize], self.bnd_cut[w as usize])).collect()
     }
     /// Whether boundary u is treated as closing a question now: its mood counter at 8 or more, or with
     /// --sit-mood-floor one time in 16 for any boundary below that, so a detector that fell below threshold keeps
@@ -3965,6 +4029,9 @@ impl Situation {
                     }
                 }
             }
+            if self.cfg.bnd_use && !self.qcands.is_empty() {
+                self.bnd_use_update(w);
+            }
             if self.t >= self.cfg.freeze_from {
                 // frozen: the proposals are dropped unlearned
                 self.qcands.clear();
@@ -4053,7 +4120,8 @@ impl Situation {
         }
         let mut path: Vec<u32> = vec![];
         let back: Vec<u32> = self.clause.iter().rev().take(self.cfg.win).copied().collect();
-        for s in back {
+        for (si, s) in back.into_iter().enumerate() {
+            let ts = self.t.saturating_sub(1 + si as u64);
             if s != w {
                 for dir in 0..2u32 {
                     let mut p = vec![dir];
@@ -4097,11 +4165,17 @@ impl Situation {
                         self.cfg.skip && e.0 >= 16 && e.1 * 4 >= e.0 * 3
                     };
                     let pk = p.iter().enumerate().filter(|(i, &x)| *i == 0 || !skippable(x)).fold(0x9A7, |h, (_, &x)| hash(h, x as u64));
-                    self.bufp.push((hash(pk, 77) & 0x7FFF_FFFF) as u32);
+                    let pkv = (hash(pk, 77) & 0x7FFF_FFFF) as u32;
+                    self.bufp.push(pkv);
+                    if self.cfg.bnd_use {
+                        if let Some(&u) = path.iter().find(|&&x| self.boundary[x as usize]) {
+                            self.cross_of.entry(pkv).or_insert(u);
+                        }
+                    }
                 }
             }
             path.push(s);
-            if self.bstop(s) {
+            if self.walk_stop(s, ts) {
                 break;
             }
         }

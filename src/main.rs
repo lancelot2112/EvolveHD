@@ -75,6 +75,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         bnd_indep: flag(args, "--sit-bnd-indep"),
         bind_indep: flag(args, "--sit-bind-indep"),
         bind_drift: flag(args, "--sit-bind-drift"),
+        bnd_use: flag(args, "--sit-bnd-use"),
         lt_min: arg(args, "--sit-lt-min").map(|s| s.parse().unwrap()).unwrap_or(0),
         lt_credit: arg(args, "--sit-lt-credit").map(|s| s.parse().unwrap()).unwrap_or(0),
         lt_budget: arg(args, "--sit-lt-budget").map(|s| s.parse().unwrap()).unwrap_or(0),
@@ -948,6 +949,7 @@ fn main() {
                 let name = |w: u32| voc.get(w as usize).cloned().unwrap_or(w.to_string());
                 eprintln!("learned boundaries: {} | paths {} | relation classes {}", x.boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.n_paths(), x.n_classes());
                 eprintln!("binding stops: {}", x.bind_stops().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "));
+                eprintln!("boundary use (word span cut): {}", x.bnd_use_report().iter().map(|&(w, a, b)| format!("{} {} {}", name(w), a, b)).collect::<Vec<_>>().join(" | "));
                 eprintln!("question boundaries: {} | clauses committed {}, dropped {}", x.question_boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.committed, x.dropped);
                 if x.cfg.anaphora {
                     eprintln!("stand-in first words resolved: {}", x.anaphora_resolved);
