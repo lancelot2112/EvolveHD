@@ -61,6 +61,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         area_kinds: flag(args, "--sit-area-kinds"),
         open_kind: flag(args, "--sit-open-kind"),
         area_anti: g("--sit-area-anti", "0").parse().unwrap(),
+        kind_bits: g("--sit-kind-bits", "512").parse().unwrap(),
         lsh: flag(args, "--sit-lsh"),
         vlsh: flag(args, "--sit-vlsh"),
         heads_nokind: flag(args, "--sit-heads-nokind"),
@@ -940,6 +941,9 @@ fn main() {
                 eprintln!("question boundaries: {} | clauses committed {}, dropped {}", x.question_boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.committed, x.dropped);
                 if x.cfg.anaphora {
                     eprintln!("stand-in first words resolved: {}", x.anaphora_resolved);
+                }
+                if x.cfg.area_kinds {
+                    eprintln!("kind area: {}", x.kind_area_report());
                 }
                 {
                     let st = x.stat.borrow();

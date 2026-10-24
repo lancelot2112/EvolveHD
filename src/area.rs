@@ -54,7 +54,8 @@ pub struct Area {
     /// Swap one bit per win (Hebbian) and per inhibited firing (anti-Hebbian).
     pub hebb: bool,
     /// 0 none; 1 a shared bit out, a bit outside the input in; 2 a contested bit (input, winner and loser) out,
-    /// down to half the mask's first size.
+    /// down to half the mask's first size; 3 as 2, but only for a loser in a near-tie (its Jaccard at least 3/4 of
+    /// the winner's), so the swap happens only where the code is crowded.
     pub anti: u32,
     pub masks: Vec<Code>,
     /// A matcher's name: the item that recruited it (a kind keeps its name for as long as the matcher lives).
@@ -66,11 +67,16 @@ pub struct Area {
     clock: u64,
     pub recruits: u64,
     pub swaps: u64,
+    /// The area's own measure of crowding: presentations that found a winner, those where two or more matchers
+    /// fired, and those where the runner-up came within 3/4 of the winner's overlap (a near-tie).
+    pub presented: u64,
+    pub cofired: u64,
+    pub near: u64,
 }
 
 impl Area {
     pub fn new(th: u64) -> Self {
-        Area { th, hebb: true, anti: 0, masks: vec![], names: vec![], wins: vec![], size0: vec![], post: vec![vec![]; W * 64], stamp: vec![], clock: 0, recruits: 0, swaps: 0 }
+        Area { th, hebb: true, anti: 0, masks: vec![], names: vec![], wins: vec![], size0: vec![], post: vec![vec![]; W * 64], stamp: vec![], clock: 0, recruits: 0, swaps: 0, presented: 0, cofired: 0, near: 0 }
     }
     fn unindex(&mut self, m: u32, b: u16) {
         let l = &mut self.post[b as usize];
@@ -135,6 +141,16 @@ impl Area {
         }
         let win = fired[best].2;
         self.wins[win as usize] += 1;
+        self.presented += 1;
+        // near-tie: a loser whose Jaccard is at least 3/4 of the winner's (cross-multiplied)
+        let (wi, wu) = (fired[best].0, fired[best].1);
+        let near = |f: &(u64, u64, u32)| 4 * f.0 * wu >= 3 * wi * f.1;
+        if fired.len() > 1 {
+            self.cofired += 1;
+            if fired.iter().enumerate().any(|(i, f)| i != best && near(f)) {
+                self.near += 1;
+            }
+        }
         if self.hebb {
             // toward the input: a mask bit the input lacks out, an input bit the mask lacks in
             let mk = self.masks[win as usize];
@@ -150,12 +166,12 @@ impl Area {
                 self.swaps += 1;
             }
         }
-        if self.anti == 2 {
+        if self.anti == 2 || self.anti == 3 {
             // pull overlapping patterns apart: each inhibited matcher gives up one bit it contests with the winner
             // on this input (held by the input, the winner and itself), down to half its first size
             let wm = self.masks[win as usize];
             for (i, &(_, _, m)) in fired.iter().enumerate() {
-                if i == best {
+                if i == best || self.anti == 3 && !near(&fired[i]) {
                     continue;
                 }
                 let mk = self.masks[m as usize];
@@ -202,6 +218,11 @@ impl Area {
             }
         }
         self.names[win as usize]
+    }
+    /// Crowding in one line: matchers, presentations, co-firing and near-tie rates (per mille).
+    pub fn report(&self) -> String {
+        let pm = |x: u64| if self.presented == 0 { 0 } else { 1000 * x / self.presented };
+        format!("matchers {} | presented {} | co-fired {}‰ | near-ties {}‰ | swaps {}", self.len(), self.presented, pm(self.cofired), pm(self.near), self.swaps)
     }
     pub fn len(&self) -> usize {
         self.masks.len()

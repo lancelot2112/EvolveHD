@@ -200,6 +200,9 @@ pub struct SitCfg {
     /// that overlap: 0 none; 1 one shared bit out and a bit outside the input in; 2 one contested bit out (held by
     /// the input, the winner and the loser), the mask shrinking to at most half its first size.
     pub area_anti: u32,
+    /// The width of the code words are clustered on (a power of two up to 512): the frame features fold onto
+    /// fewer bits, so patterns overlap more (does anti-Hebbian learning let a narrower code serve?).
+    pub kind_bits: usize,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
     /// words' frame bits) gets `lsh_bands` MinHash bands of `lsh_rows` rows each (the least hash of its bits per
     /// row), and two paths share a class when a band collides. A new path costs bands x rows hashes over its bits,
@@ -1538,8 +1541,10 @@ impl Situation {
         let r = &self.frame[w as usize];
         let th = (*r.iter().max().unwrap_or(&0) >> self.cfg.kshift).max(1);
         let mut c = [0u64; FB / 64];
+        let fold = self.cfg.kind_bits.clamp(1, FB) - 1; // a power of two: fold feature b onto bit b mod kind_bits
         for (b, &x) in r.iter().enumerate() {
             if x >= th {
+                let b = b & fold;
                 c[b >> 6] |= 1u64 << (b & 63);
             }
         }
@@ -1717,6 +1722,10 @@ impl Situation {
         let mut v: Vec<Vec<u32>> = by.into_values().collect();
         v.sort_by(|a, b| b.len().cmp(&a.len()).then(a[0].cmp(&b[0])));
         v
+    }
+    /// The kind area's crowding report (with --sit-area-kinds).
+    pub fn kind_area_report(&self) -> String {
+        self.kind_area.report()
     }
     /// The boundaries whose mood counter marks them as closing questions.
     pub fn question_boundaries(&self) -> Vec<u32> {
