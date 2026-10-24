@@ -3463,9 +3463,12 @@ impl Situation {
         if self.cfg.levels && self.cfg.nest {
             // the same rule at every level: labels by the level of their types, outermost first; from each root a
             // chain descends through every lower label found inside the current unit
+            // a type's level: the log2 of its mean recurrence interval, counting the open one up to now, so a
+            // type seen once is as high as the time since it was seen allows
+            let now = self.t;
             let lev = |fw: u32| -> u64 {
                 let bl = |x: u64| 64 - x.leading_zeros() as u64;
-                self.opener_pos.get(&fw).map_or(0, |v| if v.len() < 2 { 0 } else { bl(v[v.len() - 1] - v[0]).saturating_sub(bl(v.len() as u64 - 1)) })
+                self.opener_pos.get(&fw).map_or(0, |v| if v.is_empty() { 0 } else { bl(now - v[0]).saturating_sub(bl(v.len() as u64)) })
             };
             let mut order: Vec<usize> = (0..spans.len()).collect();
             order.sort_by_key(|&i| (std::cmp::Reverse(lev(spans[i].1)), i));
@@ -3493,11 +3496,15 @@ impl Situation {
                                 ifw = fw;
                                 ilen = len;
                                 used.push(fw);
+                                // every depth is an anchor of its own: route credit picks how deep to trust
+                                nested.push((lo, hi, ifw, depth, ilen, rfw, rlen, orank));
                             }
                         }
                     }
-                    if depth >= 2 {
-                        nested.push((lo, hi, ifw, depth, ilen, rfw, rlen, orank));
+                    let _ = (ifw, ilen);
+                    if std::env::var("SIT_LDBG").is_ok() {
+                        let sp: Vec<String> = order.iter().map(|&i| format!("{}:{}x{}@L{}", spans[i].1, spans[i].2, spans[i].3.len(), lev(spans[i].1))).collect();
+                        eprintln!("LDBG t {} root {} at {} rank {} -> [{}, {}) depth {} inner {} | spans {}", self.t, rfw, a, orank, lo, hi, depth, ifw, sp.join(" "));
                     }
                 }
             }
@@ -3528,7 +3535,7 @@ impl Situation {
         if self.cfg.scope {
             nested.reverse(); // keep the newest
         }
-        nested.truncate(4);
+        nested.truncate(if self.cfg.levels { 8 } else { 4 });
         out.extend(nested);
         out
     }
