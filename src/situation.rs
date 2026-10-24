@@ -203,6 +203,9 @@ pub struct SitCfg {
     /// The width of the code words are clustered on (a power of two up to 512): the frame features fold onto
     /// fewer bits, so patterns overlap more (does anti-Hebbian learning let a narrower code serve?).
     pub kind_bits: usize,
+    /// The kind area's matchers keep their words while they still fire, and grow less plastic as they win, so
+    /// kinds hold still under skill trained on them (see `area`).
+    pub area_sticky: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
     /// words' frame bits) gets `lsh_bands` MinHash bands of `lsh_rows` rows each (the least hash of its bits per
     /// row), and two paths share a class when a band collides. A new path costs bands x rows hashes over its bits,
@@ -745,7 +748,8 @@ pub struct Situation {
     sq_pid: HashMap<((u32, u32), (u32, u32)), u32>, // a pattern's id, kept across closes (its derived class and weights)
     kmerge: HashMap<(u32, u32), u32>,               // slow merges: proposals in a row per pair of old kinds
     kind_area: crate::area::Area,                   // --sit-area-kinds: the matchers that name the kinds
-    kpres: Vec<u64>,                                // --sit-area-kinds: a word's count when last presented
+    kpres: Vec<u64>,
+    kmatch: Vec<u32>,                               // --sit-area-kinds: the matcher that won each word last                                // --sit-area-kinds: a word's count when last presented
     pub sq_work: u64,                               // maintenance reads and writes
     pub sq_open_sum: u64,                           // open queries summed over words (for the mean)
     pub sq_peak: usize,                             // the most open at once
@@ -912,9 +916,11 @@ impl Situation {
             kind_area: {
                 let mut a = crate::area::Area::new(2);
                 a.anti = cfg.area_anti;
+                a.sticky = cfg.area_sticky;
                 a
             },
             kpres: vec![0; nw],
+            kmatch: vec![u32::MAX; nw],
             sq_work: 0,
             sq_open_sum: 0,
             sq_peak: 0,
@@ -1669,8 +1675,9 @@ impl Situation {
         for &w in &order {
             let c = self.kind_code(w);
             let salt = hash(self.t, w as u64);
-            let name = self.kind_area.present(&c, w, salt);
+            let (name, m) = self.kind_area.present(&c, w, salt, self.kmatch[w as usize]);
             self.kind[w as usize] = name;
+            self.kmatch[w as usize] = m;
             self.kpres[w as usize] = self.wcount[w as usize];
         }
         self.finish_kinds();

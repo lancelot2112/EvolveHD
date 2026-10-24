@@ -53,6 +53,9 @@ pub struct Area {
     pub th: u64,
     /// Swap one bit per win (Hebbian) and per inhibited firing (anti-Hebbian).
     pub hebb: bool,
+    /// Sticky membership and consolidation: an item's incumbent matcher keeps it while it still fires (even if
+    /// another fires stronger), and a matcher's swaps grow rarer as it wins (one in 2^(bitlen(wins)/2)).
+    pub sticky: bool,
     /// 0 none; 1 a shared bit out, a bit outside the input in; 2 a contested bit (input, winner and loser) out,
     /// down to half the mask's first size; 3 as 2, but only for a loser in a near-tie (its Jaccard at least 3/4 of
     /// the winner's), so the swap happens only where the code is crowded.
@@ -76,7 +79,7 @@ pub struct Area {
 
 impl Area {
     pub fn new(th: u64) -> Self {
-        Area { th, hebb: true, anti: 0, masks: vec![], names: vec![], wins: vec![], size0: vec![], post: vec![vec![]; W * 64], stamp: vec![], clock: 0, recruits: 0, swaps: 0, presented: 0, cofired: 0, near: 0 }
+        Area { th, hebb: true, sticky: false, anti: 0, masks: vec![], names: vec![], wins: vec![], size0: vec![], post: vec![vec![]; W * 64], stamp: vec![], clock: 0, recruits: 0, swaps: 0, presented: 0, cofired: 0, near: 0 }
     }
     fn unindex(&mut self, m: u32, b: u16) {
         let l = &mut self.post[b as usize];
@@ -87,12 +90,21 @@ impl Area {
     fn fires(&self, inter: u64, uni: u64) -> bool {
         uni > 0 && 5 * inter >= self.th * uni
     }
-    /// Present an input; returns the winning matcher's name (`name` if a matcher was recruited for it). `salt`
-    /// picks which bits a swap moves (deterministic). An empty input recruits nothing and is its own name.
-    pub fn present(&mut self, x: &Code, name: u32, salt: u64) -> u32 {
+    /// Whether matcher m may swap a bit now: always, or with `sticky` one time in 2^(bitlen(wins)/2).
+    fn plastic(&self, m: u32, salt: u64) -> bool {
+        if !self.sticky {
+            return true;
+        }
+        let sh = (32 - self.wins[m as usize].leading_zeros()) / 2;
+        mix(salt, 7 + m as u64) & ((1u64 << sh) - 1) == 0
+    }
+    /// Present an input; returns the winning matcher's name (`name` if a matcher was recruited for it) and index
+    /// (u32::MAX for an empty input). `incumbent` is the matcher that won this item last time (u32::MAX if none).
+    /// `salt` picks which bits a swap moves (deterministic). An empty input recruits nothing and is its own name.
+    pub fn present(&mut self, x: &Code, name: u32, salt: u64, incumbent: u32) -> (u32, u32) {
         let xb = bits_of(x);
         if xb.is_empty() {
-            return name;
+            return (name, u32::MAX);
         }
         // prefix: the rarest |x| - ceil(th |x| / 5) + 1 bits of the input
         let need = (self.th * xb.len() as u64 + 4) / 5;
@@ -129,7 +141,7 @@ impl Area {
                 self.post[b as usize].push(m);
             }
             self.recruits += 1;
-            return name;
+            return (name, m);
         }
         // inhibition: the best Jaccard wins (cross-multiplied), lowest index on ties
         let mut best = 0;
@@ -137,6 +149,11 @@ impl Area {
             let (a, b) = (fired[i], fired[best]);
             if a.0 * b.1 > b.0 * a.1 || a.0 * b.1 == b.0 * a.1 && a.2 < b.2 {
                 best = i;
+            }
+        }
+        if self.sticky {
+            if let Some(i) = fired.iter().position(|f| f.2 == incumbent) {
+                best = i; // the incumbent keeps the item while it still fires
             }
         }
         let win = fired[best].2;
@@ -151,7 +168,7 @@ impl Area {
                 self.near += 1;
             }
         }
-        if self.hebb {
+        if self.hebb && self.plastic(win, salt) {
             // toward the input: a mask bit the input lacks out, an input bit the mask lacks in
             let mk = self.masks[win as usize];
             let out: Vec<u16> = bits_of(&mk).into_iter().filter(|&b| !has(x, b)).collect();
@@ -171,7 +188,7 @@ impl Area {
             // on this input (held by the input, the winner and itself), down to half its first size
             let wm = self.masks[win as usize];
             for (i, &(_, _, m)) in fired.iter().enumerate() {
-                if i == best || self.anti == 3 && !near(&fired[i]) {
+                if i == best || self.anti == 3 && !near(&fired[i]) || !self.plastic(m, salt ^ 0x55) {
                     continue;
                 }
                 let mk = self.masks[m as usize];
@@ -217,7 +234,7 @@ impl Area {
                 self.swaps += 1;
             }
         }
-        self.names[win as usize]
+        (self.names[win as usize], win)
     }
     /// Crowding in one line: matchers, presentations, co-firing and near-tie rates (per mille).
     pub fn report(&self) -> String {
