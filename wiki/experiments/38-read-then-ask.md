@@ -1,6 +1,6 @@
 # 38 · Read quickly, answer questions: the forum's round-four plan (2026-10-23)
 
-*[All experiments](README.md)* · [← 37](37-long-reader.md)
+*[All experiments](README.md)* · [← 37](37-long-reader.md) · [39 →](39-one-rule-per-level.md)
 
 The owner's goal: a system that can quickly read something and answer questions about it. The fourth forum ([Claude Docs](https://claude.ai/artifact/WazQC5jF9GWmZSYjZoZ6Ne), project doc `claude/forum-round-four.md`) agreed on the direction: read cheaply, answer expensively. Reading is the index pass. Routes are scored only at questions. Skill is trained once and then frozen. The forum's order of work:
 

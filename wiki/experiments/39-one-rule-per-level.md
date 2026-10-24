@@ -2,6 +2,14 @@
 
 *[All experiments](README.md)* · [← 38](38-read-then-ask.md)
 
+**In short:**
+- One chain rule for every level of nesting.
+- Word kinds from an area of matchers with contested anti-Hebbian and sticky membership.
+- Together they answer 96–100% of found questions about a book read by the index pass, three levels deep and up to a million words back (single seed).
+- On BABILong the area matches leader clustering at 2.6× the speed.
+- A clause type cannot come from its first word's kind: "part" and "volume" share one.
+- Level 0's boundary rule is still its own statistic.
+
 The owner asked for the forum's generalizations, made practical: a self-similar rule that works at each level of the recursion, so no level is designed by hand. In the owner's terms, an area of matchers runs three local rules, and the same area serves at every scale:
 
 - **threshold:** a matcher fires when its overlap with the input passes it;
@@ -152,6 +160,23 @@ Level 0 keeps the both-sides-open rule with its sticky hysteresis (`--sit-bnd-hy
     - Leader clustering also merged "scene" with "where".
 - **What a clause type needs:** something the word's distribution does not hold, which here is the word itself. The first word stays the clause type.
 - **The sticky area's 99.8% on the current volume** suggests its kinds are otherwise steadier. One seed.
+
+## Together: chains plus sticky area kinds
+
+The chain rule with kinds from the sticky, contested area (`--sit-levels --sit-area-kinds --sit-area-anti 2 --sit-area-sticky`, clause type = first word; `R_vv_aks`), on the three-level read then ask:
+
+| Book B | Pairs, leader kinds (`R_vv_base`) | Chains, leader kinds (`R_vv_lev`) | **Chains, sticky area kinds (`R_vv_aks`)** |
+|---|---|---|---|
+| found, this volume, 64k–512k | 94.0% (565) | 94.5% | **99.8%** |
+| found, earlier volume, 64k–512k | 15.8% (355) | 94.6% | **99.2%** |
+| found, earlier volume, 512k+ | 13.9% (1,045) | 81.1% | **96.3%** |
+| home, 8k–64k / 64k–512k | – | 10.0% (20) / 0.0% (3) | **100% / 100%** |
+| owner, all | – | 100% (12) | 100% |
+| run time (both books) | 1,149 s | 1,155 s | 999 s |
+
+- **This is the best read-then-ask result so far,** on a book one level deeper than experiment 38's.
+- **Home without echoes is 100%** here, against 10% with leader kinds, but only on 24 questions. Owner has 12 questions.
+- **One seed.**
 
 ## Open
 
