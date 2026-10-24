@@ -263,8 +263,29 @@ Accuracy per block of 100 training questions, then the test:
 
 **The derived per-entity cap is the better tool for chain cost.**
 
+## Fourth round: boundaries credited from the level above (`--sit-bnd-use-q`)
+
+The owner's principle: predictions stay local, and credit comes from a higher-level prediction, flowing down to the lower decisions it depended on.
+- Here the higher-level prediction is the answer after a question word (contrast detector).
+- Only answers vote. A right answer gives span += 1 to every proposed word its top route crossed; a wrong answer gives cut += 1.
+- No hand ban. Binary `sit-41o`, script `runs/exp41/e2q.sh`, with the halving sketch.
+
+| Test | Contrast detector alone (`qc2`) | + boundaries from answers | Stops | Span / cut |
+|---|---|---|---|---|
+| Small qa2 | 99% (with "the" banned) | 22% | the . | the 0 / 0, . 0 / 4 |
+| Story set | 97.3% | 92.4% (where-object 67.9%) | . | . 2 / 7, ? 65 / 5 |
+| Pilot, 0k / 4k | 88 / 96% | 76 / 88% | . ? , a and of | . 106 / 473, ? 0 / 4 |
+
+**Two failure modes:**
+- **Bootstrapping.** Without the ban, the facts are broken, so the answers after "?" are wrong. "?" is then never learned as a question word (Q = milk went apple football). With no answers at "?", the judge receives no votes about "the" (0 / 0). The higher-level signal needs the lower level to be roughly right first.
+- **Shortcuts are credited.** On the story set, answers whose routes cross "?" are right 65 times out of 70.
+  - The binding from a question's entity to the previous answer often still holds, because the person has not moved.
+  - So "?" stops being a stop, and where-object falls from 86% to 68%.
+  - Credit from the outcome rewards a route that is right for the wrong reason.
+
 ## Next
 
 1. **Adopt the per-entity cap.** Choose a clock for recurrence that suits sparse facts, for example one that counts sentences or the entity's own sightings rather than all sketch increments, so qa2's 4k gain and qa1's 64k survive together. Rerun across three seeds.
-2. **The detector needs a sharper contrast,** one that keeps "?" and leaves out content words. For example, require the rate after u to beat the rate after u's own kind, not after every word.
-3. **The boundary judge needs the cost of crossing,** not only its hits: wrong top answers that a crossing binding caused, counted per binding written. Until then "the" is banned by hand in the chain runs.
+2. **Top-down credit needs a signal that exists before the boundaries are right, and that does not reward shortcuts.** For example, use the unit level's own prediction of the next clause, which is available on any text, rather than question answers. This is the owner's "high-level prediction credits the lower level", one level up from words.
+3. **The detector needs a sharper contrast,** one that keeps "?" and leaves out content words. For example, require the rate after u to beat the rate after u's own kind, not after every word.
+4. **The boundary judge needs the cost of crossing,** not only its hits: wrong top answers that a crossing binding caused, counted per binding written. Until then "the" is banned by hand in the chain runs.
