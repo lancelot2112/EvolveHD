@@ -220,6 +220,13 @@ pub struct SitCfg {
     /// words are dropped from the slot tables (their live kinds, write times, write logs, the entity's class
     /// lists), long after their drifting keys have made them unreadable. 0 = keep all.
     pub wm_horizon: u64,
+    /// Paths remembered only once they recur (with --sit-lsh): a path is counted in a count-min sketch, and only
+    /// a path seen this many times is kept (in the path counts, its class, the bands, the re-pooling). A rarer
+    /// path takes the class of a band it hits, or a shared class for rare paths, and is not stored. 0 = keep all.
+    pub path_min: u32,
+    /// Consolidation forgets one-off paths: at each re-pooling, paths seen fewer than this many times are dropped
+    /// (their counts and classes) instead of re-hashed; a path met again is classed afresh. 0 = keep all.
+    pub path_forget: u64,
     pub vlsh_band: usize, // positions per band (default 4)
     pub vlsh_hits: usize, // bands a value must match to be a candidate (default 1)
     pub lsh_bands: usize,
@@ -626,14 +633,16 @@ pub struct Situation {
     path_count: HashMap<Vec<u32>, u64>, // dir-tagged path -> uses
     path_class: HashMap<Vec<u32>, u32>,
     protos: Vec<Proto>,
-    proto_by_bit: Vec<Vec<u32>>,
+    proto_by_bit: Vec<Vec<u32>>,                    // relation classes by the bits of their prototypes (an inverted index)
     lsh_bucket: HashMap<u64, u32>,                  // --sit-lsh: band key -> relation class
     vband: HashMap<u64, Vec<u32>>,                  // --sit-vlsh: band key -> the values whose code has it
-    vcodes: Vec<u128>,
+    vcodes: Vec<u128>,                              // --sit-vlsh: each value's code, 2 bits per key position
     slot_log: HashMap<(u32, u32, u32), Vec<u32>>,   // --sit-slotlog: slot -> its last values written, newest last
     recent_slots: HashMap<u32, Vec<(u32, u32)>>,    // --sit-recent: entity -> its last slots written, newest last
-    path_sketch: Vec<u16>,
-    bnd_peak: HashMap<u32, u32>,                    // --sit-bnd-hyst: a boundary's peak openness                          // --sit-lt-min: count-min sketch of exact paths (4 x 2^16)                              // --sit-vlsh: each value's code, 2 bits per key position                    // relation classes by the bits of their prototypes (an inverted index)
+    path_sketch: Vec<u16>,                          // --sit-lt-min: count-min sketch of exact paths (4 x 2^16)
+    bnd_peak: HashMap<u32, u32>,                    // --sit-bnd-hyst: a boundary's peak openness
+    path_seen: Vec<u16>,                            // --sit-path-min: count-min sketch of whole paths
+    rare_class: [u32; 2],                           // --sit-path-min: the shared class of rare paths, per direction
     pscratch: Vec<u32>,                             // shared-bit counts per class, for one lookup
     class_count: Vec<u64>,
     senses: HashMap<u32, Vec<Sense>>,
@@ -797,6 +806,8 @@ impl Situation {
             recent_slots: HashMap::default(),
             path_sketch: if cfg.lt_min > 0 { vec![0; 4 << 16] } else { vec![] },
             bnd_peak: HashMap::default(),
+            path_seen: if cfg.path_min > 0 { vec![0; 4 << 16] } else { vec![] },
+            rare_class: [u32::MAX; 2],
             pscratch: vec![],
             class_count: vec![],
             senses: HashMap::default(),
@@ -1079,6 +1090,42 @@ impl Situation {
     }
 
     /// The relation class of a dir-tagged path (an empty path, adjacency, is its own class per direction).
+    /// --sit-lsh: a path's band keys (MinHash bands over its code; an empty code is one key of its own).
+    fn lsh_keys(&self, path: &[u32], code: &[u32], dir: u8) -> Vec<u64> {
+        if code.is_empty() || self.pool_pm == 0 {
+            return vec![hash(0xB0A7, path.iter().fold(0x51, |h, &x| hash(h, x as u64)))];
+        }
+        (0..self.cfg.lsh_bands)
+            .map(|b| {
+                (0..self.cfg.lsh_rows).fold(hash(dir as u64 + 0x15A, b as u64), |h, r| {
+                    let seed = hash(b as u64 * 977 + r as u64, 0x3E1);
+                    let m = code.iter().map(|&x| hash(x as u64, seed)).min().unwrap_or(0);
+                    hash(h, m)
+                })
+            })
+            .collect()
+    }
+    /// --sit-path-min: the class of a path not (yet) recurring: a stored class its bands hit, else the shared
+    /// class of rare paths; nothing about the path is stored.
+    fn class_lookup(&mut self, path: &[u32]) -> u32 {
+        if let Some(&c) = self.path_class.get(path) {
+            return c;
+        }
+        let dir = path[0] as u8;
+        let bare = if self.cfg.sense { 2 } else { 1 };
+        let code = if path.len() <= bare { vec![] } else { self.path_code(path) };
+        let keys = self.lsh_keys(path, &code, dir);
+        if let Some(c) = keys.iter().find_map(|k| self.lsh_bucket.get(k).copied()) {
+            return c;
+        }
+        let d = (dir & 1) as usize;
+        if self.rare_class[d] == u32::MAX || self.rare_class[d] as usize >= self.protos.len() {
+            self.protos.push(Proto { counts: vec![], bits: vec![], dir, n: 0 });
+            self.class_count.push(0);
+            self.rare_class[d] = self.protos.len() as u32 - 1;
+        }
+        self.rare_class[d]
+    }
     fn class_of(&mut self, path: &[u32]) -> u32 {
         if let Some(&c) = self.path_class.get(path) {
             return c;
@@ -1087,20 +1134,7 @@ impl Situation {
         let bare = if self.cfg.sense { 2 } else { 1 };
         let code = if path.len() <= bare { vec![] } else { self.path_code(path) };
         if self.cfg.lsh {
-            // the band keys: an empty code (adjacency) is its own key per direction
-            let keys: Vec<u64> = if code.is_empty() || self.pool_pm == 0 {
-                vec![hash(0xB0A7, path.iter().fold(0x51, |h, &x| hash(h, x as u64)))]
-            } else {
-                (0..self.cfg.lsh_bands)
-                    .map(|b| {
-                        (0..self.cfg.lsh_rows).fold(hash(dir as u64 + 0x15A, b as u64), |h, r| {
-                            let seed = hash(b as u64 * 977 + r as u64, 0x3E1);
-                            let m = code.iter().map(|&x| hash(x as u64, seed)).min().unwrap_or(0);
-                            hash(h, m)
-                        })
-                    })
-                    .collect()
-            };
+            let keys = self.lsh_keys(path, &code, dir);
             let c = match keys.iter().find_map(|k| self.lsh_bucket.get(k).copied()) {
                 Some(c) => c,
                 None => {
@@ -1194,6 +1228,10 @@ impl Situation {
         if self.cfg.fpool {
             self.recount_fdf();
         }
+        if self.cfg.path_forget > 0 {
+            let n = self.cfg.path_forget;
+            self.path_count.retain(|_, c| *c >= n);
+        }
         let mut paths: Vec<(u64, Vec<u32>)> = self.path_count.iter().map(|(p, &c)| (c, p.clone())).collect();
         paths.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         // each old class's most used path, to carry its counts over to wherever that path lands now
@@ -1205,6 +1243,7 @@ impl Situation {
         }
         self.protos.clear();
         self.lsh_bucket.clear();
+        self.rare_class = [u32::MAX; 2];
         for l in self.proto_by_bit.iter_mut() {
             l.clear();
         }
@@ -3669,8 +3708,24 @@ impl Situation {
                     } else {
                         p.extend(&path);
                     }
-                    *self.path_count.entry(p.clone()).or_insert(0) += 1;
-                    let c = self.class_of(&p);
+                    let rare = if self.cfg.path_min > 0 && self.cfg.lsh {
+                        let ph = p.iter().fold(0x77u64, |h, &x| hash(h, x as u64));
+                        let mut m = u16::MAX;
+                        for r in 0..4u64 {
+                            let i = (r << 16 | hash(ph, r + 0x91) & 0xFFFF) as usize;
+                            self.path_seen[i] = self.path_seen[i].saturating_add(1);
+                            m = m.min(self.path_seen[i]);
+                        }
+                        (m as u32) < self.cfg.path_min && !self.path_class.contains_key(&p)
+                    } else {
+                        false
+                    };
+                    let c = if rare {
+                        self.class_lookup(&p)
+                    } else {
+                        *self.path_count.entry(p.clone()).or_insert(0) += 1;
+                        self.class_of(&p)
+                    };
                     self.class_count[c as usize] += 1;
                     if dir == 0 {
                         self.buf.push((s, c, 0, w));

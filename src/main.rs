@@ -66,6 +66,8 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         lt_min: arg(args, "--sit-lt-min").map(|s| s.parse().unwrap()).unwrap_or(0),
         lt_credit: arg(args, "--sit-lt-credit").map(|s| s.parse().unwrap()).unwrap_or(0),
         wm_horizon: arg(args, "--sit-wm-horizon").map(|s| s.parse().unwrap()).unwrap_or(0),
+        path_min: arg(args, "--sit-path-min").map(|s| s.parse().unwrap()).unwrap_or(0),
+        path_forget: arg(args, "--sit-path-forget").map(|s| s.parse().unwrap()).unwrap_or(0),
         vlsh_band: arg(args, "--sit-vlsh-band").map(|s| s.parse().unwrap()).unwrap_or(4),
         vlsh_hits: arg(args, "--sit-vlsh-hits").map(|s| s.parse().unwrap()).unwrap_or(1),
         lsh_bands: arg(args, "--sit-lsh-bands").map(|s| s.parse().unwrap()).unwrap_or(8),
