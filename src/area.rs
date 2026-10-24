@@ -53,11 +53,14 @@ pub struct Area {
     pub th: u64,
     /// Swap one bit per win (Hebbian) and per inhibited firing (anti-Hebbian).
     pub hebb: bool,
-    pub anti: bool,
+    /// 0 none; 1 a shared bit out, a bit outside the input in; 2 a contested bit (input, winner and loser) out,
+    /// down to half the mask's first size.
+    pub anti: u32,
     pub masks: Vec<Code>,
     /// A matcher's name: the item that recruited it (a kind keeps its name for as long as the matcher lives).
     pub names: Vec<u32>,
     pub wins: Vec<u32>,
+    size0: Vec<u32>,
     post: Vec<Vec<u32>>,
     stamp: Vec<u64>,
     clock: u64,
@@ -67,7 +70,7 @@ pub struct Area {
 
 impl Area {
     pub fn new(th: u64) -> Self {
-        Area { th, hebb: true, anti: true, masks: vec![], names: vec![], wins: vec![], post: vec![vec![]; W * 64], stamp: vec![], clock: 0, recruits: 0, swaps: 0 }
+        Area { th, hebb: true, anti: 0, masks: vec![], names: vec![], wins: vec![], size0: vec![], post: vec![vec![]; W * 64], stamp: vec![], clock: 0, recruits: 0, swaps: 0 }
     }
     fn unindex(&mut self, m: u32, b: u16) {
         let l = &mut self.post[b as usize];
@@ -114,6 +117,7 @@ impl Area {
             self.masks.push(*x);
             self.names.push(name);
             self.wins.push(1);
+            self.size0.push(xb.len() as u32);
             self.stamp.push(0);
             for &b in &xb {
                 self.post[b as usize].push(m);
@@ -146,7 +150,29 @@ impl Area {
                 self.swaps += 1;
             }
         }
-        if self.anti {
+        if self.anti == 2 {
+            // pull overlapping patterns apart: each inhibited matcher gives up one bit it contests with the winner
+            // on this input (held by the input, the winner and itself), down to half its first size
+            let wm = self.masks[win as usize];
+            for (i, &(_, _, m)) in fired.iter().enumerate() {
+                if i == best {
+                    continue;
+                }
+                let mk = self.masks[m as usize];
+                if 2 * pop(&mk) <= self.size0[m as usize] {
+                    continue;
+                }
+                let contested: Vec<u16> = bits_of(&mk).into_iter().filter(|&b| has(x, b) && has(&wm, b)).collect();
+                if contested.is_empty() {
+                    continue;
+                }
+                let o = contested[(mix(salt ^ m as u64, 3) % contested.len() as u64) as usize];
+                take(&mut self.masks[m as usize], o);
+                self.unindex(m, o);
+                self.swaps += 1;
+            }
+        }
+        if self.anti == 1 {
             // away from the input for the inhibited: a shared bit out, a bit outside the input in
             for (i, &(_, _, m)) in fired.iter().enumerate() {
                 if i == best {

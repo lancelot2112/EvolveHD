@@ -196,9 +196,10 @@ pub struct SitCfg {
     /// A clause's type (for units, epochs and anchors) is the kind of its first word, the word level's output,
     /// instead of the word itself: the level above reads the level below's classes.
     pub open_kind: bool,
-    /// The kind area's inhibited matchers also take anti-Hebbian swaps (off: on the story set they cost 1.1
-    /// points, 96.6% against 97.7%).
-    pub area_anti: bool,
+    /// Anti-Hebbian learning for the kind area's matchers that fire but are inhibited, which pulls apart patterns
+    /// that overlap: 0 none; 1 one shared bit out and a bit outside the input in; 2 one contested bit out (held by
+    /// the input, the winner and the loser), the mask shrinking to at most half its first size.
+    pub area_anti: u32,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
     /// words' frame bits) gets `lsh_bands` MinHash bands of `lsh_rows` rows each (the least hash of its bits per
     /// row), and two paths share a class when a band collides. A new path costs bands x rows hashes over its bits,
