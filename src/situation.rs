@@ -3961,7 +3961,9 @@ impl Situation {
         let mut out = vec![];
         for j in 0..n.min(12) {
             let u = self.hist[n - 1 - j];
-            if j > 0 && j >= base && self.bstop(u) {
+            // the cue walks back to the learned boundary set itself, not to the binding stops: a binding may cross a
+            // word that still ends the question's cue
+            if j > 0 && j >= base && self.boundary[u as usize] {
                 break;
             }
             out.push(u);
