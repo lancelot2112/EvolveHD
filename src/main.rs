@@ -77,6 +77,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         bind_drift: flag(args, "--sit-bind-drift"),
         bnd_use: flag(args, "--sit-bnd-use"),
         bnd_use_rank: flag(args, "--sit-bnd-use-rank"),
+        chain_learn: flag(args, "--sit-chain-learn"),
         lt_min: arg(args, "--sit-lt-min").map(|s| s.parse().unwrap()).unwrap_or(0),
         lt_credit: arg(args, "--sit-lt-credit").map(|s| s.parse().unwrap()).unwrap_or(0),
         lt_budget: arg(args, "--sit-lt-budget").map(|s| s.parse().unwrap()).unwrap_or(0),

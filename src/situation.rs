@@ -211,6 +211,10 @@ pub struct SitCfg {
     /// Chained hops over the long-term heads (see the candidate code): a second lookup keyed by the first's value,
     /// newest or as of the first's time.
     pub chain: bool,
+    /// (with --sit-chain) a learned hop-2 fan-out: a table from hop 1's relation (its class, and direction) to the
+    /// hop-2 relation classes whose chains held the next word (Misra-Gries counts, 4 per row). Hop 2 then offers only
+    /// v1's heads in the row's top 2 classes; a 1-in-16 hash coin, or a row seen fewer than 32 times, offers all.
+    pub chain_learn: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
     /// words' frame bits) gets `lsh_bands` MinHash bands of `lsh_rows` rows each (the least hash of its bits per
     /// row), and two paths share a class when a band collides. A new path costs bands x rows hashes over its bits,
@@ -691,7 +695,9 @@ pub struct Situation {
     bnd_span: Vec<u32>,                             // --sit-bnd-use: crossing u was needed (the only route to a right word)
     bnd_cut: Vec<u32>,                              // --sit-bnd-use: crossing u hurt (a wrong top route; a non-crossing one held it)
     cross_of: HashMap<u32, u32>,                    // --sit-bnd-use: exact path key -> the proposed boundary word it crosses
-    qkey1: Vec<u32>,                                // each route's first-hop path key (chains), aligned with qcands                             // --sit-bind-indep: the word is independent (may stop a binding)
+    qkey1: Vec<u32>,
+    chain_tab: HashMap<u32, Vec<(u32, u32)>>,       // --sit-chain-learn: hop-1 relation -> [(hop-2 class, count)]
+    chain_seen: std::cell::RefCell<HashMap<u32, u32>>, // --sit-chain-learn: times each hop-1 relation was walked                                // each route's first-hop path key (chains), aligned with qcands                             // --sit-bind-indep: the word is independent (may stop a binding)
     // paths and classes
     mn: Meaning,
     path_count: HashMap<Vec<u32>, u64>, // dir-tagged path -> uses
@@ -872,6 +878,8 @@ impl Situation {
             bnd_cut: vec![0; nw],
             cross_of: HashMap::default(),
             qkey1: vec![],
+            chain_tab: HashMap::default(),
+            chain_seen: std::cell::RefCell::new(HashMap::default()),
             mn,
             path_count: HashMap::default(),
             path_class: HashMap::default(),
@@ -2666,9 +2674,34 @@ impl Situation {
                 let ke = self.kk(e);
                 for (r1, &(t1, key1, v1, c1)) in h1.iter().enumerate() {
                     let Some(hs2) = self.heads_of.get(&v1) else { continue };
+                    // --sit-chain-learn: which hop-2 classes to follow after this hop-1 relation (None: all of them)
+                    let allow: Option<Vec<u32>> = if self.cfg.chain_learn {
+                        let rk = c1 ^ (key1 & 0x4000_0000);
+                        let explore = hash(self.t, (j as u64) << 8 | r1 as u64 | 0x6161_0000) & 15 == 0;
+                        let seen = {
+                            let mut cs = self.chain_seen.borrow_mut();
+                            let n = cs.entry(rk).or_insert(0);
+                            *n = n.saturating_add(1);
+                            *n
+                        };
+                        match self.chain_tab.get(&rk) {
+                            Some(row) if seen >= 32 && !explore => {
+                                let mut r: Vec<(u32, u32)> = row.iter().filter(|x| x.1 > 0).copied().collect();
+                                r.sort_by(|a, b| b.1.cmp(&a.1));
+                                Some(r.iter().take(2).map(|x| x.0).collect())
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+
                     // hop 2's options: (which 0) each head's value now; (which 1) its value as of hop 1's time
                     let mut opts: Vec<(u64, u32, u64, u32, u32)> = vec![]; // (which, value, its time, path, class)
                     for &(key2, k2, val2, t2, c2) in hs2 {
+                        if allow.as_ref().map_or(false, |a| !a.contains(&c2)) {
+                            continue;
+                        }
                         if val2 == e || cue.contains(&val2) || self.ksize.get(&self.kk(val2)).copied().unwrap_or(0) < 3 {
                             continue;
                         }
@@ -2822,6 +2855,29 @@ impl Situation {
         }
     }
     fn query_learn(&mut self, w: u32) {
+        if self.cfg.chain_learn {
+            // the best-ranked route holding the next word: if a chain, count its hop-2 class in its hop-1 relation's row
+            if let Some(b) = self.qcands.iter().position(|x| x.1 == w) {
+                let k1 = self.qkey1.get(b).copied().unwrap_or(u32::MAX);
+                if k1 != u32::MAX {
+                    if let Some(h) = self.qhops.get(b) {
+                        let (rk, c2) = (h.0 ^ (k1 & 0x4000_0000), h.2);
+                        let row = self.chain_tab.entry(rk).or_default();
+                        if let Some(x) = row.iter_mut().find(|x| x.0 == c2) {
+                            x.1 = x.1.saturating_add(1);
+                        } else if let Some(x) = row.iter_mut().find(|x| x.1 == 0) {
+                            *x = (c2, 1);
+                        } else if row.len() < 4 {
+                            row.push((c2, 1));
+                        } else {
+                            for x in row.iter_mut() {
+                                x.1 -= 1; // Misra-Gries: a new class wears down every count by one
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let cands = std::mem::take(&mut self.qcands);
         let q = std::mem::take(&mut self.qbits);
         let hops = std::mem::take(&mut self.qhops);
