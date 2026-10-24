@@ -238,6 +238,11 @@ pub struct SitCfg {
     /// that, only if a route through a long-term head or range of that path has answered a question right (the
     /// next word after a learned question boundary). Relations that never help answer stop being stored. 0 = off.
     pub lt_credit: u32,
+    pub lt_budget: usize,
+    /// (lt_budget) One rule for keeping long-term heads, in place of --sit-lt-min and --sit-lt-credit: every content binding
+    /// enters, the store holds at most this many heads, and when full it evicts by a clock hand. Each head carries a
+    /// small tag: 1 when written, one more each time it is rewritten; a pass of the hand halves it (takes one off for
+    /// a path that has answered a question right) and evicts a head whose tag is 0. 0: off.
     /// Working memory forgets its bookkeeping too: every horizon/2 words, slots not written for `wm_horizon`
     /// words are dropped from the slot tables (their live kinds, write times, write logs, the entity's class
     /// lists), long after their drifting keys have made them unreadable. 0 = keep all.
@@ -280,6 +285,9 @@ pub struct SitCfg {
     pub sense_new: f64,
     pub kinds: bool,
     pub mood: bool,
+    /// An answering floor for the question detector (see `is_q`); its counters then learn only from answers given
+    /// in question mode.
+    pub mood_floor: bool,
     /// The mood counter credits memory only beyond local statistics: it moves only when the boundary word's most
     /// frequent successor (a bigram count) would have missed the next word; then up if the store predicted it, down
     /// (half the time) if not. After "?" the answer is retrieval; after "apple" the "." is just the bigram.
@@ -711,6 +719,9 @@ pub struct Situation {
     qroute: Vec<(usize, u32)>,                      // each route's (cue position, cue word's kind), aligned with qcands
     qsrc: Vec<(u8, u32)>,                           // each route's source (0 slot, 1 head, 2 range) and path key
     key_credit: HashMap<u32, u32>,                  // --sit-lt-credit: path key -> questions answered through it
+    lt_tag: HashMap<(u32, u32, u32), u8>,           // --sit-lt-budget: a head's tag
+    lt_ring: std::collections::VecDeque<(u32, u32, u32)>, // --sit-lt-budget: the clock's ring of heads
+    pub lt_evicted: u64,
     key_writes: HashMap<u32, u32>,                  // --sit-lt-credit: path key -> bindings stored for it
     qbits: Vec<u32>,                                // the query code of the current prediction
     qcands: Vec<(Vec<u32>, u32, i64)>,             // its routes: (features, value, score), best first
@@ -877,6 +888,9 @@ impl Situation {
             qroute: vec![],
             qsrc: vec![],
             key_credit: HashMap::default(),
+            lt_tag: HashMap::default(),
+            lt_ring: std::collections::VecDeque::new(),
+            lt_evicted: 0,
             key_writes: HashMap::default(),
             qbits: vec![],
             qcands: vec![],
@@ -1433,6 +1447,15 @@ impl Situation {
                 let l = self.heads_of.entry(e).or_default();
                 ent.3 = l.len() as u32;
                 l.push((key, k, ent.0, ent.1, ent.2));
+            }
+            if self.cfg.lt_budget > 0 {
+                // the clock follows the heads that remain; a head new under its key starts at tag 1
+                let tags = std::mem::take(&mut self.lt_tag);
+                self.lt_ring.clear();
+                for &k in self.heads_tab.keys() {
+                    self.lt_tag.insert(k, tags.get(&k).copied().unwrap_or(1));
+                    self.lt_ring.push_back(k);
+                }
             }
         }
         let stamp = std::mem::take(&mut self.stamp);
@@ -2347,7 +2370,7 @@ impl Situation {
         let mut memo: HashMap<(usize, u32, u32, u32), i64> = HashMap::default();
         let mut qroute: Vec<(usize, u32)> = vec![];
         let mut csrc: Vec<(u8, u32)> = vec![];
-        self.after_q = self.hist.last().map_or(false, |&u| self.boundary[u as usize] && self.mood[u as usize] >= 8);
+        self.after_q = self.hist.last().map_or(false, |&u| self.is_q(u));
         if self.cfg.sq_max > 0 && self.cfg.sq_mode > 0 && self.after_q {
             if self.qring.len() < 32 {
                 self.qring.push(q.clone());
@@ -2550,7 +2573,7 @@ impl Situation {
         let ranks = std::mem::take(&mut self.qranks);
         let qroute = std::mem::take(&mut self.qroute);
         let qsrc = std::mem::take(&mut self.qsrc);
-        if self.cfg.lt_credit > 0 && self.after_q {
+        if (self.cfg.lt_credit > 0 || self.cfg.lt_budget > 0) && self.after_q {
             // credit the path behind the best-ranked long-term route that held the answer
             if let Some(i) = cands.iter().position(|x| x.1 == w) {
                 if let Some(&(src, key)) = qsrc.get(i) {
@@ -3064,7 +3087,7 @@ impl Situation {
         if self.cfg.query {
             let mut props = self.query_recall(&cue);
             let mut given: Option<Vec<(u32, u32)>> = None; // what is answered, when it differs from props
-            let at_q = self.hist.last().map_or(false, |&u| self.boundary[u as usize] && self.mood[u as usize] >= 8);
+            let at_q = self.hist.last().map_or(false, |&u| self.is_q(u));
             if self.cfg.curious {
                 // does memory know? answers like this one (form, margin bucket) right often enough
                 let (num, den) = (self.cfg.curious_num as u64, self.cfg.curious_den as u64);
@@ -3344,7 +3367,13 @@ impl Situation {
     }
     /// Whether the next word answers a question: the last word is a learned question boundary.
     pub fn at_question(&self) -> bool {
-        self.hist.last().map_or(false, |&u| self.boundary[u as usize] && self.mood[u as usize] >= 8)
+        self.hist.last().map_or(false, |&u| self.is_q(u))
+    }
+    /// Whether boundary u is treated as closing a question now: its mood counter at 8 or more, or with
+    /// --sit-mood-floor one time in 16 for any boundary below that, so a detector that fell below threshold keeps
+    /// receiving evidence and can climb back (a counter that stops being tested cannot recover).
+    fn is_q(&self, u: u32) -> bool {
+        self.boundary[u as usize] && (self.mood[u as usize] >= 8 || self.cfg.mood_floor && hash(self.t, u as u64 + 999) & 15 == 0)
     }
     /// The time (words read).
     pub fn time(&self) -> u64 {
@@ -3613,7 +3642,9 @@ impl Situation {
         // (nor once skill is frozen: the question detector is part of the skill, so a run of wrong answers in a hard
         // test cannot switch answering off)
         if let Some(&u) = self.hist.last().filter(|_| !self.idx_only && self.t < self.cfg.freeze_from) {
-            if self.boundary[u as usize] {
+            // (with --sit-mood-floor, only answers given in question mode count: the detector is judged by how
+            // well answering works where it answers, and the floor keeps every boundary sampled)
+            if self.boundary[u as usize] && (!self.cfg.mood_floor || self.after_q) {
                 let ok = self.last.first().map(|x| x.1) == Some(w);
                 let trivial = self.cfg.mood2 && self.succ_top.get(&u).map_or(false, |t| t.0 == w);
                 let m = &mut self.mood[u as usize];
@@ -4018,6 +4049,43 @@ impl Situation {
         }
         self.anaphora_resolved += 1;
     }
+    /// The clock hand of --sit-lt-budget: the next head on the ring loses half its tag (one for a path that has
+    /// answered right), or is evicted at 0 with its history. Returns false when the ring is empty.
+    fn lt_evict_one(&mut self) -> bool {
+        while let Some(k) = self.lt_ring.pop_front() {
+            if !self.heads_tab.contains_key(&k) {
+                continue; // a head gone by re-pooling
+            }
+            let tg = self.lt_tag.get(&k).copied().unwrap_or(0);
+            if tg > 0 {
+                let credited = self.key_credit.get(&k.1).copied().unwrap_or(0) > 0;
+                self.lt_tag.insert(k, if credited { tg - 1 } else { tg >> 1 });
+                self.lt_ring.push_back(k);
+                continue;
+            }
+            let (_, _, _, idx) = self.heads_tab.remove(&k).unwrap();
+            if let Some(l) = self.heads_of.get_mut(&k.0) {
+                let idx = idx as usize;
+                if idx < l.len() {
+                    l.swap_remove(idx);
+                    if idx < l.len() {
+                        let m = l[idx];
+                        if let Some(ent) = self.heads_tab.get_mut(&(k.0, m.0, m.1)) {
+                            ent.3 = idx as u32;
+                        }
+                    }
+                }
+                if l.is_empty() {
+                    self.heads_of.remove(&k.0);
+                }
+            }
+            self.posts.remove(&k);
+            self.lt_tag.remove(&k);
+            self.lt_evicted += 1;
+            return true;
+        }
+        false
+    }
     fn commit(&mut self) {
         let buf = std::mem::take(&mut self.buf);
         let bufp = std::mem::take(&mut self.bufp);
@@ -4053,7 +4121,10 @@ impl Situation {
             // multiply with every distinct clause tail and only grow the lists every lookup walks
             let content_val = !self.fm(5) || kd == self.kn || self.ksize.get(&kd).copied().unwrap_or(0) >= 3;
             let mut recurring = true;
-            if self.cfg.lt_min > 0 && self.cfg.heads && c < COMP && content_val && self.ksize.get(&self.kk(x)).copied().unwrap_or(0) < 3 {
+            if self.cfg.lt_budget > 0 {
+                // the budget decides what stays; only facts about content words (a kind of 3 or more) enter
+                recurring = !(self.cfg.heads && c < COMP && content_val && self.ksize.get(&self.kk(x)).copied().unwrap_or(0) < 3);
+            } else if self.cfg.lt_min > 0 && self.cfg.heads && c < COMP && content_val && self.ksize.get(&self.kk(x)).copied().unwrap_or(0) < 3 {
                 recurring = false; // long-term facts are about content words (a kind of 3 or more)
             } else if self.cfg.lt_min > 0 && self.cfg.heads && c < COMP && content_val {
                 // count the path in the sketch; a relation is long-term once it recurs
@@ -4066,7 +4137,7 @@ impl Situation {
                 }
                 recurring = m as u32 >= self.cfg.lt_min;
             }
-            if recurring && self.cfg.lt_credit > 0 && self.cfg.heads && c < COMP && content_val {
+            if recurring && self.cfg.lt_budget == 0 && self.cfg.lt_credit > 0 && self.cfg.heads && c < COMP && content_val {
                 // kept by credit: a path's first lt_credit bindings, then only if it has helped answer
                 let key = if self.cfg.heads_path { bufp.get(bi).copied().unwrap_or(c) | 0x8000_0000 } else { c };
                 if self.key_credit.get(&key).copied().unwrap_or(0) == 0 {
@@ -4082,7 +4153,16 @@ impl Situation {
                 if let Some(ent) = self.heads_tab.get_mut(&(x, key, hk)) {
                     (ent.0, ent.1, ent.2) = (v, now, c);
                     self.heads_of.get_mut(&x).unwrap()[ent.3 as usize] = (key, hk, v, now, c);
+                    if self.cfg.lt_budget > 0 {
+                        let tg = self.lt_tag.entry((x, key, hk)).or_insert(0);
+                        *tg = (*tg + 1).min(15);
+                    }
                 } else {
+                    if self.cfg.lt_budget > 0 {
+                        while self.heads_tab.len() >= self.cfg.lt_budget && self.lt_evict_one() {}
+                        self.lt_tag.insert((x, key, hk), 1);
+                        self.lt_ring.push_back((x, key, hk));
+                    }
                     let l = self.heads_of.entry(x).or_default();
                     self.heads_tab.insert((x, key, hk), (v, now, c, l.len() as u32));
                     l.push((key, hk, v, now, c));
