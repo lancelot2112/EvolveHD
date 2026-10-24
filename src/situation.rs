@@ -215,6 +215,9 @@ pub struct SitCfg {
     /// hop-2 relation classes whose chains held the next word (Misra-Gries counts, 4 per row). Hop 2 then offers only
     /// v1's heads in the row's top 2 classes; a 1-in-16 hash coin, or a row seen fewer than 32 times, offers all.
     pub chain_learn: bool,
+    /// (with --sit-chain-learn) the table's hop-2 entries are value kinds, not relation classes: follow every head of
+    /// v1 whose value is of a kind that has answered after this hop-1 relation
+    pub chain_learn_kind: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
     /// words' frame bits) gets `lsh_bands` MinHash bands of `lsh_rows` rows each (the least hash of its bits per
     /// row), and two paths share a class when a band collides. A new path costs bands x rows hashes over its bits,
@@ -2699,7 +2702,7 @@ impl Situation {
                     // hop 2's options: (which 0) each head's value now; (which 1) its value as of hop 1's time
                     let mut opts: Vec<(u64, u32, u64, u32, u32)> = vec![]; // (which, value, its time, path, class)
                     for &(key2, k2, val2, t2, c2) in hs2 {
-                        if allow.as_ref().map_or(false, |a| !a.contains(&c2)) {
+                        if allow.as_ref().map_or(false, |a| !a.contains(&if self.cfg.chain_learn_kind { self.kk(val2) } else { c2 })) {
                             continue;
                         }
                         if val2 == e || cue.contains(&val2) || self.ksize.get(&self.kk(val2)).copied().unwrap_or(0) < 3 {
@@ -2861,7 +2864,7 @@ impl Situation {
                 let k1 = self.qkey1.get(b).copied().unwrap_or(u32::MAX);
                 if k1 != u32::MAX {
                     if let Some(h) = self.qhops.get(b) {
-                        let (rk, c2) = (h.0 ^ (k1 & 0x4000_0000), h.2);
+                        let (rk, c2) = (h.0 ^ (k1 & 0x4000_0000), if self.cfg.chain_learn_kind { h.3 } else { h.2 });
                         let row = self.chain_tab.entry(rk).or_default();
                         if let Some(x) = row.iter_mut().find(|x| x.0 == c2) {
                             x.1 = x.1.saturating_add(1);
