@@ -1,6 +1,6 @@
 # 41 · Forum round six, first tests: a halving sketch, split boundary roles, boundaries judged by use, a per-entity cap, a contrast detector (2026-10-24)
 
-*[All experiments](README.md)* · [← 40](40-standard-set-and-qa2.md)
+*[All experiments](README.md)* · [← 40](40-standard-set-and-qa2.md) · [42 →](42-credit-from-the-level-above.md)
 
 Forum round six reviewed the equations against the code. It proposed an ordered next iteration, E0 to E6 (project doc `claude/forum-round-six.md`). This experiment runs the first three steps.
 
