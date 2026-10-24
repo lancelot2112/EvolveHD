@@ -6,7 +6,7 @@
 - One chain rule for every level of nesting.
 - Word kinds from an area of matchers with contested anti-Hebbian and sticky membership.
 - Together they answer 96–100% of found questions about a book read by the index pass, three levels deep and up to a million words back (single seed).
-- On BABILong the area matches leader clustering at 2.6× the speed.
+- On BABILong at 16k the area matches leader clustering at 2.6× the speed; at 64k it is one document of 8 short.
 - A clause type cannot come from its first word's kind: "part" and "volume" share one.
 - Level 0's boundary rule is still its own statistic.
 
@@ -16,11 +16,11 @@ The owner asked for the forum's generalizations, made practical: a self-similar 
 - **inhibition:** the firing matchers compete and one wins;
 - **Hebbian swap:** the winner moves toward the input; with anti-Hebbian swaps, a loser that fired moves away, which pulls apart patterns that overlap.
 
-Forum round five (project doc `claude/forum-round-five.md`) reduced the reader's hand-written map to four primitives. This page works on two of them:
-- the recurrence operator over the structure levels (units, nesting, epochs);
-- the classifier at each level (word kinds now; clause types read from them).
+Forum round five (project doc `claude/forum-round-five.md`) reduced the reader's hand-written map to four primitives. This page works on:
+- the forum's second primitive, the recurrence operator over the structure levels (units, nesting, epochs);
+- the superoptimizer's overlap-clustering primitive, as the classifier at each level (word kinds now; clause types read from them), built from the owner's matcher rules.
 
-It also tests one level-0 boundary statistic offline.
+It also tests the first primitive, a frequency-free boundary statistic, offline at level 0.
 
 All runs use experiment 37's configuration (`runs/exp37/F.flags`), seed 0 and one seed throughout. Runs shared 2 cores.
 
@@ -28,7 +28,7 @@ All runs use experiment 37's configuration (`runs/exp37/F.flags`), seed 0 and on
 
 | Flag or tool | What it does |
 |---|---|
-| `--sit-levels` | One rule for nesting at any depth. The question's labels are ordered by the level of their types: the log2 of the mean recurrence interval, counting the open interval up to now. From each label as the root (its first and latest occurrence, in its type's current epoch), a chain descends. Each lower label's first occurrence inside the current unit narrows the unit to its own ("chapter twelve" in "part three" in "volume two"). Every depth is an anchor of its own (up to 8), and route credit picks how deep to trust. It replaces the pairs of `--sit-nest`. |
+| `--sit-levels` | One rule for nesting at any depth. The question's labels are ordered by the level of their types: the log2 of the mean recurrence interval, counting the open interval up to now. From each label as the root (its first and latest occurrence, in its type's current epoch), a chain descends. Each lower label's first occurrence inside the current unit narrows the unit to its own ("chapter twelve" in "part three" in "volume two"). Every depth is an anchor of its own (the newest 8 nested anchors are kept, over all chains), and route credit picks how deep to trust. It replaces the pairs of `--sit-nest`. |
 | `src/area.rs`, `--sit-area-kinds` | Word kinds from an area of matchers instead of leader clustering. Masks are over the 512-bit kind code. A matcher fires at Jaccard ≥ 2/5 (by cross-multiplication); the best overlap wins. The winner takes a Hebbian swap (one mask bit the input lacks out, one input bit the mask lacks in). With no firing matcher, one is recruited with the input as its mask, named by the word that recruited it. Candidates come from an inverted index read only at the input's rarest bits (prefix filtering): no scan. Words are presented only when their counts changed since the last presentation. |
 | `--sit-area-anti 1/2/3` | Anti-Hebbian swaps for matchers that fired but lost. 1: a shared bit out, a random bit outside the input in. 2: one contested bit out (held by the input, the winner and the loser), down to half the mask's first size. 3: as 2, but only in a near-tie (the loser's Jaccard at least 3/4 of the winner's). |
 | `--sit-area-sticky` | An item's incumbent matcher keeps it while it still fires, and a matcher swaps one time in 2^(bitlen(wins)/2), so established kinds hold still. |
@@ -45,8 +45,8 @@ The forum's first primitive was boundaries by surprise. A frequency-free version
 - **Plug-in conditional entropy** (contexts with 8 or more uses).
     - **Synthetic book:** exactly "." and "?" stand out. Across "." the side before keeps 97–98% of the uncertainty about the side after; across "?", 72–74%. No other word is that open on both sides.
     - **BABILong:** it does not separate them. The share kept is 0.60/0.63 for ".", 0.49/0.65 for ",", 0.41/0.69 for "of", 0.59/0.62 for "that" and 0.71/0.58 for "was".
-- **A prequential estimate** (counts before each event, interpolated): the smoothing made gains negative for most words; unusable as it stands.
-- **The sides seen as classes** (the 255 most frequent words, and "rare"): "." is not among the 60 most open words, because most words before "." are rare.
+- **A prequential estimate** (counts before each event, interpolated): on BABILong the smoothing made gains negative for most words (1,062 of 1,458 with 16 or more uses; 22 of 97 on the synthetic book); unusable as it stands.
+- **The sides seen as classes** (the 255 most frequent words, and "rare"): "." ranks 103rd of 445 words by openness. Over a third (37%) of the words before it fall in the rare class.
 
 Level 0 keeps the both-sides-open rule with its sticky hysteresis (`--sit-bnd-hyst`): a boundary stays one while its own openness holds at least a quarter of its peak.
 
@@ -65,7 +65,9 @@ Level 0 keeps the both-sides-open rule with its sticky hysteresis (`--sit-bnd-hy
     - **Levels.** Headings that occurred before boundaries were learned were never stored, so "part" had one recorded start and level 0. Chains rooted at the chapter and never at the part.
     - **Depth.** Chains descended past the right depth into answer clauses.
 - **The fixes:** the level counts the open interval up to now, and each depth is an anchor.
-- **The 512k+ facts are all in volume one.** Its heading at word 0 came before any boundary was learned, so no chain can start there.
+- **258 of the 275 facts at 512k+ are in volume one.** Its heading at word 0 came before any boundary was learned, so no chain can start there.
+    - Chains get 18.2% of those and all 17 volume-two facts.
+    - Pairs get 16.7% and 64.7%.
 - **No loss on two levels:** on the 200k book every score is the same (`R_c2_base`, `R_c2_lev`: found 93.7% at 64k+, home 99.3%, owner 100%). The run took 302 s against 190 s.
 
 **Read then ask** (`ld2m_vv`).
@@ -101,7 +103,7 @@ Level 0 keeps the both-sides-open rule with its sticky hysteresis (`--sit-bnd-hy
     - no swaps at all: 96.0% (masks frozen at their first, immature codes split the people in two);
     - anti-Hebbian without Hebbian: 95.5%;
     - contested anti with `--sit-area-sticky`: 95.3%.
-- **The story set has about 50 words in about 30 kinds,** too few to crowd even 32 bits.
+- **The story set has 51 words in 21–23 kinds** (24–34 matchers), too few to crowd even 32 bits.
 
 **BABILong pilot** (`bl_pilot`, 308,702 words, vocabulary 19,018; training then a frozen, answer-only test; the stack of `R_blpF`):
 
@@ -111,7 +113,7 @@ Level 0 keeps the both-sides-open rule with its sticky hysteresis (`--sit-bnd-hy
 | 512, area, no anti | 0 / 0%\* | 84.0% | 228‰ / 154‰ | 7 (no hallway) | 71 s |
 | 512, area, contested | 100 / 100% | 95.5% | 156‰ / 112‰ | 14 | 66 s |
 | 512, area, near-tie | 100 / 98% | 95.0% | 172‰ / 107‰ | 7 | 65 s |
-| 512, area, contested, sticky | 100 / 100% | 99.0% | 148‰ / 112‰ | – | 68 s |
+| 512, area, contested, sticky | 100 / 100% | 99.0% | 148‰ / 112‰ | 57 | 68 s |
 | 128, leader | 100 / 94% | 95.0% | – | 191 | 123 s |
 | 128, area, no anti | 11 / 30% | 92.5% | 484‰ / 333‰ | 21 | 97 s |
 | 128, area, contested | 100 / 76% | 84.5% | 363‰ / 260‰ | 13 | 83 s |
@@ -127,8 +129,8 @@ Level 0 keeps the both-sides-open rule with its sticky hysteresis (`--sit-bnd-hy
     - co-firing is about 150–230‰ at 512 bits, 360–480‰ at 128 and 790–860‰ at 64;
     - anti-Hebbian lowers it at every width.
 - **Contested anti-Hebbian is the one rule that keeps the test at 100% at both 512 and 64 bits;** leader clustering falls to 64/60% at 64 bits. It does not hold everywhere: at 128 bits its 4k score is 76%, and training at 1k falls to about 85% at the narrow widths.
-- **It is self-gated by overlap:** it acts only when two matchers fire on one input, so its rate is the co-firing rate. A separate gate on near-ties (rule 3) was worse.
-- **Area kinds are purer:** the place kind holds 7–27 words against leader clustering's 149–295.
+- **It is self-gated by overlap:** it acts only when two matchers fire on one input, so its rate is the co-firing rate. A separate gate on near-ties (rule 3) was worse on BABILong (0/0% at 128 and 64 bits), though on the story set it beat rule 2 at 64 and 32 bits.
+- **Area kinds are purer:** the place kind holds 7–38 words (57 with sticky membership) against leader clustering's 149–295.
 - **At 512 bits the area is the fastest** (66 s against 112 s). At 64 bits, more matchers fire per input and it slows (148 s).
 
 **BABILong long test** (`bl_long`: 30 qa1 documents at 16k, about 13k words each, and 8 at 64k, about 51k words; frozen, answer-only):
@@ -141,7 +143,8 @@ Level 0 keeps the both-sides-open rule with its sticky hysteresis (`--sit-bnd-hy
 
 - **Without sticky, kinds drifted during the frozen test.**
     - The area keeps learning, so words moved between matchers.
-    - Route skill trained on kind ids stopped matching: the wrong answers are words like "the", "and" and "be", not other places.
+    - Route skill trained on kind ids stopped matching. 16 of the 17 wrong answers are non-places ("the", "be" and "and" three times each); one is another place.
+    - Function-word answers alone do not prove drift: leader clustering's 3 misses are "we", "at" and "in". Only the final kinds are logged.
 - **With sticky membership and win-scaled plasticity, 16k matches leader clustering** at 2.6× the speed. 64k is one document short (6 of 8 against 7 of 8).
 
 ## Clause type from the word level: failed
@@ -170,12 +173,12 @@ The chain rule with kinds from the sticky, contested area (`--sit-levels --sit-a
 | found, this volume, 64k–512k | 94.0% (565) | 94.5% | **99.8%** |
 | found, earlier volume, 64k–512k | 15.8% (355) | 94.6% | **99.2%** |
 | found, earlier volume, 512k+ | 13.9% (1,045) | 81.1% | **96.3%** |
-| home, 8k–64k / 64k–512k | – | 10.0% (20) / 0.0% (3) | **100% / 100%** |
-| owner, all | – | 100% (12) | 100% |
+| home, 8k–64k / 64k–512k | 65.0% (20) / 33.3% (3) | 10.0% (20) / 0.0% (3) | **100% / 100%** |
+| owner, all | 100% (12) | 100% (12) | 100% |
 | run time (both books) | 1,149 s | 1,155 s | 999 s |
 
 - **This is the best read-then-ask result so far,** on a book one level deeper than experiment 38's.
-- **Home without echoes is 100%** here, against 10% with leader kinds, but only on 24 questions. Owner has 12 questions.
+- **Home without echoes is 100%** here (24 questions). With leader kinds, chains do worse on home than pairs (10% against 65% at 8k–64k, 20 questions). Owner has 12 questions.
 - **One seed.**
 
 ## Open
@@ -191,3 +194,4 @@ The chain rule with kinds from the sticky, contested area (`--sit-levels --sit-a
 - **One seed throughout.** Small test samples on BABILong: 100, 50, 30 and 8 documents.
 - **Story-set differences of 1–2 points are within what one seed can show.**
 - **Runs shared 2 cores,** so compare times only within a table.
+- **The book runs do not use `--sit-bnd-hyst`;** only the BABILong runs do (the stack of `R_blpF`).
