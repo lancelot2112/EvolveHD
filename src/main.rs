@@ -85,6 +85,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         q_contrast: flag(args, "--sit-q-contrast"),
         chain_learn_q: flag(args, "--sit-chain-learn-q"),
         bnd_unit: flag(args, "--sit-bnd-unit"),
+        bnd_unit_len: flag(args, "--sit-bnd-unit-len"),
         q_contain: flag(args, "--sit-q-contain"),
         q_in_l: flag(args, "--sit-q-in-l"),
         lt_min: arg(args, "--sit-lt-min").map(|s| s.parse().unwrap()).unwrap_or(0),

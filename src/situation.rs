@@ -241,6 +241,8 @@ pub struct SitCfg {
     /// Drop a clause that contains a learned boundary which is also a question word (not only one that ends in it),
     /// and take a dropped question's words out of the binding walk's window.
     pub q_contain: bool,
+    /// (with --sit-bnd-unit) a clause's hit is weighted by the words it covers
+    pub bnd_unit_len: bool,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -2885,7 +2887,9 @@ impl Situation {
         if e[0] != v {
             *e = [v, e[0]];
         }
-        hit
+        // --sit-bnd-unit-len: a hit counts the words its clause covers, so two short fragments do not outvote one
+        // whole clause on the same words
+        if self.cfg.bnd_unit_len { hit * ws.len() as u32 } else { hit }
     }
     /// --sit-bnd-unit: called with each word read (and whether the reader's top proposal missed it). At a binding
     /// stop the current clause closes; the stop that opened it and the proposed words crossed inside it are judged
