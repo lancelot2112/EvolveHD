@@ -215,6 +215,10 @@ pub struct SitCfg {
     /// that, only if a route through a long-term head or range of that path has answered a question right (the
     /// next word after a learned question boundary). Relations that never help answer stop being stored. 0 = off.
     pub lt_credit: u32,
+    /// Working memory forgets its bookkeeping too: every horizon/2 words, slots not written for `wm_horizon`
+    /// words are dropped from the slot tables (their live kinds, write times, write logs, the entity's class
+    /// lists), long after their drifting keys have made them unreadable. 0 = keep all.
+    pub wm_horizon: u64,
     pub vlsh_band: usize, // positions per band (default 4)
     pub vlsh_hits: usize, // bands a value must match to be a candidate (default 1)
     pub lsh_bands: usize,
@@ -2903,6 +2907,32 @@ impl Situation {
     fn live(&self, e: u32, c: u32, kd: u32) -> bool {
         !self.cfg.kinds || self.occ.get(&(e, c)).map(|v| v.contains(&kd)).unwrap_or(false)
     }
+    /// --sit-wm-horizon: drop the bookkeeping of slots not written for the horizon.
+    fn wm_forget(&mut self) {
+        let cut = self.t.saturating_sub(self.cfg.wm_horizon);
+        let old: Vec<(u32, u32, u32)> = self.stamp.iter().filter(|(_, &t)| t < cut).map(|(&k, _)| k).collect();
+        for &(e, c, k) in &old {
+            self.stamp.remove(&(e, c, k));
+            self.slot_log.remove(&(e, c, k));
+            if let Some(ks) = self.occ.get_mut(&(e, c)) {
+                ks.retain(|&x| x != k);
+                if ks.is_empty() {
+                    self.occ.remove(&(e, c));
+                }
+            }
+        }
+        let occ = &self.occ;
+        for ((e, _), cs) in self.dcl.iter_mut() {
+            cs.retain(|&c| occ.contains_key(&(*e, c)));
+        }
+        self.dcl.retain(|_, cs| !cs.is_empty());
+        let stamp = &self.stamp;
+        for (e, l) in self.recent_slots.iter_mut() {
+            l.retain(|&(c, k)| stamp.contains_key(&(*e, c, k)));
+        }
+        self.recent_slots.retain(|_, l| !l.is_empty());
+        self.rcache.get_mut().clear();
+    }
     fn stamp_of(&self, e: u32, c: u32, kd: u32) -> u64 {
         self.stamp.get(&(e, c, kd)).copied().unwrap_or(0)
     }
@@ -3737,6 +3767,9 @@ impl Situation {
             }
         }
         self.t += 1;
+        if self.cfg.wm_horizon > 0 && self.t % (self.cfg.wm_horizon / 2).max(1) == 0 {
+            self.wm_forget();
+        }
         if self.cfg.sq_max > 0 {
             self.sq_open_sum += self.sq.len() as u64;
             self.sq_peak = self.sq_peak.max(self.sq.len());
