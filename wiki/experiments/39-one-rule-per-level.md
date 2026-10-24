@@ -136,6 +136,23 @@ Level 0 keeps the both-sides-open rule with its sticky hysteresis (`--sit-bnd-hy
     - Route skill trained on kind ids stopped matching: the wrong answers are words like "the", "and" and "be", not other places.
 - **With sticky membership and win-scaled plasticity, 16k matches leader clustering** at 2.6× the speed. 64k is one document short (6 of 8 against 7 of 8).
 
+## Clause type from the word level: failed
+
+`--sit-open-kind` reads a clause's type from the kind of its first word, so the level above uses the level below's classes. On the three-level read then ask (`ld2m_vv`, with chains):
+
+| Book B, found | Chains, type = first word (`R_vv_lev`) | Type = leader kind (`R_vv_ok`) | Type = area kind (`R_vv_self`) | Type = sticky area kind (`R_vv_selfs`) |
+|---|---|---|---|---|
+| this volume, 64k–512k | 94.5% | 30.4% | 22.7% | 99.8% |
+| earlier volume, 64k–512k | 94.6% | 21.7% | 7.9% | 10.1% |
+| earlier volume, 512k+ | 81.1% | 13.8% | 10.0% | 10.1% |
+
+- **Why it fails:** in every kind rule, "part" and "volume" share a kind, because both are followed by a number word and ".". Their clauses then have one type.
+    - A part's unit runs to the next part or volume heading.
+    - A volume's own units and level are lost.
+    - Leader clustering also merged "scene" with "where".
+- **What a clause type needs:** something the word's distribution does not hold, which here is the word itself. The first word stays the clause type.
+- **The sticky area's 99.8% on the current volume** suggests its kinds are otherwise steadier. One seed.
+
 ## Open
 
 - **Level 0's boundary rule** is still its own statistic.
