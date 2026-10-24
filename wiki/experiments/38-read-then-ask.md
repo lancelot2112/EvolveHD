@@ -189,6 +189,48 @@ Route logging (`SIT_QDBG_FROM`) on the read-then-ask run explains the missing ho
   - Found: unchanged (79.0 / 87.6 / 92.2%).
   - Owner: still 14% (7 questions), with its answer among the candidates: a ranking failure.
 
+## A slow, compressive memory
+
+**The long-term tier was not compressive.** It was an exact, append-only index: every binding got a head and a history entry, and nothing decided what was worth keeping. On book text almost every path is new, so by word 300k it held 1.75M heads and 2.97M history entries. The layers below make what is stored earn its place. All are integer and of fixed or bounded size.
+
+| Flag | What it does |
+|---|---|
+| `--sit-lt-min 4` | A binding enters the long-term tier only when its entity is a content word (a kind of 3 or more) and its exact path has been seen at least 4 times. Paths are counted in a fixed 512 KB count-min sketch (4 rows of 2^16 16-bit counters, the minimum of the four). |
+| `--sit-lt-credit 64` | A path keeps entering it after its first 64 bindings only if a route through one of its heads or ranges has answered a question right (credited by the next word after a learned question boundary). |
+| `--sit-wm-horizon 4096` | Working memory drops the bookkeeping of slots not written for 4,096 words: their live kinds, write times, write logs and the entity's class lists. |
+| `--sit-path-forget 2` | Each re-pooling of relation classes forgets paths seen only once, instead of re-hashing them. |
+| `--sit-path-min` | Paths are stored only once recurring. Story set 95.8% with N = 2; not used. |
+| `--sit-bnd-hyst` | A learned boundary stays one while its own openness holds (at least a quarter of its peak), so prose adds boundaries (", a and of") without erasing ". ?". |
+| freezing | `--sit-freeze-from` now freezes the question detector (mood counters) too. |
+
+**Story set, seed 0** (each row adds to the one before):
+
+| Stack | All |
+|---|---|
+| `--sit-skip --sit-lsh --sit-slotlog 16 --sit-recent 32 --sit-heads-nokind` | 94.0% |
+| + `--sit-bnd-hyst` | 94.0% |
+| + `--sit-lt-min 4` | 97.3% |
+| + `--sit-lt-credit 64` | 97.5% |
+| + `--sit-wm-horizon 4096` | 98.5% |
+| + `--sit-path-forget 2` | 97.7%, with 3,694 stored paths against 10,246 |
+
+**The BABILong pilot with the full stack.** The two middle columns use the stack without `--sit-path-forget`.
+
+| Pilot (`bl_pilot`) | Without `--sit-wm-horizon` (`R_blpH2`) | With `--sit-wm-horizon` (`R_blpW2`) | + `--sit-path-forget 2` (`R_blpF`) |
+|---|---|---|---|
+| training qa1 0k, learning on | 95.0% | 95.0% | 95.0% |
+| training qa1 1k (facts in about 1k words of book text), learning on | 96.0% | 97.0% | 96.0% |
+| **test qa1 0k, frozen, answer-only** | **100%** | **100%** | **100%** |
+| **test qa1 4k, frozen, answer-only** | **100%** | **98.0%** | **100%** |
+| run time | 1,875 s | 1,841 s | 803 s |
+
+- **Two things made the test work.**
+  - **The boundaries.** Before the fix, "." and "?" were lost, no question was detected, and the test scored 0% (`R_blpR`, `R_blpG`).
+  - **The frozen question detector.** In `R_blpH`, frozen route skill with an adapting detector answered only 19 of 50 qa1 4k questions before "?" stopped counting as a question (0%).
+- **Store size at word 300k:** 44k heads and 81k history entries, against 1.75M and 2.97M with no gating (`R_blpR`).
+- **The cheap read on book text** costs about 13 ms per word without `--sit-path-forget`; 66% of the time went to re-pooling (re-hashing all 955k paths) and 26% to hashing new paths. With it, about 5.5 ms.
+- **Small samples:** 100 and 50 test documents, one seed. The 4k documents are about 3,000 words each.
+
 ## Lost run
 
 The three-book read-then-ask (`ld3m_pqr`: A, B, then C) hit the 2-hour limit for background jobs and was stopped. It was not restarted, because `--sit-epoch` answers the same question more directly.
