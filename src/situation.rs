@@ -184,6 +184,21 @@ pub struct SitCfg {
     /// at its occurrences in the current epoch of its type when there are any, so "part three" means this book's
     /// part three, the newest context first.
     pub epoch: bool,
+    /// One rule for every level of nesting, any depth (with --sit-ranges --sit-nest): the question's labels are
+    /// ordered by the level of their types (the log2 recurrence interval, as in `roles`), and from each label as the
+    /// root (its first and its latest occurrence, in its type's current epoch with --sit-epoch) a chain descends: each
+    /// lower label's first occurrence inside the current unit narrows the unit to its own ("chapter twelve" in "part
+    /// three" in "volume two"). Replaces the pairs of `nest`; a chain's depth enters the route features.
+    pub levels: bool,
+    /// Kinds from an area of matchers (threshold, inhibition, Hebbian and anti-Hebbian swaps; see `area`) instead
+    /// of re-clustering every word from scratch: the same rule the clause level can use.
+    pub area_kinds: bool,
+    /// A clause's type (for units, epochs and anchors) is the kind of its first word, the word level's output,
+    /// instead of the word itself: the level above reads the level below's classes.
+    pub open_kind: bool,
+    /// The kind area's inhibited matchers also take anti-Hebbian swaps (off: on the story set they cost 1.1
+    /// points, 96.6% against 97.7%).
+    pub area_anti: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
     /// words' frame bits) gets `lsh_bands` MinHash bands of `lsh_rows` rows each (the least hash of its bits per
     /// row), and two paths share a class when a band collides. A new path costs bands x rows hashes over its bits,
@@ -725,6 +740,8 @@ pub struct Situation {
     sq_next: u32,
     sq_pid: HashMap<((u32, u32), (u32, u32)), u32>, // a pattern's id, kept across closes (its derived class and weights)
     kmerge: HashMap<(u32, u32), u32>,               // slow merges: proposals in a row per pair of old kinds
+    kind_area: crate::area::Area,                   // --sit-area-kinds: the matchers that name the kinds
+    kpres: Vec<u64>,                                // --sit-area-kinds: a word's count when last presented
     pub sq_work: u64,                               // maintenance reads and writes
     pub sq_open_sum: u64,                           // open queries summed over words (for the mean)
     pub sq_peak: usize,                             // the most open at once
@@ -888,6 +905,12 @@ impl Situation {
             sq_next: 0,
             sq_pid: HashMap::default(),
             kmerge: HashMap::default(),
+            kind_area: {
+                let mut a = crate::area::Area::new(2);
+                a.anti = cfg.area_anti;
+                a
+            },
+            kpres: vec![0; nw],
             sq_work: 0,
             sq_open_sum: 0,
             sq_peak: 0,
@@ -1412,7 +1435,11 @@ impl Situation {
             cs.retain(|c| *c >= COMP || map.get(c) == Some(c));
         }
         if self.cfg.kinds {
-            self.recluster_kinds();
+            if self.cfg.area_kinds {
+                self.area_kinds();
+            } else {
+                self.recluster_kinds();
+            }
         }
     }
 
@@ -1619,18 +1646,36 @@ impl Situation {
                 newk[w as usize] = name;
             }
         }
+        if std::env::var("SIT_KDBG").is_ok() {
+            let mut g: Vec<String> = leaders.iter().filter(|l| l.2.len() >= 2).map(|l| format!("{:?}", l.2)).collect();
+            g.sort();
+            eprintln!("KDBG {} kinds of 2+: {}", self.t, g.join(" "));
+        }
         self.kind = newk;
+        self.finish_kinds();
+    }
+    /// An area of matchers in place of leader clustering (--sit-area-kinds): the words whose context codes changed
+    /// since the last presentation (all, the first time), most frequent first; a word's kind is the name of the
+    /// matcher that wins it. The matchers persist and learn by bit swaps, so kinds keep their names by themselves.
+    fn area_kinds(&mut self) {
+        let mut order: Vec<u32> = (0..self.nw as u32).filter(|&w| self.wcount[w as usize] > 0 && self.wcount[w as usize] != self.kpres[w as usize]).collect();
+        order.sort_by(|a, b| self.wcount[*b as usize].cmp(&self.wcount[*a as usize]).then(a.cmp(b)));
+        for &w in &order {
+            let c = self.kind_code(w);
+            let salt = hash(self.t, w as u64);
+            let name = self.kind_area.present(&c, w, salt);
+            self.kind[w as usize] = name;
+            self.kpres[w as usize] = self.wcount[w as usize];
+        }
+        self.finish_kinds();
+    }
+    fn finish_kinds(&mut self) {
         if self.fm(0) {
             self.members.clear();
             for &w in &self.words {
                 self.members.entry(self.kind[w as usize]).or_default().push(w);
             }
             self.rcache.get_mut().clear();
-        }
-        if std::env::var("SIT_KDBG").is_ok() {
-            let mut g: Vec<String> = leaders.iter().filter(|l| l.2.len() >= 2).map(|l| format!("{:?}", l.2)).collect();
-            g.sort();
-            eprintln!("KDBG {} kinds of 2+: {}", self.t, g.join(" "));
         }
         self.ksize.clear();
         for w in 0..self.nw {
@@ -2387,9 +2432,9 @@ impl Situation {
                                 let mut f1 = self.route_feats(j, e, &[(c, k, rank as u32)]);
                                 f1.push(Self::fid(45, 1, 0)); // the source: a unit's range
                                 f1.push(Self::fid(46, which as u64, len as u64));
-                                let (fwf, ofwf) = (self.opener_feat(fw), if which == 2 { self.opener_feat(ofw) } else { 0 });
+                                let (fwf, ofwf) = (self.opener_feat(fw), if which >= 2 { self.opener_feat(ofw) } else { 0 });
                                 f1.push(Self::fid(48, fwf, 0)); // the opener type that addressed it
-                                if which == 2 {
+                                if which >= 2 {
                                     f1.push(Self::fid(50, ofwf, olen as u64)); // nested inside this outer type
                                 }
                                 f1.push(Self::fid(44, key as u64, 1));
@@ -2397,7 +2442,7 @@ impl Situation {
                                 if self.cfg.scope {
                                     // which occurrence addressed it, conjoined with the opener type
                                     f1.push(Self::fid(51, fwf, (which * 3 + orank) as u64));
-                                    if which == 2 {
+                                    if which >= 2 {
                                         // the outer type and its occurrence, with the inner type
                                         f1.push(Self::fid(52, (ofwf << 20) ^ fwf, orank as u64));
                                     }
@@ -3414,7 +3459,49 @@ impl Situation {
         out.truncate(6); // as without nesting
         // nested: an inner span's occurrence inside an outer span's unit (each outer at its first and latest start)
         let mut nested = vec![];
-        for &(oc, ofw, olen, _) in spans.iter().filter(|_| self.cfg.nest) {
+        if self.cfg.levels && self.cfg.nest {
+            // the same rule at every level: labels by the level of their types, outermost first; from each root a
+            // chain descends through every lower label found inside the current unit
+            let lev = |fw: u32| -> u64 {
+                let bl = |x: u64| 64 - x.leading_zeros() as u64;
+                self.opener_pos.get(&fw).map_or(0, |v| if v.len() < 2 { 0 } else { bl(v[v.len() - 1] - v[0]).saturating_sub(bl(v.len() as u64 - 1)) })
+            };
+            let mut order: Vec<usize> = (0..spans.len()).collect();
+            order.sort_by_key(|&i| (std::cmp::Reverse(lev(spans[i].1)), i));
+            for (oi, &r) in order.iter().enumerate() {
+                let (oc, rfw, rlen, _) = spans[r];
+                for (ai, &a) in [oc[0], *oc.last().unwrap()].iter().enumerate() {
+                    if ai == 1 && oc.len() == 1 {
+                        break;
+                    }
+                    let orank = if ai == 1 { 0 } else { (oc.len() - 1).min(2) as u32 };
+                    let (mut lo, mut hi) = (a, self.unit_end(rfw, a));
+                    let (mut depth, mut ifw, mut ilen) = (1u32, rfw, rlen);
+                    let mut used = vec![rfw];
+                    for &i in &order[oi + 1..] {
+                        let (_, fw, len, all) = spans[i];
+                        if used.contains(&fw) {
+                            continue;
+                        }
+                        let at = all.partition_point(|&x| x < lo);
+                        if let Some(&b) = all.get(at) {
+                            if b < hi {
+                                lo = b;
+                                hi = self.unit_end(fw, b).min(hi);
+                                depth += 1;
+                                ifw = fw;
+                                ilen = len;
+                                used.push(fw);
+                            }
+                        }
+                    }
+                    if depth >= 2 {
+                        nested.push((lo, hi, ifw, depth, ilen, rfw, rlen, orank));
+                    }
+                }
+            }
+        }
+        for &(oc, ofw, olen, _) in spans.iter().filter(|_| self.cfg.nest && !self.cfg.levels) {
             for &(_, ifw, ilen, ic) in &spans {
                 // the inner span is looked for inside the outer unit: all its occurrences, not just this epoch's
                 if std::ptr::eq(oc, ic) || ofw == ifw {
@@ -3776,7 +3863,9 @@ impl Situation {
                         ws.push(u);
                     }
                     ws.reverse();
-                    if let Some(&fw) = ws.first() {
+                    if let Some(&fw0) = ws.first() {
+                        // the clause's type: its first word, or with --sit-open-kind the kind the word area gives it
+                        let fw = if self.cfg.open_kind { self.kk(fw0) } else { fw0 };
                         let st = self.t.saturating_sub(ws.len() as u64);
                         let h = Self::text_hash(&ws);
                         self.ctext.entry(h).or_insert((vec![], fw)).0.push(st);

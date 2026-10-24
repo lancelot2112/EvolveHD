@@ -39,7 +39,10 @@ generator of their own):
 No echoes ("noecho"): every long-range fact is asked exactly once, at a delay after its (latest) statement drawn
 log-uniformly from 8 to 2^19 words (dropped if the book ends first), so no question can be answered from an earlier
 answer; questions still come only at the usual question points.
-usage: longdoc_gen.py WORDS OUT_PREFIX [seed] [shuffle] [parts=P] [chapters=C] [noq] [qend=N] [fresh]
+Three levels ("vols=V", with parts=P and chapters=C): V volumes ("volume N ."), each of P parts numbered from one
+again, each of C chapters numbered from one again; found is asked as "what did X find in chapter M of part N of
+volume V ?", so a part label recurs in every volume and only a chain of three units finds the chapter.
+usage: longdoc_gen.py WORDS OUT_PREFIX [seed] [shuffle] [parts=P] [chapters=C] [vols=V] [noq] [qend=N] [fresh]
        [pron=P] [mod=P] [syn=P]"""
 import sys, json, math, random
 
@@ -48,6 +51,8 @@ extra = sys.argv[4:]
 shuffle = "shuffle" in extra
 n_parts = next((int(x.split("=")[1]) for x in extra if x.startswith("parts=")), 0)
 per_part = next((int(x.split("=")[1]) for x in extra if x.startswith("chapters=")), 20)
+n_vols = next((int(x.split("=")[1]) for x in extra if x.startswith("vols=")), 0)
+assert not (n_vols and not n_parts), "vols needs parts"
 noq = "noq" in extra
 noecho = "noecho" in extra
 qend = next((int(x.split("=")[1]) for x in extra if x.startswith("qend=")), 0)
@@ -80,7 +85,8 @@ if "fresh" in extra:
     H_CH, H_PT = "section", "volume"
     vocab = vocab + names + places + objects + [H_CH, H_PT]
     SHE = set("alba cora elsa greta ines kira mila olga quinn rita tara vera yara".split())
-extra_words = (["he", "she"] if p_pron else []) + (MODS if p_mod else []) + (sum(SYN.values(), []) if p_syn else [])
+assert not (n_vols and "fresh" in extra), "vols and fresh both use volume"
+extra_words = (["volume"] if n_vols else []) + (["he", "she"] if p_pron else []) + (MODS if p_mod else []) + (sum(SYN.values(), []) if p_syn else [])
 vocab = vocab + extra_words
 ix = {w: i for i, w in enumerate(vocab)}
 assert len(ix) == len(vocab), "duplicate word in the vocabulary"
@@ -92,7 +98,7 @@ def number_words(k):
     t, u = divmod(k, 10)
     return [tens[t - 2]] + ([units[u - 1]] if u else [])
 
-n_chapters = 99 if n_parts == 0 else n_parts * per_part
+n_chapters = 99 if n_parts == 0 else n_parts * per_part * max(n_vols, 1)
 assert n_parts <= 99 and per_part <= 99
 perm = list(range(1, (n_chapters if n_parts == 0 else per_part) + 1))
 if shuffle:
@@ -119,6 +125,11 @@ def st(p, verb, *rest):
     say(*words, verb, *rest)
     last_subj[0] = p
     return at
+def where_words(pt, ch):
+    """the address of a chapter in a question: chapter M [of part N [of volume V]]"""
+    if not pt: return [H_CH, *number_words(ch)]
+    if isinstance(pt, tuple): return [H_CH, *number_words(ch), "of", H_PT, *number_words(pt[1]), "of", "volume", *number_words(pt[0])]
+    return [H_CH, *number_words(ch), "of", H_PT, *number_words(pt)]
 def ask(kind, fact_pos, *ws_and_answer):
     """the question words, then the answer word (recorded with its distance from the fact, -1 for local)"""
     *q, a = ws_and_answer
@@ -145,7 +156,7 @@ def qual_question():
     buckets = {}
     for k, (pr, t) in cands: buckets.setdefault(int(math.log2(pos - t)), []).append((k, pr, t))
     (m, o, pt, ch), pr, t = qrng.choice(buckets[qrng.choice(sorted(buckets))])
-    tail = [H_CH, *number_words(ch)] + ([ "of", H_PT, *number_words(pt)] if pt else [])
+    tail = where_words(pt, ch)
     ask("qual", t, "who", m, "found", "the", o, "in", *tail, "?", pr); say(".")
     return True
 def due_question():
@@ -157,8 +168,7 @@ def due_question():
     elif kind == "owner": ask("owner", owner[key][1], "who", "owns", "the", key, "?", owner[key][0])
     else:
         p, pt, ch = key; ob = found[key][0]
-        if pt == 0: ask("found", found[key][1], "what", "did", p, "find", "in", H_CH, *number_words(ch), "?", ob)
-        else: ask("found", found[key][1], "what", "did", p, "find", "in", H_CH, *number_words(ch), "of", H_PT, *number_words(pt), "?", ob)
+        ask("found", found[key][1], "what", "did", p, "find", "in", *where_words(pt, ch), "?", ob)
     say(".")
 def long_question(once=False):
     """a long-range question whose fact's distance is spread evenly over log2 buckets (once: each fact at most once)"""
@@ -181,18 +191,17 @@ def long_question(once=False):
         ask("owner", owner[key][1], "who", "owns", "the", key, "?", ans)
     else:
         p, pt, ch = key
-        if pt == 0:
-            ask("found", found[key][1], "what", "did", p, "find", "in", H_CH, *number_words(ch), "?", ans)
-        else:
-            ask("found", found[key][1], "what", "did", p, "find", "in", H_CH, *number_words(ch), "of", H_PT,
-                *number_words(pt), "?", ans)
+        ask("found", found[key][1], "what", "did", p, "find", "in", *where_words(pt, ch), "?", ans)
     say(".")
 
 units_list = [(0, c) for c in range(1, n_chapters + 1)] if n_parts == 0 else \
-    [(pt, c) for pt in range(1, n_parts + 1) for c in range(1, per_part + 1)]
+    [(pt, c) for pt in range(1, n_parts + 1) for c in range(1, per_part + 1)] if n_vols == 0 else \
+    [((v, pt), c) for v in range(1, n_vols + 1) for pt in range(1, n_parts + 1) for c in range(1, per_part + 1)]
 for pt, ch in units_list:
+    if isinstance(pt, tuple) and pt[1] == 1 and ch == 1:
+        say("volume", *number_words(pt[0]), ".")
     if pt and ch == 1:
-        say(H_PT, *number_words(pt), ".")
+        say(H_PT, *number_words(pt[1] if isinstance(pt, tuple) else pt), ".")
     say(H_CH, *number_words(perm[ch - 1]), ".")
     start = len(toks)
     while len(toks) - start < chapter_words:
@@ -258,7 +267,7 @@ import numpy as np
 np.array(toks, dtype=np.uint32).tofile(out + ".ids")
 open(out + ".txt", "w").write("\n".join(vocab))
 json.dump({"answers": answers, "dist": dist, "words": len(toks), "chapters": n_chapters, "chapter_words": chapter_words,
-           "shuffled_headings": shuffle, "parts": n_parts, "chapters_per_part": per_part,
+           "shuffled_headings": shuffle, "parts": n_parts, "chapters_per_part": per_part, "volumes": n_vols,
            "no_questions_in_text": noq, "questions_at_end": qend, "book_end": book_end, "headings": [H_CH, H_PT],
            "names": names, "places": places, "objects": objects}, open(out + ".info.json", "w"))
 from collections import Counter
