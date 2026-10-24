@@ -233,7 +233,7 @@ Route logging (`SIT_QDBG_FROM`) on the read-then-ask run explains the missing ho
 
 ## Packed kind codes and longer BABILong documents
 
-**The speed fix (exact).** Forum round five's superoptimizer found that about 97% of the 5.5 ms per word on book text was one search: the leader clustering of word kinds, run every 2,000 words. Every seen word was compared with every leader, each compare zipping two 512-entry `Vec<bool>` codes.
+**The speed fix (exact).** Forum round five's superoptimizer found that about 97% of the 5.5 ms per word on book text was one search: the leader clustering of word kinds, run every 2,000 words. Each seen word, most frequent first, was compared with the leaders in order until one matched, each compare zipping two 512-entry `Vec<bool>` codes; on book text rare words become singleton leaders, so the compares grow with vocabulary times leaders.
 
 - **The change:** kind codes are now `[u64; 8]` compared by popcount. The stand-in containment test uses the same packed codes. Kind naming uses a set instead of a list scan.
 - **Exactness:** on an 80k-word prefix of the stream, `.top` and `.rank` are byte-identical to the old binary (`eqcheck.sh`).
@@ -245,7 +245,7 @@ Route logging (`SIT_QDBG_FROM`) on the read-then-ask run explains the missing ho
 - **Setup:**
   - the same training prefix as the pilot (qa1 0k and 1k, learning on);
   - then 30 qa1 documents at 16k (about 13k words each) and 8 at 64k (about 51k words each), frozen and answer-only from word 156,952;
-  - the full stack of `R_blpF`, binary `sit-38y`.
+  - the flags of `R_blpF`, binary `sit-38y`. The training prefix is the pilot's word for word, but the vocabulary file is larger (33,473 entries against 19,017), and the counters and training scores differ slightly from `R_blpF` (95.2% and 97.5% against 95.0% and 96.0%), so this is not a repeat of the pilot's training.
 - **Results:**
 
 | Part | Top-1 |
@@ -256,13 +256,13 @@ Route logging (`SIT_QDBG_FROM`) on the read-then-ask run explains the missing ho
 | **test qa1 64k, frozen, answer-only** | **87.5% (7 of 8)** |
 
 - **Caveats:** one seed, with 30 and 8 test documents, so one document moves the 64k score by 12.5 points.
-- **The store is not compressive at this length.** Heads grow about linearly once the test starts:
+- **The store is not compressive at this length.** Heads grow faster and faster until about word 380k, then at a roughly steady 1.4–2.2 per word (1.7 per word from 400k to 940k):
   - 17k at word 240k;
   - 159k at 400k;
   - 568k at 640k;
-  - 1.09M at 940k (about 1.4 heads per word read in the test part).
+  - 1.09M at 940k (1.4 per word on average over the test part).
 - **Cost per word grows with it:** from 0.29 ms (word 240k) to 1.5 ms (word 940k).
-- **Likely cause (not yet checked):** the `--sit-lt-min` count-min sketch has 4 rows of 2^16 counters. With a 33k-word vocabulary and on the order of a million distinct paths, every counter passes 4, so one-off paths read as recurring. Each new path also gets its first 64 bindings under `--sit-lt-credit`.
+- **Likely cause (not yet checked):** the `--sit-lt-min` count-min sketch has 4 rows of 2^16 counters. With a 33k-word vocabulary and many distinct paths (not counted yet), the counters may all pass 4, so one-off paths read as recurring. Each new path also gets its first 64 bindings under `--sit-lt-credit`.
   - A sketch sized to the stream, or the forum's single importance rule with a fixed budget, should hold the store flat. That is the next thing to test.
 
 ## Lost run
