@@ -841,7 +841,7 @@ impl Situation {
             vcodes: vec![],
             slot_log: HashMap::default(),
             recent_slots: HashMap::default(),
-            path_sketch: if cfg.lt_min > 0 { vec![0; 4 << 16] } else { vec![] },
+            path_sketch: if cfg.lt_min > 0 || cfg.lt_budget > 0 { vec![0; 4 << 16] } else { vec![] },
             bnd_peak: HashMap::default(),
             path_seen: if cfg.path_min > 0 { vec![0; 4 << 16] } else { vec![] },
             rare_class: [u32::MAX; 2],
@@ -4120,9 +4120,22 @@ impl Situation {
             // multiply with every distinct clause tail and only grow the lists every lookup walks
             let content_val = !self.fm(5) || kd == self.kn || self.ksize.get(&kd).copied().unwrap_or(0) >= 3;
             let mut recurring = true;
+            let mut first_tag = 1u8;
             if self.cfg.lt_budget > 0 {
-                // the budget decides what stays; only facts about content words (a kind of 3 or more) enter
+                // the budget decides what stays; only facts about content words (a kind of 3 or more) enter, and a
+                // new head's tag starts at the bit length of its path's count (the sketch): recurring relations start
+                // strong, one-off paths weak
                 recurring = !(self.cfg.heads && c < COMP && content_val && self.ksize.get(&self.kk(x)).copied().unwrap_or(0) < 3);
+                if recurring && self.cfg.heads && c < COMP && content_val {
+                    let pk = bufp.get(bi).copied().unwrap_or(c) as u64;
+                    let mut m = u16::MAX;
+                    for r in 0..4u64 {
+                        let i = (r << 16 | hash(pk, r + 0x5C) & 0xFFFF) as usize;
+                        self.path_sketch[i] = self.path_sketch[i].saturating_add(1);
+                        m = m.min(self.path_sketch[i]);
+                    }
+                    first_tag = (16 - m.leading_zeros()).min(15) as u8;
+                }
             } else if self.cfg.lt_min > 0 && self.cfg.heads && c < COMP && content_val && self.ksize.get(&self.kk(x)).copied().unwrap_or(0) < 3 {
                 recurring = false; // long-term facts are about content words (a kind of 3 or more)
             } else if self.cfg.lt_min > 0 && self.cfg.heads && c < COMP && content_val {
@@ -4159,7 +4172,7 @@ impl Situation {
                 } else {
                     if self.cfg.lt_budget > 0 {
                         while self.heads_tab.len() >= self.cfg.lt_budget && self.lt_evict_one() {}
-                        self.lt_tag.insert((x, key, hk), 1);
+                        self.lt_tag.insert((x, key, hk), first_tag);
                         self.lt_ring.push_back((x, key, hk));
                     }
                     let l = self.heads_of.entry(x).or_default();
