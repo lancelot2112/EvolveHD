@@ -1,6 +1,6 @@
 # 39 · One rule at every level (2026-10-24)
 
-*[All experiments](README.md)* · [← 38](38-read-then-ask.md)
+*[All experiments](README.md)* · [← 38](38-read-then-ask.md) · [40 →](40-standard-set-and-qa2.md)
 
 **In short:**
 - One chain rule for every level of nesting.
