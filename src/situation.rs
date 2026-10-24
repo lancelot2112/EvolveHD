@@ -4352,8 +4352,16 @@ impl Situation {
                 break;
             }
         }
-        if self.boundary[w as usize] || self.buf.len() > 64 || self.cfg.q_contrast && self.is_q(w) {
-            let qdrop = if self.cfg.bind_indep || self.cfg.q_contrast { self.is_q(w) } else { self.boundary[w as usize] && self.mood[w as usize] >= 8 };
+        if self.boundary[w as usize] || self.buf.len() > 64 {
+            // with --sit-q-contrast a question clause is dropped only at a learned boundary that is also a question
+            // word: a Q word inside a clause ("the milk" before ".") must not throw away the clause's facts
+            let qdrop = if self.cfg.q_contrast {
+                self.boundary[w as usize] && self.is_q(w)
+            } else if self.cfg.bind_indep {
+                self.is_q(w)
+            } else {
+                self.boundary[w as usize] && self.mood[w as usize] >= 8
+            };
             if self.cfg.mood && qdrop {
                 self.buf.clear(); // a question: a cue, not a fact
                 self.bufp.clear();
