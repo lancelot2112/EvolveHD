@@ -1505,10 +1505,17 @@ impl Situation {
         self.fseen = nseen;
     }
     /// The code the kinds are clustered on: frame features at max >> kshift or more.
-    fn kind_code(&self, w: u32) -> Vec<bool> {
+    fn kind_code(&self, w: u32) -> [u64; FB / 64] {
+        // packed: bit b of the code is frame feature b at max >> kshift or more (compared by popcount)
         let r = &self.frame[w as usize];
         let th = (*r.iter().max().unwrap_or(&0) >> self.cfg.kshift).max(1);
-        r.iter().map(|&x| x >= th).collect()
+        let mut c = [0u64; FB / 64];
+        for (b, &x) in r.iter().enumerate() {
+            if x >= th {
+                c[b >> 6] |= 1u64 << (b & 63);
+            }
+        }
+        c
     }
     fn frame_code(&self, w: u32) -> Vec<bool> {
         let r = &self.frame[w as usize];
@@ -1520,15 +1527,15 @@ impl Situation {
     fn recluster_kinds(&mut self) {
         let mut order: Vec<u32> = (0..self.nw as u32).filter(|&w| self.wcount[w as usize] > 0).collect();
         order.sort_by(|a, b| self.wcount[*b as usize].cmp(&self.wcount[*a as usize]).then(a.cmp(b)));
-        let mut leaders: Vec<(u32, Vec<bool>, Vec<u32>)> = vec![];
+        let mut leaders: Vec<(u32, [u64; FB / 64], Vec<u32>)> = vec![];
         for &w in &order {
             let c = self.kind_code(w);
             let mut placed = false;
             for l in leaders.iter_mut() {
                 let (mut inter, mut uni) = (0u64, 0u64);
                 for (x, y) in c.iter().zip(&l.1) {
-                    inter += (*x && *y) as u64;
-                    uni += (*x || *y) as u64;
+                    inter += (x & y).count_ones() as u64;
+                    uni += (x | y).count_ones() as u64;
                 }
                 if uni > 0 && 5 * inter >= 2 * uni {
                     l.2.push(w);
@@ -1544,7 +1551,7 @@ impl Situation {
             // slow merges: a cluster joining two or more established old kinds (2+ members each in it) is split back
             // by old kind until the same merge has been proposed kslow reclusters in a row
             let mut proposed: Vec<(u32, u32)> = vec![];
-            let mut out: Vec<(u32, Vec<bool>, Vec<u32>)> = vec![];
+            let mut out: Vec<(u32, [u64; FB / 64], Vec<u32>)> = vec![];
             for (lw, code, ms) in leaders.into_iter() {
                 let mut by: HashMap<u32, Vec<u32>> = HashMap::default();
                 for &w in &ms {
@@ -1570,7 +1577,7 @@ impl Situation {
                     for (k, mut v) in by.into_iter() {
                         if est.contains(&k) && k != first {
                             v.sort_unstable();
-                            out.push((v[0], code.clone(), v));
+                            out.push((v[0], code, v));
                         }
                     }
                     let rest: Vec<u32> = ms.iter().copied().filter(|w| !est.contains(&self.kind[*w as usize]) || self.kind[*w as usize] == first).collect();
@@ -1585,7 +1592,8 @@ impl Situation {
             leaders = out;
         }
         leaders.sort_by(|a, b| b.2.len().cmp(&a.2.len()).then(a.0.cmp(&b.0)));
-        let mut used: Vec<u32> = vec![];
+        let mut used: std::collections::HashSet<u32> = std::collections::HashSet::new(); // same choices as a list + contains, without the O(L^2)
+        let mut next_free = 0u32;
         let mut newk = self.kind.clone();
         for (lw, _, ms) in &leaders {
             let mut votes: HashMap<u32, u32> = HashMap::default();
@@ -1596,10 +1604,17 @@ impl Situation {
             }
             let mut v: Vec<(u32, u32)> = votes.into_iter().collect();
             v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-            let name = v.iter().map(|x| x.0).find(|o| !used.contains(o)).unwrap_or_else(|| {
-                if !used.contains(lw) { *lw } else { (0..self.nw as u32).find(|x| !used.contains(x)).unwrap() }
-            });
-            used.push(name);
+            let name = match v.iter().map(|x| x.0).find(|o| !used.contains(o)) {
+                Some(o) => o,
+                None if !used.contains(lw) => *lw,
+                None => {
+                    while used.contains(&next_free) {
+                        next_free += 1;
+                    }
+                    next_free
+                }
+            };
+            used.insert(name);
             for &w in ms {
                 newk[w as usize] = name;
             }
@@ -3861,7 +3876,7 @@ impl Situation {
             return;
         }
         let code = self.kind_code(fw);
-        let n: u64 = code.iter().map(|&b| b as u64).sum();
+        let n: u64 = code.iter().map(|b| b.count_ones() as u64).sum();
         if n == 0 {
             return;
         }
@@ -3873,7 +3888,7 @@ impl Situation {
             }
             let Some(&lead) = ws.iter().max_by_key(|&&x| (self.wcount[x as usize], std::cmp::Reverse(x))) else { continue };
             let lc = self.kind_code(lead);
-            let inter: u64 = code.iter().zip(&lc).map(|(&a, &b)| (a && b) as u64).sum();
+            let inter: u64 = code.iter().zip(&lc).map(|(a, b)| (a & b).count_ones() as u64).sum();
             if 4 * inter >= 3 * n && best.map_or(true, |b| inter > b.0) {
                 best = Some((inter, c));
             }
