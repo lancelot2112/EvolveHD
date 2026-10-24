@@ -77,6 +77,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         bind_drift: flag(args, "--sit-bind-drift"),
         bnd_use: flag(args, "--sit-bnd-use"),
         bnd_use_rank: flag(args, "--sit-bnd-use-rank"),
+        bnd_use_norm: flag(args, "--sit-bnd-use-norm"),
         chain_learn: flag(args, "--sit-chain-learn"),
         chain_learn_kind: flag(args, "--sit-chain-learn-kind"),
         entity_fair: flag(args, "--sit-entity-fair"),
@@ -954,6 +955,7 @@ fn main() {
                 eprintln!("learned boundaries: {} | paths {} | relation classes {}", x.boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.n_paths(), x.n_classes());
                 eprintln!("binding stops: {}", x.bind_stops().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "));
                 eprintln!("boundary use (word span cut): {}", x.bnd_use_report().iter().map(|&(w, a, b)| format!("{} {} {}", name(w), a, b)).collect::<Vec<_>>().join(" | "));
+                eprintln!("boundary use, all (attributable hits, bindings): {:?}", x.bnd_use_all());
                 eprintln!("question boundaries: {} | clauses committed {}, dropped {}", x.question_boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.committed, x.dropped);
                 if x.cfg.anaphora {
                     eprintln!("stand-in first words resolved: {}", x.anaphora_resolved);

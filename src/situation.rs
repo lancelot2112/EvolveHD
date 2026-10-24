@@ -264,6 +264,10 @@ pub struct SitCfg {
     /// (with --sit-bnd-use) a symmetric judge: at a prediction whose word some route holds, span(u) += 1 when the
     /// best-ranked route holding it crosses u, cut(u) += 1 when a route crossing u outranks it (and does not hold it)
     pub bnd_use_rank: bool,
+    /// (with --sit-bnd-use) a normalized judge: span(u) counts predictions whose best holder of the right word
+    /// crosses u, cut(u) counts bindings written across u; u stops the walk while crossing bindings earn no more per
+    /// binding than bindings do overall: span(u) * bindings <= hits * cut(u)
+    pub bnd_use_norm: bool,
     /// Long-term tier for recurring relations only: a binding enters the heads and their histories only once its
     /// exact path has been seen at least this many times, counted in a fixed count-min sketch (4 rows of 2^16
     /// 16-bit counters, 512 KB, the minimum of the four). Paths seen once or twice (almost every path in prose)
@@ -700,7 +704,8 @@ pub struct Situation {
     bind_ok: Vec<bool>,
     bnd_span: Vec<u32>,                             // --sit-bnd-use: crossing u was needed (the only route to a right word)
     bnd_cut: Vec<u32>,                              // --sit-bnd-use: crossing u hurt (a wrong top route; a non-crossing one held it)
-    cross_of: HashMap<u32, u32>,                    // --sit-bnd-use: exact path key -> the proposed boundary word it crosses
+    cross_of: HashMap<u32, u32>,
+    use_all: (u64, u64),                            // --sit-bnd-use-norm: (attributable hits, bindings written), halved together                    // --sit-bnd-use: exact path key -> the proposed boundary word it crosses
     qkey1: Vec<u32>,
     chain_tab: HashMap<u32, Vec<(u32, u32)>>,       // --sit-chain-learn: hop-1 relation -> [(hop-2 class, count)]
     chain_seen: std::cell::RefCell<HashMap<u32, u32>>, // --sit-chain-learn: times each hop-1 relation was walked                                // each route's first-hop path key (chains), aligned with qcands                             // --sit-bind-indep: the word is independent (may stop a binding)
@@ -883,6 +888,7 @@ impl Situation {
             bnd_span: vec![0; nw],
             bnd_cut: vec![0; nw],
             cross_of: HashMap::default(),
+            use_all: (0, 0),
             qkey1: vec![],
             chain_tab: HashMap::default(),
             chain_seen: std::cell::RefCell::new(HashMap::default()),
@@ -2828,6 +2834,20 @@ impl Situation {
             let k1 = self.qkey1.get(i).copied().unwrap_or(u32::MAX);
             [k1, k2].iter().filter(|&&k| k != u32::MAX && k & 0x8000_0000 != 0).find_map(|&k| self.cross_of.get(&(k & 0x7FFF_FFFF)).copied())
         };
+        if self.cfg.bnd_use_norm {
+            // the best-ranked holder of the right word, if its path is known: one attributable hit; crossing u: span(u)
+            let Some(b) = self.qcands.iter().position(|x| x.1 == w) else { return };
+            let k2 = self.qsrc.get(b).filter(|x| x.0 > 0).map(|x| x.1).unwrap_or(u32::MAX);
+            let k1 = self.qkey1.get(b).copied().unwrap_or(u32::MAX);
+            if ![k1, k2].iter().any(|&k| k != u32::MAX && k & 0x8000_0000 != 0) {
+                return;
+            }
+            self.use_all.0 += 1;
+            if let Some(u) = cross(b) {
+                self.bnd_span[u as usize] += 1;
+            }
+            return;
+        }
         if self.cfg.bnd_use_rank {
             let Some(b) = self.qcands.iter().position(|x| x.1 == w) else { return };
             let cb = cross(b);
@@ -3691,7 +3711,12 @@ impl Situation {
     fn bstop(&self, w: u32) -> bool {
         self.boundary[w as usize]
             && (!self.cfg.bind_indep || self.bind_ok.get(w as usize).copied().unwrap_or(true))
-            && (!self.cfg.bnd_use || self.bnd_span[w as usize] <= self.bnd_cut[w as usize])
+            && (!self.cfg.bnd_use
+                || if self.cfg.bnd_use_norm {
+                    self.bnd_span[w as usize] as u64 * self.use_all.1.max(1) <= self.use_all.0 * self.bnd_cut[w as usize] as u64
+                } else {
+                    self.bnd_span[w as usize] <= self.bnd_cut[w as usize]
+                })
     }
     /// The binding walk's stop at word s seen at time ts: with --sit-bnd-use, one occurrence in 8 does the opposite.
     fn walk_stop(&self, s: u32, ts: u64) -> bool {
@@ -3703,6 +3728,9 @@ impl Situation {
         }
     }
     /// --sit-bnd-use: (word, span, cut) for each proposed boundary.
+    pub fn bnd_use_all(&self) -> (u64, u64) {
+        self.use_all
+    }
     pub fn bnd_use_report(&self) -> Vec<(u32, u32, u32)> {
         (0..self.nw as u32).filter(|&w| self.boundary[w as usize]).map(|w| (w, self.bnd_span[w as usize], self.bnd_cut[w as usize])).collect()
     }
@@ -4251,8 +4279,23 @@ impl Situation {
                     let pkv = (hash(pk, 77) & 0x7FFF_FFFF) as u32;
                     self.bufp.push(pkv);
                     if self.cfg.bnd_use {
-                        if let Some(&u) = path.iter().find(|&&x| self.boundary[x as usize]) {
+                        let cu = path.iter().find(|&&x| self.boundary[x as usize]).copied();
+                        if let Some(u) = cu {
                             self.cross_of.entry(pkv).or_insert(u);
+                        }
+                        if self.cfg.bnd_use_norm {
+                            self.use_all.1 += 1;
+                            if let Some(u) = cu {
+                                let ui = u as usize;
+                                self.bnd_cut[ui] += 1;
+                                if self.bnd_cut[ui] >= 1 << 16 {
+                                    self.bnd_cut[ui] >>= 1;
+                                    self.bnd_span[ui] >>= 1;
+                                }
+                            }
+                            if self.use_all.1 >= 1 << 24 {
+                                self.use_all = (self.use_all.0 >> 1, self.use_all.1 >> 1);
+                            }
                         }
                     }
                 }
