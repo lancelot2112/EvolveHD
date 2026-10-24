@@ -2717,7 +2717,8 @@ impl Situation {
                             Some(row) if seen >= 32 && !explore => {
                                 let mut r: Vec<(u32, u32)> = row.iter().filter(|x| x.1 > 0).copied().collect();
                                 r.sort_by(|a, b| b.1.cmp(&a.1));
-                                Some(r.iter().take(2).map(|x| x.0).collect())
+                                let top = std::env::var("SIT_CL_TOP").ok().and_then(|x| x.parse().ok()).unwrap_or(2); // diagnostic
+                                Some(r.iter().take(top).map(|x| x.0).collect())
                             }
                             _ => None,
                         }
