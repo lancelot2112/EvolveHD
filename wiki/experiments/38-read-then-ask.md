@@ -231,6 +231,40 @@ Route logging (`SIT_QDBG_FROM`) on the read-then-ask run explains the missing ho
 - **The cheap read on book text** costs about 13 ms per word without `--sit-path-forget`; 66% of the time went to re-pooling (re-hashing all 955k paths) and 26% to hashing new paths. With it, about 5.5 ms.
 - **Small samples:** 100 and 50 test documents, one seed. The 4k documents are about 3,000 words each.
 
+## Packed kind codes and longer BABILong documents
+
+**The speed fix (exact).** Forum round five's superoptimizer found that about 97% of the 5.5 ms per word on book text was one search: the leader clustering of word kinds, run every 2,000 words. Every seen word was compared with every leader, each compare zipping two 512-entry `Vec<bool>` codes.
+
+- **The change:** kind codes are now `[u64; 8]` compared by popcount. The stand-in containment test uses the same packed codes. Kind naming uses a set instead of a list scan.
+- **Exactness:** on an 80k-word prefix of the stream, `.top` and `.rank` are byte-identical to the old binary (`eqcheck.sh`).
+- **Speed** at word 340k of the same stream: 10.1 s per 20k words, against 140.2 s before (about 14×).
+- **The whole 950k-word run took 739 s.** The old binary was at 7 ms per word by word 340k and still slowing; it was stopped there.
+
+**The longer test** (`bl_long`, `R_bl_long`):
+
+- **Setup:**
+  - the same training prefix as the pilot (qa1 0k and 1k, learning on);
+  - then 30 qa1 documents at 16k (about 13k words each) and 8 at 64k (about 51k words each), frozen and answer-only from word 156,952;
+  - the full stack of `R_blpF`, binary `sit-38y`.
+- **Results:**
+
+| Part | Top-1 |
+|---|---|
+| training qa1 0k (learning on) | 95.2% (n 1,000) |
+| training qa1 1k (learning on) | 97.5% (n 200) |
+| **test qa1 16k, frozen, answer-only** | **93.3% (28 of 30)** |
+| **test qa1 64k, frozen, answer-only** | **87.5% (7 of 8)** |
+
+- **Caveats:** one seed, with 30 and 8 test documents, so one document moves the 64k score by 12.5 points.
+- **The store is not compressive at this length.** Heads grow about linearly once the test starts:
+  - 17k at word 240k;
+  - 159k at 400k;
+  - 568k at 640k;
+  - 1.09M at 940k (about 1.4 heads per word read in the test part).
+- **Cost per word grows with it:** from 0.29 ms (word 240k) to 1.5 ms (word 940k).
+- **Likely cause (not yet checked):** the `--sit-lt-min` count-min sketch has 4 rows of 2^16 counters. With a 33k-word vocabulary and on the order of a million distinct paths, every counter passes 4, so one-off paths read as recurring. Each new path also gets its first 64 bindings under `--sit-lt-credit`.
+  - A sketch sized to the stream, or the forum's single importance rule with a fixed budget, should hold the store flat. That is the next thing to test.
+
 ## Lost run
 
 The three-book read-then-ask (`ld3m_pqr`: A, B, then C) hit the 2-hour limit for background jobs and was stopped. It was not restarted, because `--sit-epoch` answers the same question more directly.
