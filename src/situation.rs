@@ -242,6 +242,8 @@ pub struct SitCfg {
     /// `independent`); the question drop uses the same predicate as `is_q` (the floor included); and the floor's
     /// samples keep updating the mood counter after the freeze and in answer-only reading.
     pub bind_indep: bool,
+    /// (with --sit-bind-indep) the working-memory context drifts only at binding stops, not at every learned boundary
+    pub bind_drift: bool,
     /// Long-term tier for recurring relations only: a binding enters the heads and their histories only once its
     /// exact path has been seen at least this many times, counted in a fixed count-min sketch (4 rows of 2^16
     /// 16-bit counters, 512 KB, the minimum of the four). Paths seen once or twice (almost every path in prose)
@@ -4176,8 +4178,8 @@ impl Situation {
                 }
             }
         }
-        // the context drifts at learned boundaries
-        if self.boundary[w as usize] {
+        // the context drifts at learned boundaries (with --sit-bind-drift, only at binding stops)
+        if if self.cfg.bind_drift { self.bstop(w) } else { self.boundary[w as usize] } {
             for j in 0..self.cfg.bdrift {
                 let h = hash(self.t * 31 + j as u64, 97);
                 let i = (h % self.cfg.k as u64) as usize;
