@@ -72,6 +72,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         slotlog: arg(args, "--sit-slotlog").map(|s| s.parse().unwrap()).unwrap_or(0),
         recent: arg(args, "--sit-recent").map(|s| s.parse().unwrap()).unwrap_or(0),
         bnd_hyst: flag(args, "--sit-bnd-hyst"),
+        bnd_indep: flag(args, "--sit-bnd-indep"),
         lt_min: arg(args, "--sit-lt-min").map(|s| s.parse().unwrap()).unwrap_or(0),
         lt_credit: arg(args, "--sit-lt-credit").map(|s| s.parse().unwrap()).unwrap_or(0),
         lt_budget: arg(args, "--sit-lt-budget").map(|s| s.parse().unwrap()).unwrap_or(0),

@@ -234,6 +234,9 @@ pub struct SitCfg {
     /// stays one while its own openness holds (at least a quarter of its own peak), whatever more open words new
     /// text brings (",", "and" in prose): new boundaries are added, learned ones (". ?") are not erased.
     pub bnd_hyst: bool,
+    /// A boundary must also be a word across which the kind before does not predict the kind after (see
+    /// `independent`): "." and "?" end clauses; "the" (whose verb tells place from object) does not.
+    pub bnd_indep: bool,
     /// Long-term tier for recurring relations only: a binding enters the heads and their histories only once its
     /// exact path has been seen at least this many times, counted in a fixed count-min sketch (4 rows of 2^16
     /// 16-bit counters, 512 KB, the minimum of the four). Paths seen once or twice (almost every path in prose)
@@ -726,6 +729,8 @@ pub struct Situation {
     qsrc: Vec<(u8, u32)>,                           // each route's source (0 slot, 1 head, 2 range) and path key
     key_credit: HashMap<u32, u32>,                  // --sit-lt-credit: path key -> questions answered through it
     lt_tag: HashMap<(u32, u32, u32), u8>,           // --sit-lt-budget: a head's tag
+    rev_heads: HashMap<u32, Vec<(u32, u32, u64, u32)>>,
+    indep: HashMap<u32, HashMap<(u32, u32), u32>>,  // --sit-bnd-indep: word -> (kind before, kind after) counts // --sit-chain: value -> the newest heads that wrote it (entity, path, time, class)
     lt_ring: std::collections::VecDeque<(u32, u32, u32)>, // --sit-lt-budget: the clock's ring of heads
     pub lt_evicted: u64,
     key_writes: HashMap<u32, u32>,                  // --sit-lt-credit: path key -> bindings stored for it
@@ -895,6 +900,8 @@ impl Situation {
             qsrc: vec![],
             key_credit: HashMap::default(),
             lt_tag: HashMap::default(),
+            rev_heads: HashMap::default(),
+            indep: HashMap::default(),
             lt_ring: std::collections::VecDeque::new(),
             lt_evicted: 0,
             key_writes: HashMap::default(),
@@ -1484,6 +1491,33 @@ impl Situation {
     }
 
     /// bnd2: boundaries as the words open on both sides (see the config field).
+    /// --sit-bnd-indep: whether the kind of the word after w depends on the kind of the word before it, by
+    /// collisions (integer, no division): two occurrences of w with the same kind before should not agree on the
+    /// kind after more often than any two occurrences do. Dependent when 4 x P(same after | same before) exceeds
+    /// 5 x P(same after), both as pair counts, cross-multiplied; too few occurrences (under 64) count as independent.
+    fn independent(&self, w: u32) -> bool {
+        let Some(t) = self.indep.get(&w) else { return true };
+        let mut by_p: HashMap<u32, u64> = HashMap::default();
+        let mut by_n: HashMap<u32, u64> = HashMap::default();
+        let (mut n, mut same_pn) = (0u64, 0u64);
+        for (&(kp, kn), &c) in t {
+            let c = c as u64;
+            n += c;
+            same_pn += c * (c - 1);
+            *by_p.entry(kp).or_insert(0) += c;
+            *by_n.entry(kn).or_insert(0) += c;
+        }
+        if n < 64 {
+            return true;
+        }
+        let same_p: u64 = by_p.values().map(|&c| c * (c - 1)).sum();
+        let same_n: u64 = by_n.values().map(|&c| c * (c - 1)).sum();
+        if same_p == 0 {
+            return true;
+        }
+        // P(same after | same before) = same_pn / same_p ; P(same after) = same_n / (n (n - 1))
+        4 * same_pn as u128 * (n * (n - 1)) as u128 <= 5 * same_n as u128 * same_p as u128
+    }
     fn open_boundaries(&mut self) {
         let mut sc: HashMap<u32, Vec<u32>> = HashMap::default();
         let mut pc: HashMap<u32, Vec<u32>> = HashMap::default();
@@ -1523,6 +1557,10 @@ impl Situation {
             } else {
                 2 * m >= mx
             };
+            // independence: a boundary is a word across which the side before does not tell the side after
+            let nb = nb && (!self.cfg.bnd_indep || self.independent(w));
+            // diagnostic only (not a learner): SIT_BND_DENY lists word ids that may never be boundaries
+            let nb = nb && !std::env::var("SIT_BND_DENY").map_or(false, |l| l.split(',').any(|x| x.parse::<u32>().ok() == Some(w)));
             if nb != self.boundary[w as usize] && std::env::var("SIT_DEBUG_BND").is_ok() {
                 eprintln!("BND2 {} word {} -> {} (open {} of max {})", self.t, w, nb, m, mx);
             }
@@ -2523,6 +2561,14 @@ impl Situation {
                     }
                 }
             }
+            if std::env::var("SIT_CDBG").is_ok() && self.after_q || std::env::var("SIT_CDBG2").is_ok() && self.t >= std::env::var("SIT_QDBG_FROM").ok().and_then(|x| x.parse().ok()).unwrap_or(u64::MAX) && self.t < std::env::var("SIT_QDBG_FROM").ok().and_then(|x| x.parse::<u64>().ok()).unwrap_or(0) + 1 {
+                eprintln!("CDBG t {} j {} e {} content {} heads {:?} rev {:?}", self.t, j, e, content_cue, self.heads_of.get(&e).map(|v| v.iter().map(|h| (h.0 & 0xFFFF, h.2, h.3)).collect::<Vec<_>>()), self.rev_heads.get(&e));
+                if j == 0 {
+                    for p in [0u32, 11, 20, 24] {
+                        eprintln!("CDBG person {} kind {} ksize {:?} heads {:?}", p, self.kk(p), self.ksize.get(&self.kk(p)), self.heads_of.get(&p).map(|v| v.iter().map(|h| (h.0 & 0xFFFF, h.2, h.3)).collect::<Vec<_>>()));
+                    }
+                }
+            }
             if self.cfg.chain && self.cfg.heads && content_cue {
                 // chained hops over the long-term heads: hop 1 is one of e's newest heads whose value has heads of its
                 // own; hop 2 is one of that value's heads, newest or as it was at hop 1's time (from its history), so
@@ -2537,25 +2583,49 @@ impl Situation {
                             .collect()
                     })
                     .unwrap_or_default();
+                // hop 1 also runs backward: the entities whose heads wrote e ("daniel grabbed the football": football
+                // reaches daniel), path keys marked so the two directions stay apart
+                if let Some(r) = self.rev_heads.get(&e) {
+                    for &(x, key, t, c) in r.iter().rev().take(8) {
+                        if !cue.contains(&x) && self.heads_of.contains_key(&x) && self.ksize.get(&self.kk(x)).copied().unwrap_or(0) >= 3 {
+                            h1.push((t, key ^ 0x4000_0000, x, c));
+                        }
+                    }
+                }
                 h1.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-                h1.truncate(4);
+                h1.dedup_by(|a, b| a.2 == b.2 && a.1 == b.1);
+                h1.truncate(6);
                 let ke = self.kk(e);
                 for (r1, &(t1, key1, v1, c1)) in h1.iter().enumerate() {
                     let Some(hs2) = self.heads_of.get(&v1) else { continue };
+                    // hop 2's options: (which 0) each head's value now; (which 1) its value as of hop 1's time
+                    let mut opts: Vec<(u64, u32, u64, u32, u32)> = vec![]; // (which, value, its time, path, class)
                     for &(key2, k2, val2, t2, c2) in hs2 {
                         if val2 == e || cue.contains(&val2) || self.ksize.get(&self.kk(val2)).copied().unwrap_or(0) < 3 {
                             continue;
                         }
-                        // (which 0) the value now; (which 1) the value at hop 1's time, when it differs
-                        let mut opts = vec![(0u64, val2, t2)];
+                        opts.push((0, val2, t2, key2, c2));
                         if let Some(hist) = self.posts.get(&(v1, key2, k2)) {
                             let i = hist.partition_point(|x| x.0 <= t1);
-                            if i > 0 && hist[i - 1].1 != val2 && !cue.contains(&hist[i - 1].1) {
-                                opts.push((1, hist[i - 1].1, hist[i - 1].0));
+                            if i > 0 && !cue.contains(&hist[i - 1].1) {
+                                opts.push((1, hist[i - 1].1, hist[i - 1].0, key2, c2));
                             }
                         }
-                        for (which, v, _tv) in opts {
-                            let mut f = self.route_feats(j, e, &[(c1, self.kk(v1), r1 as u32), (c2, self.kk(v), 0)]);
+                    }
+                    // each option's recency rank among the options of its kind and of its "which", newest first,
+                    // so the newest place across all of v1's paths ranks 0
+                    opts.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
+                    let mut seen_r: HashMap<(u64, u32), u32> = HashMap::default();
+                    for (which, v, _tv, key2, c2) in opts {
+                        let rr = seen_r.entry((which, self.kk(v))).or_insert(0);
+                        let r2 = *rr;
+                        *rr += 1;
+                        if r2 >= 4 {
+                            continue;
+                        }
+                        {
+                            let mut f = self.route_feats(j, e, &[(c1, self.kk(v1), r1 as u32), (c2, self.kk(v), r2)]);
+                            f.push(Self::fid(64, r2 as u64, which)); // hop 2's recency, now or then
                             f.push(Self::fid(60, key1 as u64, key2 as u64)); // the two relation paths
                             f.push(Self::fid(61, which, key1 as u64)); // now or then, by hop 1's relation
                             f.push(Self::fid(62, r1 as u64, which)); // hop 1's recency, now or then
@@ -2604,7 +2674,8 @@ impl Situation {
         if dbg {
             let mut ix: Vec<usize> = (0..cands.len()).collect();
             ix.sort_by(|&a, &b| cands[b].2.cmp(&cands[a].2).then(cands[b].3.cmp(&cands[a].3)));
-            let parts: Vec<String> = ix.iter().take(10).map(|&i| format!("{}[{}]", desc[i], cands[i].2)).collect();
+            let nshow = std::env::var("SIT_QDBG_N").ok().and_then(|x| x.parse().ok()).unwrap_or(10);
+            let parts: Vec<String> = ix.iter().take(nshow).map(|&i| format!("{}[{}]", desc[i], cands[i].2)).collect();
             eprintln!("QROUTES {} {}", self.t, parts.join(" "));
         }
         {
@@ -3732,6 +3803,12 @@ impl Situation {
                 e.1 += 1;
             }
         }
+        // --sit-bnd-indep: for the word before this one, count (kind of the word before it, kind of this word)
+        if self.cfg.bnd_indep && self.hist.len() >= 2 {
+            let (p, u) = (self.hist[self.hist.len() - 2], self.hist[self.hist.len() - 1]);
+            let (kp, kn) = (self.kk(p), self.kk(w));
+            *self.indep.entry(u).or_default().entry((kp, kn)).or_insert(0) += 1;
+        }
         // the bigram counts behind mood2 and bnd2 (after the mood update, so they hold only the words before this one)
         if self.cfg.mood2 || self.cfg.bnd2 || self.cfg.skip {
             if let Some(&u) = self.hist.last() {
@@ -4228,6 +4305,9 @@ impl Situation {
                     recurring = *n <= self.cfg.lt_credit;
                 }
             }
+            if std::env::var("SIT_HDBG").is_ok() && x == 11 && self.t > 102300 && self.t < 102430 {
+                eprintln!("HDBG t {} x {} v {} kd {} ksize {:?} c {} content_val {} recurring {} dir {}", self.t, x, v, kd, self.ksize.get(&kd), c, content_val, recurring, dir);
+            }
             if self.cfg.heads && c < COMP && content_val && recurring {
                 let key = if self.cfg.heads_path { bufp.get(bi).copied().unwrap_or(c) | 0x8000_0000 } else { c };
                 let hk = if self.cfg.heads_nokind { self.kn } else { kd };
@@ -4251,6 +4331,14 @@ impl Situation {
                 }
                 if self.cfg.ranges {
                     self.posts.entry((x, key, hk)).or_default().push((self.t, v));
+                }
+                if self.cfg.chain {
+                    // the reverse index: which entities' heads wrote this value, newest last (at most 16)
+                    let r = self.rev_heads.entry(v).or_default();
+                    r.push((x, key, now, c));
+                    if r.len() > 16 {
+                        r.remove(0);
+                    }
                 }
             }
             if self.cfg.sq_max > 0 {
