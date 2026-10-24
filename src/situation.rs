@@ -251,6 +251,9 @@ pub struct SitCfg {
     /// that does not cross u held the word, span(u) += 1; if it crosses u and was wrong while a route that does not
     /// cross u held the word, cut(u) += 1. u stops the walk while span(u) <= cut(u); both halve at 1024.
     pub bnd_use: bool,
+    /// (with --sit-bnd-use) a symmetric judge: at a prediction whose word some route holds, span(u) += 1 when the
+    /// best-ranked route holding it crosses u, cut(u) += 1 when a route crossing u outranks it (and does not hold it)
+    pub bnd_use_rank: bool,
     /// Long-term tier for recurring relations only: a binding enters the heads and their histories only once its
     /// exact path has been seen at least this many times, counted in a fixed count-min sketch (4 rows of 2^16
     /// 16-bit counters, 512 KB, the minimum of the four). Paths seen once or twice (almost every path in prose)
@@ -2786,6 +2789,20 @@ impl Situation {
             let k1 = self.qkey1.get(i).copied().unwrap_or(u32::MAX);
             [k1, k2].iter().filter(|&&k| k != u32::MAX && k & 0x8000_0000 != 0).find_map(|&k| self.cross_of.get(&(k & 0x7FFF_FFFF)).copied())
         };
+        if self.cfg.bnd_use_rank {
+            let Some(b) = self.qcands.iter().position(|x| x.1 == w) else { return };
+            let cb = cross(b);
+            let ca = (0..b).find_map(|i| cross(i)).filter(|&u| cb != Some(u));
+            if let Some(u) = cb {
+                self.bnd_span[u as usize] += 1;
+                self.halve_use(u);
+            }
+            if let Some(u) = ca {
+                self.bnd_cut[u as usize] += 1;
+                self.halve_use(u);
+            }
+            return;
+        }
         let Some(u) = cross(0) else { return };
         let right = self.qcands[0].1 == w;
         let other_holds = (1..self.qcands.len()).any(|i| self.qcands[i].1 == w && cross(i) != Some(u));
@@ -2795,6 +2812,10 @@ impl Situation {
         } else if !right && other_holds {
             self.bnd_cut[ui] += 1;
         }
+        self.halve_use(u);
+    }
+    fn halve_use(&mut self, u: u32) {
+        let ui = u as usize;
         if self.bnd_span[ui] + self.bnd_cut[ui] >= 1024 {
             self.bnd_span[ui] >>= 1;
             self.bnd_cut[ui] >>= 1;
