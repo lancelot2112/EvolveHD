@@ -229,6 +229,20 @@ pub struct SitCfg {
     pub q_contrast: bool,
     /// (with --sit-chain-learn) credit the fan-out table only at answers (after a word with Q)
     pub chain_learn_q: bool,
+    /// Boundaries disposed by the clause level (forum round seven, F1). Each clause (a run between binding stops,
+    /// the stop left out) is an item: type = its first word, path = a hash of its middle words, value = its last word.
+    /// A unit head table keeps each (type, path)'s newest 2 values. A clause hits when its value is in the table and
+    /// the reader's own top proposal at that word was wrong (credit only for what the word level missed). At every
+    /// occurrence of a proposed word u (in L), the shadow world with u's decision flipped (two clauses merged at a
+    /// stop, one split at a crossing) is scored on the same words; the shadows are looked up and written in the unit
+    /// table only, never in the bindings or the long-term heads. Where the worlds disagree, u's flip wins or loses;
+    /// at each re-pooling the word with the largest margin flips, if (wins - losses)^2 > 9 (wins + losses).
+    pub bnd_unit: bool,
+    /// Drop a clause that contains a learned boundary which is also a question word (not only one that ends in it),
+    /// and take a dropped question's words out of the binding walk's window.
+    pub q_contain: bool,
+    /// (with --sit-q-contrast) question words only among the learned boundaries
+    pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
     /// words' frame bits) gets `lsh_bands` MinHash bands of `lsh_rows` rows each (the least hash of its bits per
     /// row), and two paths share a class when a band collides. A new path costs bands x rows hashes over its bits,
@@ -833,6 +847,13 @@ pub struct Situation {
     pub sq_opened: u64,
     pub sq_closed: u64,
     mood: Vec<u8>,
+    ustop: Vec<bool>,                               // --sit-bnd-unit: does this proposed word stop the binding walk
+    uwin: Vec<(u32, u32)>,                          // --sit-bnd-unit: (wins, losses) for flipping the word's decision
+    hu: HashMap<u64, [u32; 2]>,                     // --sit-bnd-unit: unit head table, (type, path) -> newest 2 values
+    uring: std::collections::VecDeque<(u32, bool)>, // --sit-bnd-unit: words since the stop before last, (word, missed)
+    useg: (usize, Option<u32>, u32),                // --sit-bnd-unit: (start of the current clause in uring, the stop that opened it, its hits)
+    uprev_hits: u32,                                // --sit-bnd-unit: hits of the clause before the current one
+    clause_q: bool,                                 // --sit-q-contain: the current clause holds a question word of L
     qhit: Vec<u32>,                                 // --sit-q-contrast: non-trivial right top proposals after each word
     qn: Vec<u32>,                                   // --sit-q-contrast: non-trivial predictions after each word
     qall: (u64, u64),                               // --sit-q-contrast: the same over every word
@@ -898,6 +919,13 @@ impl Situation {
             seg_draw: HashMap::default(),
             seg_hits: HashMap::default(),
             seg_n: HashMap::default(),
+            ustop: vec![true; nw],
+            uwin: vec![(0, 0); nw],
+            hu: HashMap::default(),
+            uring: std::collections::VecDeque::new(),
+            useg: (0, None, 0),
+            uprev_hits: 0,
+            clause_q: false,
             qhit: vec![0; nw],
             qn: vec![0; nw],
             qall: (0, 0),
@@ -2844,6 +2872,104 @@ impl Situation {
     /// Learn the query from word w: a mistake-driven (perceptron) three-factor update. When the top route was
     /// wrong, the best-scored route that held w is stepped up (Go) and the top route down (NoGo), for every
     /// (query bit, route feature) pair: pre-synaptic the query, post-synaptic the route, the modulator right or wrong.
+    /// --sit-bnd-unit: a clause item's hit (see `bnd_unit`), then the clause is written to the unit table.
+    fn unit_item(&mut self, ws: &[(u32, bool)]) -> u32 {
+        if ws.len() < 2 {
+            return 0;
+        }
+        let tau = ws[0].0;
+        let (v, missed) = *ws.last().unwrap();
+        let pk = ws[1..ws.len() - 1].iter().fold(hash(tau as u64, 0x7171), |h, x| hash(h, x.0 as u64));
+        let e = self.hu.entry(pk).or_insert([u32::MAX; 2]);
+        let hit = (missed && e.contains(&v)) as u32;
+        if e[0] != v {
+            *e = [v, e[0]];
+        }
+        hit
+    }
+    /// --sit-bnd-unit: called with each word read (and whether the reader's top proposal missed it). At a binding
+    /// stop the current clause closes; the stop that opened it and the proposed words crossed inside it are judged
+    /// against their shadow worlds on the same words.
+    fn unit_judge(&mut self, w: u32, missed: bool) {
+        self.uring.push_back((w, missed));
+        if !self.bstop(w) {
+            if self.uring.len() > 256 {
+                // a runaway clause: forget the oldest words (no judgement across them)
+                self.uring.pop_front();
+                self.useg.0 = self.useg.0.saturating_sub(1);
+            }
+            return;
+        }
+        let end = self.uring.len() - 1; // the stop word's index
+        let st = self.useg.0;
+        let ring: Vec<(u32, bool)> = self.uring.iter().copied().collect();
+        let d: Vec<(u32, bool)> = ring[st..end].to_vec();
+        let hd = self.unit_item(&d);
+        // the stop that opened this clause: shadow = the previous clause, that stop and this clause merged
+        if let Some(u) = self.useg.1 {
+            let prev: Vec<(u32, bool)> = ring[..st].to_vec(); // the previous clause then its stop
+            let merged: Vec<(u32, bool)> = prev.iter().chain(d.iter()).copied().collect();
+            let hs = self.unit_item(&merged);
+            let hdef = self.uprev_hits + hd;
+            let x = &mut self.uwin[u as usize];
+            if hs > hdef {
+                x.0 += 1;
+            } else if hs < hdef {
+                x.1 += 1;
+            }
+        }
+        // proposed words crossed inside this clause: shadow = the clause split there
+        for i in 1..d.len().saturating_sub(1) {
+            let u = d[i].0;
+            if !self.boundary[u as usize] {
+                continue;
+            }
+            let (a, b) = (&d[..i], &d[i + 1..]);
+            let hs = self.unit_item(a) + self.unit_item(b);
+            let x = &mut self.uwin[u as usize];
+            if hs > hd {
+                x.0 += 1;
+            } else if hs < hd {
+                x.1 += 1;
+            }
+        }
+        // keep only this clause and its stop: the next clause's shadow merges across this stop
+        self.uring.drain(..st);
+        self.useg = (self.uring.len(), Some(w), 0);
+        self.uprev_hits = hd;
+    }
+    /// --sit-bnd-unit: at a re-pooling, flip the proposed word whose shadow world beat its current decision by the
+    /// largest margin, if significant: (wins - losses)^2 > 9 (wins + losses). Its counts restart.
+    fn unit_flip(&mut self) {
+        let mut best: Option<(u32, u32)> = None;
+        for u in 0..self.nw as u32 {
+            let (wn, l) = self.uwin[u as usize];
+            if !self.boundary[u as usize] || wn <= l {
+                continue;
+            }
+            let m = wn - l;
+            if (m as u64) * (m as u64) > 9 * (wn + l) as u64 && best.map_or(true, |b| m > b.1) {
+                best = Some((u, m));
+            }
+        }
+        if let Some((u, _)) = best {
+            let ui = u as usize;
+            self.ustop[ui] = !self.ustop[ui];
+            self.uwin[ui] = (0, 0);
+            if std::env::var("SIT_DEBUG_BND").is_ok() {
+                eprintln!("UNIT {} word {} stop -> {}", self.t, u, self.ustop[ui]);
+            }
+        }
+        for x in self.uwin.iter_mut() {
+            if x.0 + x.1 >= 1024 {
+                *x = (x.0 >> 1, x.1 >> 1);
+            }
+        }
+    }
+    /// --sit-bnd-unit: (word, stops?, wins, losses) for each proposed boundary.
+    pub fn bnd_unit_report(&self) -> Vec<(u32, bool, u32, u32)> {
+        (0..self.nw as u32).filter(|&w| self.boundary[w as usize]).map(|w| (w, self.ustop[w as usize], self.uwin[w as usize].0, self.uwin[w as usize].1)).collect()
+    }
     /// --sit-bnd-use: judge the proposed boundaries crossed by this prediction's routes (see `bnd_use`).
     fn bnd_use_update(&mut self, w: u32) {
         if let Some(&u) = self.hist.last() {
@@ -3745,6 +3871,7 @@ impl Situation {
     /// May w stop a binding walk? A learned boundary; with --sit-bind-indep, only an independent one.
     fn bstop(&self, w: u32) -> bool {
         self.boundary[w as usize]
+            && (!self.cfg.bnd_unit || self.ustop[w as usize])
             && (!self.cfg.bind_indep || self.bind_ok.get(w as usize).copied().unwrap_or(true))
             && (!self.cfg.bnd_use
                 || if self.cfg.bnd_use_norm {
@@ -3780,6 +3907,9 @@ impl Situation {
     }
     /// --sit-q-contrast: memory predicts what follows u at least twice as well as it does after words in general.
     fn q_ok(&self, u: u32) -> bool {
+        if self.cfg.q_in_l && !self.boundary[u as usize] {
+            return false;
+        }
         let (h, n) = (self.qhit[u as usize] as u64, self.qn[u as usize] as u64);
         n >= 16 && h * self.qall.1.max(1) >= 2 * self.qall.0 * n
     }
@@ -4059,6 +4189,10 @@ impl Situation {
         // (not when reading without predicting: there was no proposal)
         // (nor once skill is frozen: the question detector is part of the skill, so a run of wrong answers in a hard
         // test cannot switch answering off)
+        if self.cfg.bnd_unit && !self.idx_only {
+            let missed = self.last.first().map(|x| x.1) != Some(w);
+            self.unit_judge(w, missed);
+        }
         if self.cfg.q_contrast && !self.idx_only {
             if let Some(&u) = self.hist.last() {
                 if !self.succ_top.get(&u).map_or(false, |t| t.0 == w) {
@@ -4373,7 +4507,11 @@ impl Situation {
         if self.boundary[w as usize] || self.buf.len() > 64 {
             // with --sit-q-contrast a question clause is dropped only at a learned boundary that is also a question
             // word: a Q word inside a clause ("the milk" before ".") must not throw away the clause's facts
-            let qdrop = if self.cfg.q_contrast {
+            let qdrop = if self.cfg.q_contain {
+                let q = self.clause_q || self.boundary[w as usize] && self.is_q(w);
+                self.clause_q = false;
+                q
+            } else if self.cfg.q_contrast {
                 self.boundary[w as usize] && self.is_q(w)
             } else if self.cfg.bind_indep {
                 self.is_q(w)
@@ -4384,6 +4522,9 @@ impl Situation {
                 self.buf.clear(); // a question: a cue, not a fact
                 self.bufp.clear();
                 self.dropped += 1;
+                if self.cfg.q_contain {
+                    self.clause.clear(); // its words leave the binding walk's window
+                }
             } else {
                 if self.cfg.ranges && self.boundary[w as usize] {
                     // the clause's words (in order, the boundary left out), its start, and its first word
@@ -4416,6 +4557,9 @@ impl Situation {
                 self.commit();
                 self.committed += 1;
             }
+        }
+        if self.cfg.q_contain && self.boundary[w as usize] && !self.clause.is_empty() && self.is_q(w) && !self.bstop(w) {
+            self.clause_q = true; // a question word inside the clause (not ending it)
         }
         self.clause.push(w);
         if self.clause.len() > 16 {
@@ -4473,6 +4617,9 @@ impl Situation {
         }
         if self.cfg.bnd2 && self.cfg.recluster > 0 && self.t % self.cfg.recluster as u64 == 0 {
             self.open_boundaries();
+            if self.cfg.bnd_unit {
+                self.unit_flip();
+            }
         }
         if self.cfg.recluster > 0 && self.t % self.cfg.recluster as u64 == 0 {
             self.recluster();
