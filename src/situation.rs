@@ -284,6 +284,18 @@ pub struct SitCfg {
     /// --sit-gate-from T: the write gate starts at word T; before it the question drop works as before (memory gets
     /// examples first)
     pub gate_from: u64,
+    /// Validated records (the owner's rule: store the context with its prediction, and let the outcome validate it):
+    /// each long-term head keeps its own (hits, misses) at answers. At an answer, every head offered as a candidate
+    /// whose value is the answer gains a hit, and the head behind the answer given (the top candidate), if wrong and of
+    /// the answer's kind, a miss; a head with more misses than hits is not read. Rewriting a head with a new value clears its counts.
+    pub validate: bool,
+    /// No question drop: question clauses are committed like any other (with --sit-validate their stale answers drop
+    /// out by validation).
+    pub no_qdrop: bool,
+    /// --sit-validate with the counts kept across rewrites: the record validated is the slot (entity, relation key,
+    /// kind), not its current value, so a slot rewritten by every answer (a question word taken for an entity) builds a
+    /// track record too
+    pub validate_slot: bool,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -913,6 +925,8 @@ pub struct Situation {
     cf_open: Vec<u32>,                              // --sit-bnd-collide: the content kinds of the open frame
     cf_n: Vec<(u32, u32)>,                          // --sit-bnd-collide: per word, (resets right after it, occurrences)
     cf_all: (u64, u64),                             // --sit-bnd-collide: (resets, words)
+    hv: HashMap<(u32, u32, u32), (u16, u16)>,         // --sit-validate: per head (entity, key, kind), (hits, misses) at answers
+    pub hv_stats: (u64, u64),                       // --sit-validate: (hits, misses) counted
     gate_by: Vec<(u32, u32)>,                       // --sit-chunk-gate: per word, (refreshed from a head, from a slot)
     pub gate_hits: (u64, u64),                      // --sit-chunk-gate: (words whose bindings were skipped, heads or slots refreshed)
     qhead: Vec<(u8, u32, u32, u32)>,                // --sit-chunk-gate: per ranked candidate, what stands behind it: (1, entity, key, kind) a head, (2, entity, class, kind) a slot, (0, ..) nothing to refresh
@@ -1007,6 +1021,8 @@ impl Situation {
             cf_all: (0, 0),
             gate_hits: (0, 0),
             gate_by: vec![(0, 0); nw],
+            hv: HashMap::default(),
+            hv_stats: (0, 0),
             qhead: vec![],
             qhit: vec![0; nw],
             qn: vec![0; nw],
@@ -2703,6 +2719,9 @@ impl Situation {
                 let mut seen_k: HashMap<u32, u32> = HashMap::default();
                 let mut taken = 0;
                 for (t, c, k, val, key, hk) in hs {
+                    if self.cfg.validate && self.hv.get(&(e, key, hk)).map_or(false, |x| x.1 > x.0) {
+                        continue; // failed validation: not read
+                    }
                     let r = seen_k.entry(k).or_insert(0);
                     let rr = *r;
                     *r += 1;
@@ -2856,7 +2875,7 @@ impl Situation {
                         if allow.as_ref().map_or(false, |a| !a.contains(&if self.cfg.chain_learn_kind { self.kk(val2) } else { c2 })) {
                             continue;
                         }
-                        if val2 == e || cue.contains(&val2) || self.ksize.get(&self.kk(val2)).copied().unwrap_or(0) < 3 {
+                        if val2 == e || cue.contains(&val2) || self.ksize.get(&self.kk(val2)).copied().unwrap_or(0) < 3 || self.cfg.validate && self.hv.get(&(v1, key2, k2)).map_or(false, |x| x.1 > x.0) {
                             continue;
                         }
                         opts.push((0, val2, t2, key2, c2, k2));
@@ -4385,6 +4404,35 @@ impl Situation {
                         || self.chunks.last().map_or(true, |c| c.len() >= 32)
                 }
             };
+        // --sit-validate: at an answer, the heads offered with a value of the answer's kind are validated
+        if self.cfg.validate && self.after_q && !self.idx_only && !self.qcands.is_empty() {
+            let kw = self.kk(w);
+            let mut done: Vec<(u32, u32, u32)> = vec![];
+            let ups: Vec<((u32, u32, u32), bool)> = self
+                .qcands
+                .iter()
+                .zip(self.qhead.iter())
+                .enumerate()
+                // a hit for every head that held the answer; a miss only for the head behind the answer given (the
+                // top candidate), as NoGo blames only the route taken
+                .filter(|(i, (c, h))| h.0 == 1 && self.kk(c.1) == kw && (c.1 == w || *i == 0))
+                .map(|(_, (c, h))| ((h.1, h.2, h.3), c.1 == w))
+                .collect();
+            for (k, hit) in ups {
+                if done.contains(&k) {
+                    continue;
+                }
+                done.push(k);
+                let x = self.hv.entry(k).or_insert((0, 0));
+                if hit {
+                    x.0 = x.0.saturating_add(1);
+                    self.hv_stats.0 += 1;
+                } else {
+                    x.1 = x.1.saturating_add(1);
+                    self.hv_stats.1 += 1;
+                }
+            }
+        }
         // --sit-chunk-gate: memory's top route already predicted w: refresh what stands behind it, create nothing
         let mut gate_skip = false;
         // diagnostic only: SIT_GATE_NOSKIP keeps the gate's drop removal but never refreshes or skips
@@ -4847,7 +4895,7 @@ impl Situation {
             // with --sit-q-contrast a question clause is dropped only at a learned boundary that is also a question
             // word: a Q word inside a clause ("the milk" before ".") must not throw away the clause's facts
             // diagnostic only: SIT_GATE_KEEPDROP keeps the question drop while the gate runs
-            let qdrop = if self.cfg.chunk || self.cfg.chunk_gate && self.t >= self.cfg.gate_from && std::env::var("SIT_GATE_KEEPDROP").is_err() {
+            let qdrop = if self.cfg.no_qdrop || self.cfg.chunk || self.cfg.chunk_gate && self.t >= self.cfg.gate_from && std::env::var("SIT_GATE_KEEPDROP").is_err() {
                 false // the write gate replaces the question drop: nothing is ever dropped
             } else if self.cfg.q_contain {
                 let q = self.clause_q || self.boundary[w as usize] && self.is_q(w);
@@ -5329,6 +5377,9 @@ impl Situation {
                 let hk = if self.cfg.heads_nokind { self.kn } else { kd };
                 let now = self.t;
                 if let Some(ent) = self.heads_tab.get_mut(&(x, key, hk)) {
+                    if self.cfg.validate && !self.cfg.validate_slot && ent.0 != v {
+                        self.hv.remove(&(x, key, hk)); // a new value: a new record, unvalidated
+                    }
                     (ent.0, ent.1, ent.2) = (v, now, c);
                     self.heads_of.get_mut(&x).unwrap()[ent.3 as usize] = (key, hk, v, now, c);
                     if self.cfg.lt_budget > 0 {
@@ -5353,6 +5404,9 @@ impl Situation {
                                 }
                             }
                         }
+                    }
+                    if self.cfg.validate && !self.cfg.validate_slot {
+                        self.hv.remove(&(x, key, hk));
                     }
                     let l = self.heads_of.entry(x).or_default();
                     self.heads_tab.insert((x, key, hk), (v, now, c, l.len() as u32));

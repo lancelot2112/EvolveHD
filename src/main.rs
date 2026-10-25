@@ -93,6 +93,9 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         chunk: flag(args, "--sit-chunk"),
         bnd_collide: flag(args, "--sit-bnd-collide"),
         chunk_gate: flag(args, "--sit-chunk-gate"),
+        validate: flag(args, "--sit-validate"),
+        no_qdrop: flag(args, "--sit-no-qdrop"),
+        validate_slot: flag(args, "--sit-validate-slot"),
         gate_from: arg(args, "--sit-gate-from").map(|x| x.parse().unwrap()).unwrap_or(0),
         q_contain: flag(args, "--sit-q-contain"),
         q_in_l: flag(args, "--sit-q-in-l"),
@@ -976,6 +979,9 @@ fn main() {
                 if x.cfg.chunk {
                     let (n, ws) = x.chunk_report();
                     eprintln!("chunks: {} started, {:.2} words each | starts a chunk (of times read): {}", n, x.time() as f64 / n.max(1) as f64, ws.iter().map(|&(w, a, b)| format!("{} {}/{}", name(w), a, b)).collect::<Vec<_>>().join(", "));
+                }
+                if x.cfg.validate {
+                    eprintln!("validated records: hits {} misses {}", x.hv_stats.0, x.hv_stats.1);
                 }
                 if x.cfg.chunk_gate {
                     eprintln!("write gate: memory's top route right {} times, refreshed and created nothing {} times", x.gate_hits.0, x.gate_hits.1);
