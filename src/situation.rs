@@ -243,6 +243,12 @@ pub struct SitCfg {
     pub q_contain: bool,
     /// (with --sit-bnd-unit) a clause's hit is weighted by the words it covers
     pub bnd_unit_len: bool,
+    /// Boundary proposals by integer surprise, replacing k90 openness and its hysteresis. For each word u, running
+    /// means of the forward surprisal of what follows it, bl(n(u.)) - bl(n(u,w)), and of the backward surprisal of
+    /// what precedes it, bl(n(.u)) - bl(n(v,u)); u is proposed when both exceed the stream's own running means (no
+    /// threshold besides "more surprising than usual"). With --sit-bnd-unit the clause level disposes, and the
+    /// learned set L that commits, drifts, cues and detects is the proposals the judge keeps as stops.
+    pub bnd_surprise: bool,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -849,6 +855,12 @@ pub struct Situation {
     pub sq_opened: u64,
     pub sq_closed: u64,
     mood: Vec<u8>,
+    proposed: Vec<bool>,                            // --sit-bnd-surprise: the surprise proposals (the judge disposes)
+    n_out: Vec<u32>,                                // --sit-bnd-surprise: bigram counts with the word first
+    n_in: Vec<u32>,                                 // --sit-bnd-surprise: bigram counts with the word second
+    sf: Vec<u32>,                                   // --sit-bnd-surprise: running mean of forward surprisal, x16
+    sb: Vec<u32>,                                   // --sit-bnd-surprise: running mean of backward surprisal, x16
+    sglob: (u32, u32),                              // --sit-bnd-surprise: the stream's running means (forward, backward), x16
     ustop: Vec<bool>,                               // --sit-bnd-unit: does this proposed word stop the binding walk
     uwin: Vec<(u32, u32)>,                          // --sit-bnd-unit: (wins, losses) for flipping the word's decision
     hu: HashMap<u64, [u32; 2]>,                     // --sit-bnd-unit: unit head table, (type, path) -> newest 2 values
@@ -921,6 +933,12 @@ impl Situation {
             seg_draw: HashMap::default(),
             seg_hits: HashMap::default(),
             seg_n: HashMap::default(),
+            proposed: vec![false; nw],
+            n_out: vec![0; nw],
+            n_in: vec![0; nw],
+            sf: vec![0; nw],
+            sb: vec![0; nw],
+            sglob: (0, 0),
             ustop: vec![true; nw],
             uwin: vec![(0, 0); nw],
             hu: HashMap::default(),
@@ -2874,6 +2892,19 @@ impl Situation {
     /// Learn the query from word w: a mistake-driven (perceptron) three-factor update. When the top route was
     /// wrong, the best-scored route that held w is stepped up (Go) and the top route down (NoGo), for every
     /// (query bit, route feature) pair: pre-synaptic the query, post-synaptic the route, the modulator right or wrong.
+    /// --sit-bnd-surprise: propose the words more surprising than usual on both sides; L = the proposals the judge
+    /// keeps as stops.
+    fn surprise_boundaries(&mut self) {
+        let (gf, gb) = self.sglob;
+        for u in 0..self.nw {
+            self.proposed[u] = self.n_out[u] > 0 && self.n_in[u] > 0 && self.sf[u] > gf && self.sb[u] > gb;
+            self.boundary[u] = self.proposed[u] && (!self.cfg.bnd_unit || self.ustop[u]);
+        }
+    }
+    /// A proposed boundary (the judge's candidates): the surprise proposals, or else the learned set L.
+    fn is_proposed(&self, u: u32) -> bool {
+        if self.cfg.bnd_surprise { self.proposed[u as usize] } else { self.boundary[u as usize] }
+    }
     /// --sit-bnd-unit: a clause item's hit (see `bnd_unit`), then the clause is written to the unit table.
     fn unit_item(&mut self, ws: &[(u32, bool)]) -> u32 {
         if ws.len() < 2 {
@@ -2925,7 +2956,7 @@ impl Situation {
         // proposed words crossed inside this clause: shadow = the clause split there
         for i in 1..d.len().saturating_sub(1) {
             let u = d[i].0;
-            if !self.boundary[u as usize] {
+            if !self.is_proposed(u) {
                 continue;
             }
             let (a, b) = (&d[..i], &d[i + 1..]);
@@ -2948,7 +2979,7 @@ impl Situation {
         let mut best: Option<(u32, u32)> = None;
         for u in 0..self.nw as u32 {
             let (wn, l) = self.uwin[u as usize];
-            if !self.boundary[u as usize] || wn <= l {
+            if !self.is_proposed(u) || wn <= l {
                 continue;
             }
             let m = wn - l;
@@ -2960,6 +2991,9 @@ impl Situation {
             let ui = u as usize;
             self.ustop[ui] = !self.ustop[ui];
             self.uwin[ui] = (0, 0);
+            if self.cfg.bnd_surprise {
+                self.boundary[ui] = self.proposed[ui] && self.ustop[ui];
+            }
             if std::env::var("SIT_DEBUG_BND").is_ok() {
                 eprintln!("UNIT {} word {} stop -> {}", self.t, u, self.ustop[ui]);
             }
@@ -2972,7 +3006,7 @@ impl Situation {
     }
     /// --sit-bnd-unit: (word, stops?, wins, losses) for each proposed boundary.
     pub fn bnd_unit_report(&self) -> Vec<(u32, bool, u32, u32)> {
-        (0..self.nw as u32).filter(|&w| self.boundary[w as usize]).map(|w| (w, self.ustop[w as usize], self.uwin[w as usize].0, self.uwin[w as usize].1)).collect()
+        (0..self.nw as u32).filter(|&w| self.is_proposed(w)).map(|w| (w, self.ustop[w as usize], self.uwin[w as usize].0, self.uwin[w as usize].1)).collect()
     }
     /// --sit-bnd-use: judge the proposed boundaries crossed by this prediction's routes (see `bnd_use`).
     fn bnd_use_update(&mut self, w: u32) {
@@ -4253,6 +4287,20 @@ impl Situation {
                 let c = self.succ.entry((u, w)).or_insert(0);
                 *c += 1;
                 let c = *c;
+                if self.cfg.bnd_surprise {
+                    // surprisal in bits (bit lengths), before this pair is counted: x16 fixed point, running means
+                    // by shifts (a word's over about 32 of its occurrences, the stream's over about 1,024 words)
+                    let bl = |x: u32| 32 - x.leading_zeros();
+                    let (ui, wi) = (u as usize, w as usize);
+                    let f = (bl(self.n_out[ui] + 1) - bl(c)) << 4;
+                    let b = (bl(self.n_in[wi] + 1) - bl(c)) << 4;
+                    self.n_out[ui] += 1;
+                    self.n_in[wi] += 1;
+                    let ema = |m: u32, x: u32, k: u32| ((m as i64) + ((x as i64 - m as i64) >> k)) as u32;
+                    self.sf[ui] = ema(self.sf[ui], f, 5);
+                    self.sb[wi] = ema(self.sb[wi], b, 5);
+                    self.sglob = (ema(self.sglob.0, f, 10), ema(self.sglob.1, b, 10));
+                }
                 let t = self.succ_top.entry(u).or_insert((w, 0));
                 if c > t.1 {
                     *t = (w, c);
@@ -4620,7 +4668,11 @@ impl Situation {
             }
         }
         if self.cfg.bnd2 && self.cfg.recluster > 0 && self.t % self.cfg.recluster as u64 == 0 {
-            self.open_boundaries();
+            if self.cfg.bnd_surprise {
+                self.surprise_boundaries();
+            } else {
+                self.open_boundaries();
+            }
             if self.cfg.bnd_unit {
                 self.unit_flip();
             }
