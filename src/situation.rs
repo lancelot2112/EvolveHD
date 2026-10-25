@@ -4105,6 +4105,10 @@ impl Situation {
     /// --sit-mood-floor one time in 16 for any boundary below that, so a detector that fell below threshold keeps
     /// receiving evidence and can climb back (a counter that stops being tested cannot recover).
     fn is_q(&self, u: u32) -> bool {
+        // diagnostic only (an oracle, not a learner): SIT_QORACLE = the word id that closes questions
+        if let Some(q) = std::env::var("SIT_QORACLE").ok().and_then(|x| x.parse::<u32>().ok()) {
+            return u == q;
+        }
         if self.cfg.q_contrast {
             return self.q_ok(u) || self.cfg.mood_floor && hash(self.t, u as u64 + 999) & 15 == 0;
         }
@@ -4334,7 +4338,9 @@ impl Situation {
         if self.cfg.chunk {
             // the last 3 chunks, newest word first, at most 12 words
             let mut out = vec![];
-            for ch in self.chunks.iter().rev().take(3) {
+            // diagnostic only: SIT_CHUNK_CUE = how many chunks (default 3)
+            let nc = std::env::var("SIT_CHUNK_CUE").ok().and_then(|x| x.parse::<usize>().ok()).unwrap_or(3);
+            for ch in self.chunks.iter().rev().take(nc) {
                 out.extend(ch.iter().rev());
             }
             out.truncate(12);
@@ -5109,9 +5115,28 @@ impl Situation {
                 }
             }
         }
-        self.commit();
-        self.committed += 1;
-        for j in 0..self.cfg.bdrift {
+        // diagnostic only (oracle, not a learner): SIT_CK_ORACLE="d,q" commits only at a chunk holding word d and drops
+        // the buffered facts at a chunk holding word q (a question), as the old rule did at ". ?"
+        let orc: Option<(u32, u32)> = std::env::var("SIT_CK_ORACLE").ok().and_then(|x| {
+            let v: Vec<u32> = x.split(',').filter_map(|y| y.parse().ok()).collect();
+            if v.len() == 2 { Some((v[0], v[1])) } else { None }
+        });
+        if let Some((d, q)) = orc {
+            if ws.contains(&q) {
+                self.buf.clear();
+                self.bufp.clear();
+                self.dropped += 1;
+            } else if ws.contains(&d) {
+                self.commit();
+                self.committed += 1;
+            }
+        } else {
+            self.commit();
+            self.committed += 1;
+        }
+        // diagnostic only: SIT_CHUNK_NODRIFT turns the drift at chunk close off
+        let nd = std::env::var("SIT_CHUNK_NODRIFT").is_ok();
+        for j in 0..if nd { 0 } else { self.cfg.bdrift } {
             let h = hash(self.t * 31 + j as u64, 97);
             let i = (h % self.cfg.k as u64) as usize;
             self.ctx_off[i] = (hash(h, 98) % self.cfg.d as u64) as u32;
