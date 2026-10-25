@@ -955,7 +955,8 @@ impl Situation {
             pk_after: vec![(0, 0); nw],
             pk_all: (0, 0, 0),
             ucommit: false,
-            ustop: vec![!cfg.bnd_surprise; nw], // surprise proposals start crossed: the judge makes stops
+            // surprise proposals start crossed (the judge makes stops), or as stops with SIT_PROPOSE_STOP (diagnostic)
+            ustop: vec![!cfg.bnd_surprise || std::env::var("SIT_PROPOSE_STOP").is_ok(); nw],
             uwin: vec![(0, 0); nw],
             hu: HashMap::default(),
             uring: std::collections::VecDeque::new(),
@@ -2988,10 +2989,12 @@ impl Situation {
         let ring: Vec<(u32, bool)> = self.uring.iter().copied().collect();
         let d: Vec<(u32, bool)> = ring[st..end].to_vec();
         if self.cfg.bnd_clean {
+            // the walk binds a stop word to the words after it, so the clause includes the stop that opened it
+            let d: Vec<(u32, bool)> = if self.useg.1.is_some() && st > 0 { ring[st - 1..end].to_vec() } else { d };
             let cd = self.clean_item(&d) as u32;
             if let Some(u) = self.useg.1 {
-                let prev: Vec<(u32, bool)> = ring[..st].to_vec();
-                let merged: Vec<(u32, bool)> = prev.iter().chain(d.iter()).copied().collect();
+                let prev: Vec<(u32, bool)> = ring[..st].to_vec(); // the previous clause, then this stop
+                let merged: Vec<(u32, bool)> = prev.iter().chain(d.iter().skip(1)).copied().collect();
                 let cs = self.clean_item(&merged) as u32;
                 let cdef = self.uprev_hits & cd;
                 let x = &mut self.uwin[u as usize];
