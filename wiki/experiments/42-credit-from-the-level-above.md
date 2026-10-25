@@ -88,3 +88,34 @@ The plain training stories end at word 102,303. After that come the 1k training 
 2. Find out whether crossing "and" and "of" is what costs 4k. Check the hand-ban stack with those two crossed.
 3. **Make it self-similar.** Units today are cut by recurrence alone, so a learned opener set per level is needed for the same judge to credit unit cuts from the epoch level.
 4. Route the same shadow comparison to heads and chain relations (the panel's second step).
+
+## Replacing the proposer: forum five's surprise rule (failed)
+
+The owner asked to replace the hand-set filters with information measures, starting with the boundary proposer. Today's proposer is k90 openness, with 9/10, ½ and ¼ and a peak hysteresis. Forum five's replacement:
+- a surprise peak is a word whose surprisal (bits, given the word before) exceeds the running mean;
+- a word is proposed when the word after it is a peak more often than words are in general.
+
+Its prediction was "." and "?" as the top two on the pilot, with "," "and" "of" not proposed.
+
+**Offline check (`scratchpad/surprise/peaks.py`, real streams, first 300k words):** surprise peaks follow any word that precedes a content word.
+
+| Stream | Top words by peak rate | "." / "?" rank |
+|---|---|---|
+| Small qa2 | the . ? sandra daniel john mary | 2 / 3 |
+| Story set | the ? is . daniel john | 4 / 2 |
+| Pilot | a the his their and an been . | 8 / 11 ("and" 5, "," 28) |
+
+**In the reader** (`--sit-bnd-surprise`, `--sit-bnd-peak`; binaries `sit-42a`–`sit-42e`; scripts `runs/exp42/s1.sh`–`s4.sh`, `p1.sh`), with the clause judge disposing:
+
+| Proposer, start | Small qa2 | Story set | Pilot | What happened |
+|---|---|---|---|---|
+| Type-average surprise above the stream's mean, proposals start as stops | 41% | 59.2% | 0 / 0% | dozens of book words and names proposed; the judge cannot undo them |
+| The same, proposals start crossed | 14% | 14.8% | 0 / 0% | no clause ever closed, so the judge got no votes (a fault, fixed in p1) |
+| The same, start as stops, clauses also close on overflow, every significant flip | 66% | 73.8% | 0 / 0% | as the first |
+| **Forum five's peaks, start crossed, judge closes clauses at commits** | 14% | 14.8% | 0 / 0% | the judge votes, but in the all-crossed world splitting at "." loses (qa2s 273 / 644, story 164 / 350), so no stop is ever made; on the pilot, book words ("i you was at but a that this and of his it he had with in") become stops |
+
+**What this means:**
+- **The clause judge refines a sane proposal set but cannot build one.** It works from k90 openness, which proposes "the ." on qa2, ". ?" on the story set and ". ? , a and of" on the pilot. From no stops, or from far too many, it fails.
+- **Forum five's prediction fails offline.** Surprise peaks mark "a content word comes next", not "an event ends".
+- **k90 openness stays for now.** It is itself a branching-factor (entropy-like) statistic, with hand-set fractions.
+- **The candidate for a learned proposer is forum seven's TEM clean-slot ledger.** Its signal is strongest when the stops are most wrong: with no stops, every clause has a collision. Offline it measured collisions in 1.00 of clauses with no stops, and 0 with ". ?".
