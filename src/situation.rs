@@ -253,6 +253,12 @@ pub struct SitCfg {
     /// before) exceeds the running mean (shift 3, the clause timescale); u is proposed when the word after u is a
     /// peak more often than words are in general (homeostatic: each word against the stream's own rate)
     pub bnd_peak: bool,
+    /// (with --sit-bnd-unit) the TEM seat's structural ledger in place of the clause value: a clause is clean when
+    /// every content word in it (a kind of 3 or more) is bound to another content word within the binding window
+    /// (no orphan), and no content word gets two different content values of one kind (no collision). A world of
+    /// several clauses is clean when all its clauses are; the shadow test compares clean(shadow) with clean(default)
+    /// on the same words. No memory and no questions are needed.
+    pub bnd_clean: bool,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -2937,6 +2943,32 @@ impl Situation {
         // whole clause on the same words
         if self.cfg.bnd_unit_len { hit * ws.len() as u32 } else { hit }
     }
+    /// --sit-bnd-clean: is this clause clean (no orphan, no collision among its content words)?
+    fn clean_item(&self, ws: &[(u32, bool)]) -> bool {
+        let content = |x: u32| self.ksize.get(&self.kk(x)).copied().unwrap_or(0) >= 3;
+        let win = self.cfg.win.max(1);
+        let cw: Vec<(usize, u32)> = ws.iter().enumerate().filter(|(_, x)| content(x.0)).map(|(i, x)| (i, x.0)).collect();
+        for (a, &(i, e)) in cw.iter().enumerate() {
+            let mut bound = false;
+            let mut by_kind: Vec<(u32, u32)> = vec![]; // (kind, value) seen bound to e
+            for (b, &(j, v)) in cw.iter().enumerate() {
+                if a == b || i.abs_diff(j) > win || v == e {
+                    continue;
+                }
+                bound = true;
+                let k = self.kk(v);
+                match by_kind.iter().find(|x| x.0 == k) {
+                    Some(x) if x.1 != v => return false, // a collision: two values of one kind
+                    Some(_) => {}
+                    None => by_kind.push((k, v)),
+                }
+            }
+            if !bound {
+                return false; // an orphan
+            }
+        }
+        true
+    }
     /// --sit-bnd-unit: called with each word read (and whether the reader's top proposal missed it). At a binding
     /// stop the current clause closes; the stop that opened it and the proposed words crossed inside it are judged
     /// against their shadow worlds on the same words.
@@ -2955,6 +2987,39 @@ impl Situation {
         let st = self.useg.0;
         let ring: Vec<(u32, bool)> = self.uring.iter().copied().collect();
         let d: Vec<(u32, bool)> = ring[st..end].to_vec();
+        if self.cfg.bnd_clean {
+            let cd = self.clean_item(&d) as u32;
+            if let Some(u) = self.useg.1 {
+                let prev: Vec<(u32, bool)> = ring[..st].to_vec();
+                let merged: Vec<(u32, bool)> = prev.iter().chain(d.iter()).copied().collect();
+                let cs = self.clean_item(&merged) as u32;
+                let cdef = self.uprev_hits & cd;
+                let x = &mut self.uwin[u as usize];
+                if cs > cdef {
+                    x.0 += 1;
+                } else if cs < cdef {
+                    x.1 += 1;
+                }
+            }
+            for i in 1..d.len().saturating_sub(1) {
+                let u = d[i].0;
+                if !self.is_proposed(u) {
+                    continue;
+                }
+                let cs = (self.clean_item(&d[..i]) && self.clean_item(&d[i + 1..])) as u32;
+                let x = &mut self.uwin[u as usize];
+                if cs > cd {
+                    x.0 += 1;
+                } else if cs < cd {
+                    x.1 += 1;
+                }
+            }
+            self.uring.drain(..st);
+            let st_word = if self.bstop(w) { Some(w) } else { None };
+            self.useg = (self.uring.len(), st_word, 0);
+            self.uprev_hits = cd;
+            return;
+        }
         let hd = self.unit_item(&d);
         // the stop that opened this clause: shadow = the previous clause, that stop and this clause merged
         if let Some(u) = self.useg.1 {
