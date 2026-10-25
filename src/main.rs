@@ -92,10 +92,12 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         scales: flag(args, "--sit-scales"),
         chunk: flag(args, "--sit-chunk"),
         bnd_collide: flag(args, "--sit-bnd-collide"),
+        bnd_union: flag(args, "--sit-bnd-union"),
         chunk_gate: flag(args, "--sit-chunk-gate"),
         validate: flag(args, "--sit-validate"),
         no_qdrop: flag(args, "--sit-no-qdrop"),
         validate_slot: flag(args, "--sit-validate-slot"),
+        qrec: flag(args, "--sit-qrec"),
         gate_from: arg(args, "--sit-gate-from").map(|x| x.parse().unwrap()).unwrap_or(0),
         q_contain: flag(args, "--sit-q-contain"),
         q_in_l: flag(args, "--sit-q-in-l"),
@@ -979,6 +981,9 @@ fn main() {
                 if x.cfg.chunk {
                     let (n, ws) = x.chunk_report();
                     eprintln!("chunks: {} started, {:.2} words each | starts a chunk (of times read): {}", n, x.time() as f64 / n.max(1) as f64, ws.iter().map(|&(w, a, b)| format!("{} {}/{}", name(w), a, b)).collect::<Vec<_>>().join(", "));
+                }
+                if x.cfg.qrec {
+                    eprintln!("question records: written {} hits {} misses {}", x.qrec_stats.0, x.qrec_stats.1, x.qrec_stats.2);
                 }
                 if x.cfg.validate {
                     eprintln!("validated records: hits {} misses {}", x.hv_stats.0, x.hv_stats.1);

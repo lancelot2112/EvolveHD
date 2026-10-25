@@ -39,6 +39,24 @@ Binaries `sit-45a` (version 1, `--sit-no-qdrop`), `sit-45b` (`--sit-validate-slo
   - Traces are in the session scratchpad, `q_nd.txt` and `q_dr.txt`.
 - **The L-free detector on the pilot finds "sandra went daniel mary ? john sugar":** it fires on "?" among other words, so the reader answers (2,076 predictions), but L is still full of book words, which caps the score.
 
+## Question records keyed by what the question asks (`--sit-qrec`)
+
+The fix the first round pointed to, built as the owner asked ("store the context with its prediction, and that prediction gets validated or not"):
+- **The record.** At an answer, each content cue word e gets a record (question form, e) → answer. The form is the cue with every content word replaced by its kind, so "where is the milk ?" and "where is the apple ?" share a form.
+- **Validation.** When the same question about e is answered again, the record's value is checked against the answer (a hit or a miss), then set to the new answer.
+- **Reading.** At a question, each content cue word's record is offered as a candidate. Its validation (hits and misses, capped at 3) and whether e has a newer long-term head are features, so the route learner learns when to trust it. A record with more misses than hits is not offered.
+- **The question drop stays** for the raw bindings. Binary `sit-45d`.
+
+| Run | Story set (where-object) | Small qa2 | Pilot 0k / 4k | Records: written / hits / misses |
+|---|---|---|---|---|
+| Question drop (exp 42's best) | 98.5% (92.6%) | 100% | 100 / 100% | — |
+| Drop + question records | 98.5% (92.6%) | 100% | 100 / 100% | story 32 / 262 / 771; qa2 177 / 1,627 / 4,598; pilot 762 / 387 / 1,803 |
+| No drop + question records | 94.1% (64.2%) | — | — | 32 / 262 / 771 |
+
+- **The records change no answer.** When the same question comes back, the stored answer is right only 18–26% of the time (bAbI moves things between questions). Most records fail validation and are never offered, and the rest never outrank the facts.
+- **They do not cure the shortcut either:** with no drop, the story set is unchanged (94.1%). The damage comes from the raw question bindings, which the records do not replace.
+- **So in these tasks the facts carry the answers, not remembered answers.** Validation works as intended: it keeps stale answers out. But a remembered answer is rarely worth keeping here.
+
 ## What this means
 
 - **Storing a question with its answer is good only if it is keyed by the question's content.** Today a stored question becomes bindings of "?", "the" and "where" to the answer, which the route learner then uses as a cheap recency trick. A validated record would be keyed by (question form, entity) → answer.
@@ -47,5 +65,5 @@ Binaries `sit-45a` (version 1, `--sit-no-qdrop`), `sit-45b` (`--sit-validate-slo
 
 ## Next
 
-1. Store the answer as a record keyed by the question form and the cue entity, not as raw bindings of the question's words, with its own hit and miss count. Keep the question drop for the raw bindings.
+1. (Done above: question records change nothing, because stored answers are stale 3 times in 4.)
 2. G2 with the L-free detector on long BABILong and full qa2, and the union of k90's and the ledger's proposals, so book words stop entering L.

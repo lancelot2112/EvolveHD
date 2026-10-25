@@ -278,6 +278,9 @@ pub struct SitCfg {
     /// twice as often as they follow words in general: resets(u)·N ≥ 2·R·n(u), with n(u) ≥ 16 and resets(u) > 0.
     /// The proposals are the learned set L in every job (the judge, --sit-bnd-unit, disposes as it does k90's).
     pub bnd_collide: bool,
+    /// The union of k90 openness and the collision ledger as the proposer (the judge disposes): k90 keeps "?" on
+    /// book text, the ledger adds what k90 misses. k90's own hysteresis sees only k90's set.
+    pub bnd_union: bool,
     /// The write gate in place of the question drop: when memory's top route already predicted w, the head (or slot)
     /// behind it is refreshed and w creates no bindings; on a miss w binds as usual. No clause is ever dropped.
     pub chunk_gate: bool,
@@ -296,6 +299,14 @@ pub struct SitCfg {
     /// kind), not its current value, so a slot rewritten by every answer (a question word taken for an entity) builds a
     /// track record too
     pub validate_slot: bool,
+    /// Question records (the owner's rule, keyed by what the question asks): at an answer, each content cue word e gets
+    /// a record (question form, e) -> the answer, where the form is the cue with every content word replaced by its
+    /// kind. The record keeps its own (hits, misses): when the same question about e is answered again, the record's
+    /// value is checked against the answer (a hit or a miss) and then set to it. At a question, each content cue
+    /// word's record is offered as a candidate with its validation (hits, misses, capped at 3) and whether e has a
+    /// newer long-term head as features, so the route learner learns when to trust it; a record with more misses than
+    /// hits is not offered. The question drop still keeps the question's raw bindings out.
+    pub qrec: bool,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -925,6 +936,10 @@ pub struct Situation {
     cf_open: Vec<u32>,                              // --sit-bnd-collide: the content kinds of the open frame
     cf_n: Vec<(u32, u32)>,                          // --sit-bnd-collide: per word, (resets right after it, occurrences)
     cf_all: (u64, u64),                             // --sit-bnd-collide: (resets, words)
+    k90set: Vec<bool>,                              // --sit-bnd-union: k90's own proposals (for its hysteresis)
+    qrecs: HashMap<(u64, u32), (u32, u64, u16, u16)>, // --sit-qrec: (form, entity) -> (answer, time, hits, misses)
+    qrec_at: (u64, Vec<u32>),                       // --sit-qrec: the open question's form and content cue words
+    pub qrec_stats: (u64, u64, u64),                // --sit-qrec: (records written, hits, misses)
     hv: HashMap<(u32, u32, u32), (u16, u16)>,         // --sit-validate: per head (entity, key, kind), (hits, misses) at answers
     pub hv_stats: (u64, u64),                       // --sit-validate: (hits, misses) counted
     gate_by: Vec<(u32, u32)>,                       // --sit-chunk-gate: per word, (refreshed from a head, from a slot)
@@ -1019,9 +1034,13 @@ impl Situation {
             cf_open: vec![],
             cf_n: vec![(0, 0); nw],
             cf_all: (0, 0),
+            k90set: vec![false; nw],
             gate_hits: (0, 0),
             gate_by: vec![(0, 0); nw],
             hv: HashMap::default(),
+            qrecs: HashMap::default(),
+            qrec_at: (0, vec![]),
+            qrec_stats: (0, 0, 0),
             hv_stats: (0, 0),
             qhead: vec![],
             qhit: vec![0; nw],
@@ -2954,6 +2973,36 @@ impl Situation {
                 }
             }
         }
+        // --sit-qrec: the question records of the content cue words
+        if self.cfg.qrec && self.after_q {
+            let content = |x: u32, me: &Self| me.ksize.get(&me.kk(x)).copied().unwrap_or(0) >= 3;
+            let form = cue.iter().fold(0x51E7u64, |h, &u| hash(h, if content(u, self) { (1u64 << 40) + self.kk(u) as u64 } else { u as u64 }));
+            let ents: Vec<(usize, u32)> = cue.iter().enumerate().filter(|(_, &u)| content(u, self)).map(|(j, &u)| (j, u)).collect();
+            for &(j, e) in &ents {
+                let Some(&(val, t, h, m)) = self.qrecs.get(&(form, e)) else { continue };
+                if m > h || cue.contains(&val) {
+                    continue;
+                }
+                let newer = self.heads_of.get(&e).map_or(false, |l| l.iter().any(|x| x.3 > t)) as u64;
+                let kv = self.kk(val);
+                let mut f = self.route_feats(j, e, &[(0x7F00_0000, kv, 0)]);
+                f.push(Self::fid(66, 1, 0)); // the source: a question record
+                f.push(Self::fid(67, h.min(3) as u64, m.min(3) as u64)); // its validation
+                f.push(Self::fid(68, newer, self.kk(e) as u64)); // e has a newer fact than the record
+                let sc = self.qscore(&q, &f, &mut cache);
+                if dbg {
+                    desc.push(format!("j{}:{}>Q h{}m{}n{}={}", j, e, h, m, newer, val));
+                }
+                cands.push((f, val, sc, t, (0x7F00_0000, kv, u32::MAX, u32::MAX), (0, u32::MAX)));
+                csrc.push((4, 0));
+                ckey1.push(u32::MAX);
+                chead.push((0, 0, 0, 0));
+                qroute.push((j, self.kk(e)));
+            }
+            self.qrec_at = (form, ents.into_iter().map(|x| x.1).collect());
+        } else if self.cfg.qrec {
+            self.qrec_at = (0, vec![]);
+        }
         // best score first; ties: the newest first slot, then the shorter route (stable sort keeps one-hop first)
         if dbg {
             let mut ix: Vec<usize> = (0..cands.len()).collect();
@@ -4404,6 +4453,32 @@ impl Situation {
                         || self.chunks.last().map_or(true, |c| c.len() >= 32)
                 }
             };
+        // --sit-qrec: at an answer, each content cue word's record is validated against the answer, then set to it
+        if self.cfg.qrec && self.after_q && !self.idx_only && self.qrec_at.0 != 0 && self.ksize.get(&self.kk(w)).copied().unwrap_or(0) >= 3 {
+            let (form, ents) = std::mem::take(&mut self.qrec_at);
+            for e in ents {
+                if e == w {
+                    continue;
+                }
+                let now = self.t;
+                match self.qrecs.get_mut(&(form, e)) {
+                    Some(r) => {
+                        if r.0 == w {
+                            r.2 = r.2.saturating_add(1);
+                            self.qrec_stats.1 += 1;
+                        } else {
+                            r.3 = r.3.saturating_add(1);
+                            self.qrec_stats.2 += 1;
+                        }
+                        (r.0, r.1) = (w, now);
+                    }
+                    None => {
+                        self.qrecs.insert((form, e), (w, now, 0, 0));
+                        self.qrec_stats.0 += 1;
+                    }
+                }
+            }
+        }
         // --sit-validate: at an answer, the heads offered with a value of the answer's kind are validated
         if self.cfg.validate && self.after_q && !self.idx_only && !self.qcands.is_empty() {
             let kw = self.kk(w);
@@ -4545,7 +4620,7 @@ impl Situation {
             *self.indep.entry(u).or_default().entry((kp, kn)).or_insert(0) += 1;
         }
         // --sit-bnd-collide: the frame ledger (a content word whose kind the open frame already holds resets it)
-        if self.cfg.bnd_collide {
+        if self.cfg.bnd_collide || self.cfg.bnd_union {
             if let Some(&u) = self.hist.last() {
                 let mut reset = false;
                 let k = self.kk(w);
@@ -5009,6 +5084,20 @@ impl Situation {
         if self.cfg.bnd2 && !self.cfg.chunk && self.cfg.recluster > 0 && self.t % self.cfg.recluster as u64 == 0 {
             if self.cfg.bnd_surprise {
                 self.surprise_boundaries();
+            } else if self.cfg.bnd_union {
+                let cur = std::mem::replace(&mut self.boundary, self.k90set.clone());
+                self.open_boundaries();
+                self.k90set = self.boundary.clone();
+                let (r, n) = self.cf_all;
+                for u in 0..self.nw {
+                    let (ru, nu) = self.cf_n[u];
+                    if nu >= 16 && ru > 0 && ru as u64 * n >= 2 * r * nu as u64 {
+                        self.boundary[u] = true;
+                    }
+                    if self.boundary[u] != cur[u] && std::env::var("SIT_DEBUG_BND").is_ok() {
+                        eprintln!("BNDU {} word {} -> {}", self.t, u, self.boundary[u]);
+                    }
+                }
             } else if self.cfg.bnd_collide {
                 self.collide_boundaries();
             } else {
