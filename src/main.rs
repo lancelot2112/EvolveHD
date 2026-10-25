@@ -89,6 +89,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         bnd_surprise: flag(args, "--sit-bnd-surprise"),
         bnd_peak: flag(args, "--sit-bnd-peak"),
         bnd_clean: flag(args, "--sit-bnd-clean"),
+        scales: flag(args, "--sit-scales"),
         q_contain: flag(args, "--sit-q-contain"),
         q_in_l: flag(args, "--sit-q-in-l"),
         lt_min: arg(args, "--sit-lt-min").map(|s| s.parse().unwrap()).unwrap_or(0),

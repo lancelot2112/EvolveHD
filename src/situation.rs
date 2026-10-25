@@ -259,6 +259,12 @@ pub struct SitCfg {
     /// several clauses is clean when all its clauses are; the shadow test compares clean(shadow) with clean(default)
     /// on the same words. No memory and no questions are needed.
     pub bnd_clean: bool,
+    /// Bindings at several scales with no binding stops (the owner's fractal view, a cheap first test): every word
+    /// binds to all words up to `win` back by exact path, as before but never stopping at a boundary; and, between
+    /// content words only, to words 9-32 back in log-spaced distance bands (9-16, 17-32), whose relation is the band
+    /// and the value's kind (no exact path: far word sequences never recur). Commits, drift, cue and the question
+    /// detector still use the learned set L.
+    pub scales: bool,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -4589,13 +4595,28 @@ impl Situation {
             self.frame_bump(u, Self::fb(3, w as u64));
         }
         let mut path: Vec<u32> = vec![];
-        let back: Vec<u32> = self.clause.iter().rev().take(self.cfg.win).copied().collect();
+        let back: Vec<u32> = if self.cfg.scales {
+            self.hist.iter().rev().take(32).copied().collect()
+        } else {
+            self.clause.iter().rev().take(self.cfg.win).copied().collect()
+        };
+        let content = |x: u32, me: &Self| me.ksize.get(&me.kk(x)).copied().unwrap_or(0) >= 3;
+        let w_content = self.cfg.scales && content(w, self);
         for (si, s) in back.into_iter().enumerate() {
             let ts = self.t.saturating_sub(1 + si as u64);
+            let far = self.cfg.scales && si >= self.cfg.win;
+            if far && !(w_content && content(s, self)) {
+                continue; // far bands bind content words only
+            }
             if s != w {
                 for dir in 0..2u32 {
                     let mut p = vec![dir];
-                    if self.cfg.sense {
+                    if far {
+                        // the band (9-16 or 17-32 back) and the value's kind; the low byte is the path's direction code
+                        let band = 32 - ((si + 1) as u32).leading_zeros(); // 4 or 5 (or 6 at exactly 32)
+                        let vk = self.kk(if dir == 0 { w } else { s });
+                        p = vec![(2 * band + dir) | (vk << 8)];
+                    } else if self.cfg.sense {
                         p.push(path.len() as u32);
                         p.extend(&path);
                         for (pi, &pw) in path.iter().enumerate() {
@@ -4660,7 +4681,7 @@ impl Situation {
                 }
             }
             path.push(s);
-            if self.walk_stop(s, ts) {
+            if !self.cfg.scales && self.walk_stop(s, ts) {
                 break;
             }
         }
