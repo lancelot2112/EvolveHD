@@ -2927,7 +2927,7 @@ impl Situation {
     /// against their shadow worlds on the same words.
     fn unit_judge(&mut self, w: u32, missed: bool) {
         self.uring.push_back((w, missed));
-        if !self.bstop(w) {
+        if !self.bstop(w) && self.buf.len() <= 64 {
             if self.uring.len() > 256 {
                 // a runaway clause: forget the oldest words (no judgement across them)
                 self.uring.pop_front();
@@ -2987,7 +2987,17 @@ impl Situation {
                 best = Some((u, m));
             }
         }
-        if let Some((u, _)) = best {
+        let mut flips: Vec<u32> = best.map(|b| vec![b.0]).unwrap_or_default();
+        if self.cfg.bnd_surprise {
+            // many proposals: every word whose flip is significant flips (each at most once per re-pooling)
+            flips = (0..self.nw as u32)
+                .filter(|&u| {
+                    let (wn, l) = self.uwin[u as usize];
+                    self.is_proposed(u) && wn > l && ((wn - l) as u64).pow(2) > 9 * (wn + l) as u64
+                })
+                .collect();
+        }
+        for u in flips {
             let ui = u as usize;
             self.ustop[ui] = !self.ustop[ui];
             self.uwin[ui] = (0, 0);
