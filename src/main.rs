@@ -100,6 +100,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         qrec: flag(args, "--sit-qrec"),
         act: flag(args, "--sit-act"),
         seq_replay: flag(args, "--sit-seq-replay"),
+        teacher_route: flag(args, "--sit-teacher-route"),
         gate_from: arg(args, "--sit-gate-from").map(|x| x.parse().unwrap()).unwrap_or(0),
         q_contain: flag(args, "--sit-q-contain"),
         q_in_l: flag(args, "--sit-q-in-l"),

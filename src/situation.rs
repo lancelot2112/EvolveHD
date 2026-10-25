@@ -320,6 +320,9 @@ pub struct SitCfg {
     /// the ring are offered as candidates (source and rank as features), so the route learner can learn to replay a
     /// sequence it just heard.
     pub seq_replay: bool,
+    /// Stage 4: the world's sentence right after an act (the teacher saying what the reader should have said) is
+    /// feedback for the act path, not a fact: its clause is not committed to fact memory.
+    pub teacher_route: bool,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -954,6 +957,7 @@ pub struct Situation {
     self_word: Option<u32>,                         // stage 3: the next observe is a self slot; the word the reader said (MAX: not heard)
     act_self: Vec<(u32, u32)>,                      // stage 3: per word u said by the reader itself, (acts after it paid, charged)
     wring: std::collections::VecDeque<u32>,         // --sit-replay: the world's last 256 words
+    in_teacher: bool,                               // --sit-teacher-route: reading the teacher's sentence after an act
     self_mark: Option<usize>,                       // stage 3: the history's length before the current act's first self word
     prev_self: bool,                                // stage 3: the last word in the context was said by the reader
     act_n: Vec<(u32, u32)>,                         // --sit-act: per word u, (acts after u paid, charged)
@@ -1063,6 +1067,7 @@ impl Situation {
             act_self: vec![(0, 0); nw],
             prev_self: false,
             self_mark: None,
+            in_teacher: false,
             wring: std::collections::VecDeque::new(),
             self_word: None,
             self_words: 0,
@@ -4529,6 +4534,7 @@ impl Situation {
             if let Some(m) = self.self_mark.take() {
                 self.hist.truncate(m.min(self.hist.len()));
                 self.prev_self = false;
+                self.in_teacher = self.cfg.teacher_route;
             }
         }
         // --sit-chunk: does w start a chunk? (unless it is the majority successor of the word before, counted before
@@ -5108,7 +5114,10 @@ impl Situation {
             // with --sit-q-contrast a question clause is dropped only at a learned boundary that is also a question
             // word: a Q word inside a clause ("the milk" before ".") must not throw away the clause's facts
             // diagnostic only: SIT_GATE_KEEPDROP keeps the question drop while the gate runs
-            let qdrop = if self.cfg.act && !self.cfg.no_qdrop {
+            let teacher = std::mem::take(&mut self.in_teacher);
+            let qdrop = if teacher {
+                true // the teacher's sentence after an act: feedback for the act path, not a fact
+            } else if self.cfg.act && !self.cfg.no_qdrop {
                 act_route // the clause before a Go word is the act's cue, not a fact
             } else if self.cfg.no_qdrop || self.cfg.chunk || self.cfg.chunk_gate && self.t >= self.cfg.gate_from && std::env::var("SIT_GATE_KEEPDROP").is_err() {
                 false // the write gate replaces the question drop: nothing is ever dropped
