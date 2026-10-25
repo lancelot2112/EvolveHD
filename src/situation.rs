@@ -265,6 +265,22 @@ pub struct SitCfg {
     /// and the value's kind (no exact path: far word sequences never recur). Commits, drift, cue and the question
     /// detector still use the learned set L.
     pub scales: bool,
+    /// Surprise chunks in place of the learned boundary set, for every job (forum eight, the recurrent seat): a chunk
+    /// starts at w unless w is the majority successor of the word before (succ_top[u] == w and 2·top > n(u)). Words
+    /// bind within their chunk and the previous one (level 0, exact path, no stops); a chunk's head (its first word)
+    /// binds to the heads of up to 7 chunks before those (level 1, the exact path of every word between, marked as
+    /// level 1). Facts commit when a chunk closes, the context drifts there, the cue is the last 3 chunks, range
+    /// texts are chunks, and the learned boundary set is never computed (it stays empty).
+    pub chunk: bool,
+    /// The TEM seat's slot-collision ledger as the boundary proposer, in place of k90 openness (forum eight, G2): an
+    /// open frame holds the content kinds seen since it opened; a content word whose kind is already in it closes it
+    /// and opens a new one (a reset, charged to the word before). A word is proposed when resets follow it at least
+    /// twice as often as they follow words in general: resets(u)·N ≥ 2·R·n(u), with n(u) ≥ 16 and resets(u) > 0.
+    /// The proposals are the learned set L in every job (the judge, --sit-bnd-unit, disposes as it does k90's).
+    pub bnd_collide: bool,
+    /// The write gate in place of the question drop: when memory's top route already predicted w, the head (or slot)
+    /// behind it is refreshed and w creates no bindings; on a miss w binds as usual. No clause is ever dropped.
+    pub chunk_gate: bool,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -887,6 +903,16 @@ pub struct Situation {
     useg: (usize, Option<u32>, u32),                // --sit-bnd-unit: (start of the current clause in uring, the stop that opened it, its hits)
     uprev_hits: u32,                                // --sit-bnd-unit: hits of the clause before the current one
     clause_q: bool,                                 // --sit-q-contain: the current clause holds a question word of L
+    chunks: Vec<Vec<u32>>,                          // --sit-chunk: the newest chunks' words, the open chunk last
+    succ_n: Vec<u32>,                               // --sit-chunk: per word, its successors counted (n(u))
+    ck_start: Vec<u32>,                             // --sit-chunk: per word, how often it started a chunk
+    pub ck_n: u64,                                  // --sit-chunk: chunks started
+    cf_open: Vec<u32>,                              // --sit-bnd-collide: the content kinds of the open frame
+    cf_n: Vec<(u32, u32)>,                          // --sit-bnd-collide: per word, (resets right after it, occurrences)
+    cf_all: (u64, u64),                             // --sit-bnd-collide: (resets, words)
+    gate_by: Vec<(u32, u32)>,                       // --sit-chunk-gate: per word, (refreshed from a head, from a slot)
+    pub gate_hits: (u64, u64),                      // --sit-chunk-gate: (words whose bindings were skipped, heads or slots refreshed)
+    qhead: Vec<(u8, u32, u32, u32)>,                // --sit-chunk-gate: per ranked candidate, what stands behind it: (1, entity, key, kind) a head, (2, entity, class, kind) a slot, (0, ..) nothing to refresh
     qhit: Vec<u32>,                                 // --sit-q-contrast: non-trivial right top proposals after each word
     qn: Vec<u32>,                                   // --sit-q-contrast: non-trivial predictions after each word
     qall: (u64, u64),                               // --sit-q-contrast: the same over every word
@@ -969,6 +995,16 @@ impl Situation {
             useg: (0, None, 0),
             uprev_hits: 0,
             clause_q: false,
+            chunks: vec![],
+            succ_n: vec![0; nw],
+            ck_start: vec![0; nw],
+            ck_n: 0,
+            cf_open: vec![],
+            cf_n: vec![(0, 0); nw],
+            cf_all: (0, 0),
+            gate_hits: (0, 0),
+            gate_by: vec![(0, 0); nw],
+            qhead: vec![],
             qhit: vec![0; nw],
             qn: vec![0; nw],
             qall: (0, 0),
@@ -1974,6 +2010,9 @@ impl Situation {
         if self.cfg.q_contrast {
             return (0..self.nw as u32).filter(|&w| self.q_ok(w)).collect();
         }
+        if self.cfg.q_contrast {
+            return (0..self.nw as u32).filter(|&w| self.q_ok(w)).collect();
+        }
         (0..self.nw as u32).filter(|&w| self.boundary[w as usize] && self.mood[w as usize] >= 8).collect()
     }
 
@@ -2606,6 +2645,7 @@ impl Situation {
         let mut qroute: Vec<(usize, u32)> = vec![];
         let mut csrc: Vec<(u8, u32)> = vec![];
         let mut ckey1: Vec<u32> = vec![];
+        let mut chead: Vec<(u8, u32, u32, u32)> = vec![];
         self.after_q = self.hist.last().map_or(false, |&u| self.is_q(u));
         if self.cfg.sq_max > 0 && self.cfg.sq_mode > 0 && self.after_q {
             if self.qring.len() < 32 {
@@ -2640,14 +2680,15 @@ impl Situation {
             let content_cue = !self.fm(3) || is_content_e;
             if self.cfg.heads && content_cue {
                 // long-term heads: the newest two per value kind, ranked within kind, newest first
-                let mut hs: Vec<(u64, u32, u32, u32, u32)> = self
+                let mut hs: Vec<(u64, u32, u32, u32, u32, u32)> = self
                     .heads_of
                     .get(&e)
                     .map(|v| {
                         v.iter()
                             .map(|&(key, k, val, t, c)| {
-                                // the value's kind as it is now (kinds settle after a head is written)
-                                (t, c, if self.cfg.heads_path { self.kk(val) } else { k }, val, key)
+                                // the value's kind as it is now (kinds settle after a head is written); the stored
+                                // kind last (the head's key)
+                                (t, c, if self.cfg.heads_path { self.kk(val) } else { k }, val, key, k)
                             })
                             // fast: only content values (kinds of 3 or more), before the sort
                             .filter(|h| !self.fm(4) || self.ksize.get(&h.2).copied().unwrap_or(0) >= 3)
@@ -2658,7 +2699,7 @@ impl Situation {
                 hs.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
                 let mut seen_k: HashMap<u32, u32> = HashMap::default();
                 let mut taken = 0;
-                for (t, c, k, val, key) in hs {
+                for (t, c, k, val, key, hk) in hs {
                     let r = seen_k.entry(k).or_insert(0);
                     let rr = *r;
                     *r += 1;
@@ -2675,6 +2716,9 @@ impl Situation {
                     if self.cfg.heads_path {
                         f1.push(Self::fid(44, key as u64, 0)); // the exact relation path ("found the" is not "got the")
                     }
+                    if self.cfg.chunk {
+                        f1.push(Self::fid(47, (key >> 29 & 1) as u64, k as u64)); // --sit-chunk: the level, with the value's kind
+                    }
                     let ke = self.kk(e);
                     let sc = if self.cfg.qslots { self.qslot_score(j, ke, &[(c, k, rr)], &mut memo) } else { self.qscore(&q, &f1, &mut cache) };
                     if dbg {
@@ -2683,6 +2727,7 @@ impl Situation {
                     cands.push((f1, val, sc, t, (c, k, u32::MAX, u32::MAX), (rr, u32::MAX)));
                     csrc.push((1, key));
                     ckey1.push(u32::MAX);
+                    chead.push((1, e, key, hk));
                     qroute.push((j, ke));
                     taken += 1;
                     if taken >= cap {
@@ -2735,6 +2780,7 @@ impl Situation {
                                 cands.push((f1, val, sc, t, (c, k, u32::MAX, u32::MAX), (rank as u32, u32::MAX)));
                                 csrc.push((2, key));
                                 ckey1.push(u32::MAX);
+                                chead.push((0, 0, 0, 0));
                                 qroute.push((j, ke));
                             }
                         }
@@ -2802,7 +2848,7 @@ impl Situation {
                     };
 
                     // hop 2's options: (which 0) each head's value now; (which 1) its value as of hop 1's time
-                    let mut opts: Vec<(u64, u32, u64, u32, u32)> = vec![]; // (which, value, its time, path, class)
+                    let mut opts: Vec<(u64, u32, u64, u32, u32, u32)> = vec![]; // (which, value, its time, path, class, stored kind)
                     for &(key2, k2, val2, t2, c2) in hs2 {
                         if allow.as_ref().map_or(false, |a| !a.contains(&if self.cfg.chain_learn_kind { self.kk(val2) } else { c2 })) {
                             continue;
@@ -2810,11 +2856,11 @@ impl Situation {
                         if val2 == e || cue.contains(&val2) || self.ksize.get(&self.kk(val2)).copied().unwrap_or(0) < 3 {
                             continue;
                         }
-                        opts.push((0, val2, t2, key2, c2));
+                        opts.push((0, val2, t2, key2, c2, k2));
                         if let Some(hist) = self.posts.get(&(v1, key2, k2)) {
                             let i = hist.partition_point(|x| x.0 <= t1);
                             if i > 0 && !cue.contains(&hist[i - 1].1) {
-                                opts.push((1, hist[i - 1].1, hist[i - 1].0, key2, c2));
+                                opts.push((1, hist[i - 1].1, hist[i - 1].0, key2, c2, k2));
                             }
                         }
                     }
@@ -2822,7 +2868,7 @@ impl Situation {
                     // so the newest place across all of v1's paths ranks 0
                     opts.sort_by(|a, b| a.0.cmp(&b.0).then(b.2.cmp(&a.2)));
                     let mut seen_r: HashMap<(u64, u32), u32> = HashMap::default();
-                    for (which, v, _tv, key2, c2) in opts {
+                    for (which, v, _tv, key2, c2, k2s) in opts {
                         let rr = seen_r.entry((which, self.kk(v))).or_insert(0);
                         let r2 = *rr;
                         *rr += 1;
@@ -2836,6 +2882,9 @@ impl Situation {
                             f.push(Self::fid(61, which, key1 as u64)); // now or then, by hop 1's relation
                             f.push(Self::fid(62, r1 as u64, which)); // hop 1's recency, now or then
                             f.push(Self::fid(63, 1, 0)); // the source: a chain of heads
+                            if self.cfg.chunk {
+                                f.push(Self::fid(65, (key1 >> 29 & 1) as u64, (key2 >> 29 & 1) as u64)); // the two hops' levels
+                            }
                             let sc = self.qscore(&q, &f, &mut cache);
                             if dbg {
                                 desc.push(format!("j{}:{}>C{}={}>{}w{}={}", j, e, key1, v1, key2, which, v));
@@ -2843,6 +2892,8 @@ impl Situation {
                             cands.push((f, v, sc, t1, (c1, self.kk(v1), c2, self.kk(v)), (r1 as u32, which as u32)));
                             csrc.push((3, key2));
                             ckey1.push(key1);
+                            // the head behind it, when the value is the head's value now (not as of hop 1's time)
+                            chead.push(if which == 0 { (1, v1, key2, k2s) } else { (0, 0, 0, 0) });
                             qroute.push((j, ke));
                         }
                     }
@@ -2859,6 +2910,7 @@ impl Situation {
                 cands.push((f1, m, sc, self.stamp_of(e, c, k), (c, k, u32::MAX, u32::MAX), (r, u32::MAX)));
                 csrc.push((0, 0));
                 ckey1.push(u32::MAX);
+                chead.push((2, e, c, k));
                 qroute.push((j, ke));
                 if self.fm(2) && (j >= 4 || !is_content_e) {
                     continue; // fast: second hops only from the 4 nearest cue words, and only content ones
@@ -2875,6 +2927,7 @@ impl Situation {
                     cands.push((f2, v, sc, self.stamp_of(e, c, k), (c, k, c2, k2), (r, r2)));
                     csrc.push((0, 0));
                     ckey1.push(u32::MAX);
+                    chead.push((2, m, c2, k2));
                     qroute.push((j, ke));
                 }
             }
@@ -2900,6 +2953,7 @@ impl Situation {
         self.qroute = order.iter().map(|&i| qroute[i]).collect();
         self.qsrc = order.iter().map(|&i| csrc[i]).collect();
         self.qkey1 = order.iter().map(|&i| ckey1[i]).collect();
+        self.qhead = order.iter().map(|&i| chead[i]).collect();
         let lo = cands.iter().map(|x| x.2).min().unwrap_or(0);
         let props: Vec<(u32, u32)> = cands.iter().map(|x| ((x.2 - lo + 1).min(u32::MAX as i64) as u32, x.1)).collect();
         if dbg && !cands.is_empty() {
@@ -2927,6 +2981,18 @@ impl Situation {
                 self.n_out[u] > 0 && self.n_in[u] > 0 && self.sf[u] > gf && self.sb[u] > gb
             };
             self.boundary[u] = self.proposed[u] && (!self.cfg.bnd_unit || self.ustop[u]);
+        }
+    }
+    /// --sit-bnd-collide: L is the words after which frames reset at least twice as often as after words in general.
+    fn collide_boundaries(&mut self) {
+        let (r, n) = self.cf_all;
+        for u in 0..self.nw {
+            let (ru, nu) = self.cf_n[u];
+            let nb = nu >= 16 && ru > 0 && ru as u64 * n >= 2 * r * nu as u64;
+            if nb != self.boundary[u] && std::env::var("SIT_DEBUG_BND").is_ok() {
+                eprintln!("BNDC {} word {} -> {} (resets {} of {}; all {} of {})", self.t, u, nb, ru, nu, r, n);
+            }
+            self.boundary[u] = nb;
         }
     }
     /// A proposed boundary (the judge's candidates): the surprise proposals, or else the learned set L.
@@ -3804,7 +3870,7 @@ impl Situation {
                 if use_win {
                     self.used_window += 1;
                     if let Some(&u) = self.hist.last() {
-                        if self.boundary[u as usize] && self.mood[u as usize] >= 8 {
+                        if if self.cfg.q_contrast { self.is_q(u) } else { self.boundary[u as usize] && self.mood[u as usize] >= 8 } {
                             self.used_window_q += 1;
                         }
                     }
@@ -3812,7 +3878,7 @@ impl Situation {
                     props = self.wcands.iter().map(|x| ((x.2 - lo + 1).min(u32::MAX as i64) as u32, x.1)).collect();
                 }
                 if let Some(&u) = self.hist.last() {
-                    if self.boundary[u as usize] && self.mood[u as usize] >= 8 {
+                    if if self.cfg.q_contrast { self.is_q(u) } else { self.boundary[u as usize] && self.mood[u as usize] >= 8 } {
                         self.questions_seen += 1;
                     }
                 }
@@ -4265,6 +4331,15 @@ impl Situation {
     /// `cue`, at most 12). The newest word may itself be a boundary ("?" before an answer); the walk stops at the
     /// first boundary behind it.
     fn cue_words(&self) -> Vec<u32> {
+        if self.cfg.chunk {
+            // the last 3 chunks, newest word first, at most 12 words
+            let mut out = vec![];
+            for ch in self.chunks.iter().rev().take(3) {
+                out.extend(ch.iter().rev());
+            }
+            out.truncate(12);
+            return out;
+        }
         let n = self.hist.len();
         let base = self.cfg.cue.min(n);
         if !self.cfg.cue_clause {
@@ -4286,6 +4361,31 @@ impl Situation {
     pub fn observe(&mut self, w: u32) {
         if self.fm(0) {
             self.rcache.get_mut().clear();
+        }
+        // --sit-chunk: does w start a chunk? (unless it is the majority successor of the word before, counted before
+        // this pair); a chunk that reached 32 words closes anyway
+        let ck_start = self.cfg.chunk
+            && match self.hist.last() {
+                None => true,
+                Some(&u) => {
+                    !self.succ_top.get(&u).map_or(false, |t| t.0 == w && 2 * t.1 > self.succ_n[u as usize])
+                        || self.chunks.last().map_or(true, |c| c.len() >= 32)
+                }
+            };
+        // --sit-chunk-gate: memory's top route already predicted w: refresh what stands behind it, create nothing
+        let mut gate_skip = false;
+        if self.cfg.chunk_gate && !self.idx_only && self.qcands.first().map(|x| x.1) == Some(w) {
+            self.gate_hits.0 += 1;
+            if self.gate_refresh(w) {
+                self.gate_hits.1 += 1;
+                let g = &mut self.gate_by[w as usize];
+                if self.qhead.first().map_or(false, |x| x.0 == 1) {
+                    g.0 += 1;
+                } else {
+                    g.1 += 1;
+                }
+                gate_skip = true;
+            }
         }
         if self.t % 20000 == 0 && std::env::var("SIT_TIMING").is_ok() {
             // elapsed time and the counters since the last report, with the sizes of the growing tables
@@ -4382,9 +4482,33 @@ impl Situation {
             let (kp, kn) = (self.kk(p), self.kk(w));
             *self.indep.entry(u).or_default().entry((kp, kn)).or_insert(0) += 1;
         }
-        // the bigram counts behind mood2 and bnd2 (after the mood update, so they hold only the words before this one)
-        if self.cfg.mood2 || self.cfg.bnd2 || self.cfg.skip {
+        // --sit-bnd-collide: the frame ledger (a content word whose kind the open frame already holds resets it)
+        if self.cfg.bnd_collide {
             if let Some(&u) = self.hist.last() {
+                let mut reset = false;
+                let k = self.kk(w);
+                if self.ksize.get(&k).copied().unwrap_or(0) >= 3 {
+                    if self.cf_open.contains(&k) {
+                        reset = true;
+                        self.cf_open.clear();
+                    }
+                    self.cf_open.push(k);
+                }
+                let e = &mut self.cf_n[u as usize];
+                *e = (e.0 + reset as u32, e.1 + 1);
+                if e.1 >= 1 << 16 {
+                    *e = (e.0 >> 1, e.1 >> 1);
+                }
+                self.cf_all = (self.cf_all.0 + reset as u64, self.cf_all.1 + 1);
+                if self.cf_all.1 >= 1 << 24 {
+                    self.cf_all = (self.cf_all.0 >> 1, self.cf_all.1 >> 1);
+                }
+            }
+        }
+        // the bigram counts behind mood2 and bnd2 (after the mood update, so they hold only the words before this one)
+        if self.cfg.mood2 || self.cfg.bnd2 || self.cfg.skip || self.cfg.chunk {
+            if let Some(&u) = self.hist.last() {
+                self.succ_n[u as usize] += 1;
                 let c = self.succ.entry((u, w)).or_insert(0);
                 *c += 1;
                 let c = *c;
@@ -4594,6 +4718,13 @@ impl Situation {
             }
             self.frame_bump(u, Self::fb(3, w as u64));
         }
+        if self.cfg.chunk && ck_start && !self.chunks.is_empty() {
+            self.chunk_close(); // the chunk before w closes: its range text, its facts committed, the context drifts
+        }
+        if self.cfg.chunk && !gate_skip {
+            self.chunk_bind(w, ck_start);
+        }
+        if !self.cfg.chunk && !gate_skip {
         let mut path: Vec<u32> = vec![];
         let back: Vec<u32> = if self.cfg.scales {
             self.hist.iter().rev().take(32).copied().collect()
@@ -4685,10 +4816,25 @@ impl Situation {
                 break;
             }
         }
-        if self.boundary[w as usize] || self.buf.len() > 64 {
+        }
+        if self.cfg.chunk {
+            if ck_start || self.chunks.is_empty() {
+                self.chunks.push(vec![w]);
+                self.ck_start[w as usize] += 1;
+                self.ck_n += 1;
+                if self.chunks.len() > 10 {
+                    self.chunks.remove(0);
+                }
+            } else {
+                self.chunks.last_mut().unwrap().push(w);
+            }
+        }
+        if !self.cfg.chunk && self.boundary[w as usize] || self.buf.len() > 64 {
             // with --sit-q-contrast a question clause is dropped only at a learned boundary that is also a question
             // word: a Q word inside a clause ("the milk" before ".") must not throw away the clause's facts
-            let qdrop = if self.cfg.q_contain {
+            let qdrop = if self.cfg.chunk || self.cfg.chunk_gate {
+                false // the write gate replaces the question drop: nothing is ever dropped
+            } else if self.cfg.q_contain {
                 let q = self.clause_q || self.boundary[w as usize] && self.is_q(w);
                 self.clause_q = false;
                 q
@@ -4797,9 +4943,11 @@ impl Situation {
                 self.sq_manage();
             }
         }
-        if self.cfg.bnd2 && self.cfg.recluster > 0 && self.t % self.cfg.recluster as u64 == 0 {
+        if self.cfg.bnd2 && !self.cfg.chunk && self.cfg.recluster > 0 && self.t % self.cfg.recluster as u64 == 0 {
             if self.cfg.bnd_surprise {
                 self.surprise_boundaries();
+            } else if self.cfg.bnd_collide {
+                self.collide_boundaries();
             } else {
                 self.open_boundaries();
             }
@@ -4901,6 +5049,177 @@ impl Situation {
             self.lt_tag.remove(&k);
             self.lt_evicted += 1;
         }
+    }
+    /// --sit-chunk-gate: refresh the head (or slot) behind memory's top route, which predicted w: its time becomes
+    /// now, as if it had just been written again. False when nothing stands behind it that holds w now (a range, or
+    /// a chain's value as of an earlier time); then w binds as usual.
+    fn gate_refresh(&mut self, w: u32) -> bool {
+        let Some(&(src, e, key, hk)) = self.qhead.first() else { return false };
+        let now = self.t;
+        match src {
+            1 => {
+                let Some(ent) = self.heads_tab.get_mut(&(e, key, hk)) else { return false };
+                if ent.0 != w {
+                    return false;
+                }
+                ent.1 = now;
+                let (idx, c) = (ent.3 as usize, ent.2);
+                if let Some(h) = self.heads_of.get_mut(&e).and_then(|l| l.get_mut(idx)) {
+                    h.3 = now;
+                }
+                if self.cfg.lt_budget > 0 {
+                    let tg = self.lt_tag.entry((e, key, hk)).or_insert(0);
+                    *tg = (*tg + 1).min(15);
+                }
+                if self.cfg.ranges {
+                    self.posts.entry((e, key, hk)).or_default().push((now, w));
+                }
+                if self.cfg.chain {
+                    let r = self.rev_heads.entry(w).or_default();
+                    r.push((e, key, now, c));
+                    if r.len() > 16 {
+                        r.remove(0);
+                    }
+                }
+                true
+            }
+            2 => {
+                self.stamp.insert((e, key, hk), now);
+                self.touch(e, key, hk);
+                true
+            }
+            _ => false,
+        }
+    }
+    /// --sit-chunk: the open chunk closes (a new one starts at the word being read): its text is a range text, the
+    /// buffered facts commit, and the context drifts.
+    fn chunk_close(&mut self) {
+        let ws = self.chunks.last().cloned().unwrap_or_default();
+        if self.cfg.ranges && !ws.is_empty() {
+            let fw0 = ws[0];
+            let fw = if self.cfg.open_kind { self.kk(fw0) } else { fw0 };
+            let st = self.t.saturating_sub(ws.len() as u64);
+            let h = Self::text_hash(&ws);
+            self.ctext.entry(h).or_insert((vec![], fw)).0.push(st);
+            self.opener_pos.entry(fw).or_default().push(st);
+            if self.cfg.epoch {
+                let f = *self.first_text.entry(fw).or_insert(h);
+                if f == h {
+                    self.epoch_at.insert(fw, st);
+                }
+            }
+        }
+        self.commit();
+        self.committed += 1;
+        for j in 0..self.cfg.bdrift {
+            let h = hash(self.t * 31 + j as u64, 97);
+            let i = (h % self.cfg.k as u64) as usize;
+            self.ctx_off[i] = (hash(h, 98) % self.cfg.d as u64) as u32;
+            self.ctx_ph[i] = (hash(h, 99) & 3) as u8;
+        }
+    }
+    /// --sit-chunk: w's bindings. Level 0: every word of the open chunk (unless w starts a new one) and of the chunk
+    /// before it, nearest first, by the exact path between (at most 32 words back). Level 1, when w starts a chunk:
+    /// the heads (first words) of the 7 chunks before the previous one, by the exact path of every word between,
+    /// marked as level 1 (so the level is part of the relation key the routes see).
+    fn chunk_bind(&mut self, w: u32, start: bool) {
+        let n = self.chunks.len();
+        if n == 0 {
+            return;
+        }
+        let mut back: Vec<u32> = vec![];
+        if !start {
+            back.extend(self.chunks[n - 1].iter().rev());
+            if n >= 2 {
+                back.extend(self.chunks[n - 2].iter().rev());
+            }
+        } else {
+            back.extend(self.chunks[n - 1].iter().rev());
+        }
+        back.truncate(32);
+        let mut path: Vec<u32> = vec![];
+        for s in back {
+            if s != w {
+                for dir in 0..2u32 {
+                    let mut p = vec![dir];
+                    p.extend(&path);
+                    self.push_binding(s, w, dir, p);
+                }
+            }
+            path.push(s);
+        }
+        if start && n >= 2 {
+            let mut path: Vec<u32> = self.chunks[n - 1].iter().rev().copied().collect();
+            // diagnostic only (not part of the rule): SIT_CHUNK_L1 = how many chunks before the previous one (default 7)
+            let depth = std::env::var("SIT_CHUNK_L1").ok().and_then(|x| x.parse::<usize>().ok()).unwrap_or(7);
+            for i in (n.saturating_sub(1 + depth)..n - 1).rev() {
+                let ch = self.chunks[i].clone();
+                let s = ch[0];
+                path.extend(ch[1..].iter().rev());
+                if path.len() > 32 {
+                    break;
+                }
+                if s != w {
+                    for dir in 0..2u32 {
+                        let mut p = vec![dir | 0x100];
+                        p.extend(&path);
+                        self.push_binding(s, w, dir, p);
+                    }
+                }
+                path.push(s);
+            }
+        }
+    }
+    /// One buffered binding between s (back) and w (now) with relation path p (p[0]: direction, with level bits above
+    /// the low byte): its class, its exact path key.
+    fn push_binding(&mut self, s: u32, w: u32, dir: u32, p: Vec<u32>) {
+        let rare = if self.cfg.path_min > 0 && self.cfg.lsh {
+            let ph = p.iter().fold(0x77u64, |h, &x| hash(h, x as u64));
+            let mut m = u16::MAX;
+            for r in 0..4u64 {
+                let i = (r << 16 | hash(ph, r + 0x91) & 0xFFFF) as usize;
+                self.path_seen[i] = self.path_seen[i].saturating_add(1);
+                m = m.min(self.path_seen[i]);
+            }
+            (m as u32) < self.cfg.path_min && !self.path_class.contains_key(&p)
+        } else {
+            false
+        };
+        let c = if rare {
+            self.class_lookup(&p)
+        } else {
+            *self.path_count.entry(p.clone()).or_insert(0) += 1;
+            self.class_of(&p)
+        };
+        self.class_count[c as usize] += 1;
+        if dir == 0 {
+            self.buf.push((s, c, 0, w));
+        } else {
+            self.buf.push((w, c, 1, s));
+        }
+        let skippable = |x: u32| {
+            let e = self.skip_n.get(x as usize).copied().unwrap_or((0, 0));
+            self.cfg.skip && e.0 >= 16 && e.1 * 4 >= e.0 * 3
+        };
+        let pk = p.iter().enumerate().filter(|(i, &x)| *i == 0 || !skippable(x)).fold(0x9A7, |h, (_, &x)| hash(h, x as u64));
+        // the path key, with its level in bit 29 (bit 31 marks a path key in the heads, bit 30 a reversed chain hop)
+        let lvl = (p[0] >> 8) & 1;
+        self.bufp.push((hash(pk, 77) & 0x1FFF_FFFF) as u32 | lvl << 29);
+    }
+    /// --sit-chunk: (chunks started, and per word how often it started one).
+    /// --sit-chunk-gate: the words refreshed most often, (word, from a head, from a slot, times read).
+    pub fn gate_report(&self) -> Vec<(u32, u32, u32, u64)> {
+        let mut ws: Vec<(u32, u32, u32, u64)> = (0..self.nw as u32).map(|w| (w, self.gate_by[w as usize].0, self.gate_by[w as usize].1, self.wcount[w as usize])).filter(|x| x.1 + x.2 > 0).collect();
+        ws.sort_by(|a, b| (b.1 + b.2).cmp(&(a.1 + a.2)));
+        ws.truncate(16);
+        ws
+    }
+    pub fn chunk_report(&self) -> (u64, Vec<(u32, u32, u64)>) {
+        // the words read most often: (word, chunks it started, times read)
+        let mut ws: Vec<(u32, u32, u64)> = (0..self.nw as u32).map(|w| (w, self.ck_start[w as usize], self.wcount[w as usize] as u64)).filter(|x| x.2 > 0).collect();
+        ws.sort_by(|a, b| b.2.cmp(&a.2));
+        ws.truncate(16);
+        (self.ck_n, ws)
     }
     fn commit(&mut self) {
         let buf = std::mem::take(&mut self.buf);

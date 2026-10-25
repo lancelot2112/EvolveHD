@@ -90,6 +90,9 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         bnd_peak: flag(args, "--sit-bnd-peak"),
         bnd_clean: flag(args, "--sit-bnd-clean"),
         scales: flag(args, "--sit-scales"),
+        chunk: flag(args, "--sit-chunk"),
+        bnd_collide: flag(args, "--sit-bnd-collide"),
+        chunk_gate: flag(args, "--sit-chunk-gate"),
         q_contain: flag(args, "--sit-q-contain"),
         q_in_l: flag(args, "--sit-q-in-l"),
         lt_min: arg(args, "--sit-lt-min").map(|s| s.parse().unwrap()).unwrap_or(0),
@@ -969,6 +972,14 @@ fn main() {
                 eprintln!("boundary use, all (attributable hits, bindings): {:?}", x.bnd_use_all());
                 eprintln!("boundary unit (word stops wins losses): {}", x.bnd_unit_report().iter().map(|&(w, st, a, b)| format!("{} {} {} {}", name(w), st as u8, a, b)).collect::<Vec<_>>().join(" | "));
                 eprintln!("question boundaries: {} | clauses committed {}, dropped {}", x.question_boundaries().iter().map(|&w| name(w)).collect::<Vec<_>>().join(" "), x.committed, x.dropped);
+                if x.cfg.chunk {
+                    let (n, ws) = x.chunk_report();
+                    eprintln!("chunks: {} started, {:.2} words each | starts a chunk (of times read): {}", n, x.time() as f64 / n.max(1) as f64, ws.iter().map(|&(w, a, b)| format!("{} {}/{}", name(w), a, b)).collect::<Vec<_>>().join(", "));
+                }
+                if x.cfg.chunk_gate {
+                    eprintln!("write gate: memory's top route right {} times, refreshed and created nothing {} times", x.gate_hits.0, x.gate_hits.1);
+                    eprintln!("write gate, words refreshed most (head slot / read): {}", x.gate_report().iter().map(|&(w, a, b, n)| format!("{} {} {}/{}", name(w), a, b, n)).collect::<Vec<_>>().join(", "));
+                }
                 if x.cfg.anaphora {
                     eprintln!("stand-in first words resolved: {}", x.anaphora_resolved);
                 }
