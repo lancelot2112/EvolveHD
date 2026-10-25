@@ -939,7 +939,7 @@ impl Situation {
             sf: vec![0; nw],
             sb: vec![0; nw],
             sglob: (0, 0),
-            ustop: vec![true; nw],
+            ustop: vec![!cfg.bnd_surprise; nw], // surprise proposals start crossed: the judge makes stops
             uwin: vec![(0, 0); nw],
             hu: HashMap::default(),
             uring: std::collections::VecDeque::new(),
