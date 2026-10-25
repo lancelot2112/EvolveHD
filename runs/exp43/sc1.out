@@ -1,0 +1,23 @@
+== qa2s
+  train_qa2    0k   25.1% (n 1000)
+  qa2    0k   14.0% (n 100)
+112790 words, 380.2 s
+learned boundaries: the . | paths 16454 | relation classes 168
+question boundaries: the | clauses committed 50954, dropped 3423
+cost per predicted word: 128.6 slot reads computed, 63.3 read cache hits, 1019.1 candidates, 3.6 kind members scanned per computed read
+== story
+R_sc_story          where-person 93.8% (93.8%)  where-object 42.0% (44.4%)  who-has 76.2% (78.8%)  all 84.4% (85.1%)
+24659 words, 16.7 s
+learned boundaries: . ? | paths 50500 | relation classes 222
+question boundaries: ? | clauses committed 7653, dropped 1093
+cost per predicted word: 99.6 slot reads computed, 17.7 read cache hits, 151.9 candidates, 3.4 kind members scanned per computed read
+== pilot
+  train_qa1    0k   95.2% (n 1000)
+  train_qa1    1k   97.0% (n 200)
+  qa1    0k   97.0% (n 100)
+  qa1    4k   92.0% (n 50)
+308702 words, 200.1 s
+answer-only from word 156952: 547 predictions at question boundaries; 200.1 s in all
+learned boundaries: . ? , a and of | paths 65173 | relation classes 126494
+question boundaries: ? | clauses committed 104043, dropped 1947
+cost per predicted word: 86.2 slot reads computed, 14.8 read cache hits, 115.0 candidates, 2.0 kind members scanned per computed read
