@@ -1,6 +1,6 @@
 # 47 · The act path, stage 3: hearing itself (echo trials) (2026-10-25)
 
-*[All experiments](README.md)* · [← 46](46-act-path.md)
+*[All experiments](README.md)* · [← 46](46-act-path.md) · [48 →](48-goal-directed-acts.md)
 
 Stage 3 of the act path (plan: project doc `claude/act-path-plan.md`): the reader says words and hears its own output, tagged as self, starting with echo.
 
