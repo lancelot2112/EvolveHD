@@ -98,6 +98,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         no_qdrop: flag(args, "--sit-no-qdrop"),
         validate_slot: flag(args, "--sit-validate-slot"),
         qrec: flag(args, "--sit-qrec"),
+        act: flag(args, "--sit-act"),
         gate_from: arg(args, "--sit-gate-from").map(|x| x.parse().unwrap()).unwrap_or(0),
         q_contain: flag(args, "--sit-q-contain"),
         q_in_l: flag(args, "--sit-q-in-l"),

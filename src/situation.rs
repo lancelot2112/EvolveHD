@@ -307,6 +307,14 @@ pub struct SitCfg {
     /// newer long-term head as features, so the route learner learns when to trust it; a record with more misses than
     /// hits is not offered. The question drop still keeps the question's raw bindings out.
     pub qrec: bool,
+    /// The act path, stages 1-2 (plan: project doc claude/act-path-plan.md). Stage 1, babbling: at each word u the
+    /// actor's candidate is memory's top content proposal; during training it acts at 1 in 8 positions at random and
+    /// wherever its gate says Go. An act is paid when its word is the next word and the bigram (the level below) would
+    /// have missed it, charged when wrong, and counts as nothing when the bigram alone was right. Go after u when paid
+    /// > charged with at least 16 counted. The gate is skill (frozen with the route learner) and replaces the question
+    /// detector. Stage 2, routing: at a Go word the clause before it is the act's cue and is not committed to fact
+    /// memory (in place of the question drop; the Go word need not be in L).
+    pub act: bool,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -937,6 +945,7 @@ pub struct Situation {
     cf_n: Vec<(u32, u32)>,                          // --sit-bnd-collide: per word, (resets right after it, occurrences)
     cf_all: (u64, u64),                             // --sit-bnd-collide: (resets, words)
     k90set: Vec<bool>,                              // --sit-bnd-union: k90's own proposals (for its hysteresis)
+    act_n: Vec<(u32, u32)>,                         // --sit-act: per word u, (acts after u paid, charged)
     qrecs: HashMap<(u64, u32), (u32, u64, u16, u16)>, // --sit-qrec: (form, entity) -> (answer, time, hits, misses)
     qrec_at: (u64, Vec<u32>),                       // --sit-qrec: the open question's form and content cue words
     pub qrec_stats: (u64, u64, u64),                // --sit-qrec: (records written, hits, misses)
@@ -1039,6 +1048,7 @@ impl Situation {
             gate_by: vec![(0, 0); nw],
             hv: HashMap::default(),
             qrecs: HashMap::default(),
+            act_n: vec![(0, 0); nw],
             qrec_at: (0, vec![]),
             qrec_stats: (0, 0, 0),
             hv_stats: (0, 0),
@@ -2045,8 +2055,8 @@ impl Situation {
     }
     /// The boundaries whose mood counter marks them as closing questions.
     pub fn question_boundaries(&self) -> Vec<u32> {
-        if self.cfg.q_contrast {
-            return (0..self.nw as u32).filter(|&w| self.q_ok(w)).collect();
+        if self.cfg.act {
+            return (0..self.nw as u32).filter(|&w| self.act_go(w)).collect();
         }
         if self.cfg.q_contrast {
             return (0..self.nw as u32).filter(|&w| self.q_ok(w)).collect();
@@ -4179,7 +4189,15 @@ impl Situation {
     /// Whether boundary u is treated as closing a question now: its mood counter at 8 or more, or with
     /// --sit-mood-floor one time in 16 for any boundary below that, so a detector that fell below threshold keeps
     /// receiving evidence and can climb back (a counter that stops being tested cannot recover).
+    /// --sit-act: does acting after u pay (more paid than charged, at least 16 counted)?
+    fn act_go(&self, u: u32) -> bool {
+        let (p, c) = self.act_n.get(u as usize).copied().unwrap_or((0, 0));
+        p + c >= 16 && p > c
+    }
     fn is_q(&self, u: u32) -> bool {
+        if self.cfg.act {
+            return self.act_go(u);
+        }
         // diagnostic only (an oracle, not a learner): SIT_QORACLE = the word id that closes questions
         if let Some(q) = std::env::var("SIT_QORACLE").ok().and_then(|x| x.parse::<u32>().ok()) {
             return u == q;
@@ -4453,6 +4471,26 @@ impl Situation {
                         || self.chunks.last().map_or(true, |c| c.len() >= 32)
                 }
             };
+        // --sit-act: the actor's babbling and acts after the word before, paid against the level below
+        if self.cfg.act && !self.idx_only && self.t < self.cfg.freeze_from {
+            if let Some(&u) = self.hist.last() {
+                let content = |x: u32, me: &Self| me.ksize.get(&me.kk(x)).copied().unwrap_or(0) >= 3;
+                let a = self.qcands.iter().map(|x| x.1).find(|&x| content(x, self));
+                let acted = self.act_go(u) || hash(self.t, u as u64 + 0xBAB1) & 7 == 0;
+                if let (Some(a), true) = (a, acted) {
+                    let trivial = self.succ_top.get(&u).map_or(false, |t| t.0 == w);
+                    let e = &mut self.act_n[u as usize];
+                    if a == w && !trivial {
+                        e.0 += 1;
+                    } else if a != w {
+                        e.1 += 1;
+                    }
+                    if e.0 + e.1 >= 4096 {
+                        *e = (e.0 >> 1, e.1 >> 1);
+                    }
+                }
+            }
+        }
         // --sit-qrec: at an answer, each content cue word's record is validated against the answer, then set to it
         if self.cfg.qrec && self.after_q && !self.idx_only && self.qrec_at.0 != 0 && self.ksize.get(&self.kk(w)).copied().unwrap_or(0) >= 3 {
             let (form, ents) = std::mem::take(&mut self.qrec_at);
@@ -4966,11 +5004,14 @@ impl Situation {
                 self.chunks.last_mut().unwrap().push(w);
             }
         }
-        if !self.cfg.chunk && self.boundary[w as usize] || self.buf.len() > 64 {
+        let act_route = self.cfg.act && self.act_go(w);
+        if !self.cfg.chunk && (self.boundary[w as usize] || act_route) || self.buf.len() > 64 {
             // with --sit-q-contrast a question clause is dropped only at a learned boundary that is also a question
             // word: a Q word inside a clause ("the milk" before ".") must not throw away the clause's facts
             // diagnostic only: SIT_GATE_KEEPDROP keeps the question drop while the gate runs
-            let qdrop = if self.cfg.no_qdrop || self.cfg.chunk || self.cfg.chunk_gate && self.t >= self.cfg.gate_from && std::env::var("SIT_GATE_KEEPDROP").is_err() {
+            let qdrop = if self.cfg.act && !self.cfg.no_qdrop {
+                act_route // the clause before a Go word is the act's cue, not a fact
+            } else if self.cfg.no_qdrop || self.cfg.chunk || self.cfg.chunk_gate && self.t >= self.cfg.gate_from && std::env::var("SIT_GATE_KEEPDROP").is_err() {
                 false // the write gate replaces the question drop: nothing is ever dropped
             } else if self.cfg.q_contain {
                 let q = self.clause_q || self.boundary[w as usize] && self.is_q(w);

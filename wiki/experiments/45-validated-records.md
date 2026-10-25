@@ -1,6 +1,6 @@
 # 45 · Store questions with their answers, validate the records (2026-10-25)
 
-*[All experiments](README.md)* · [← 44](44-builders-from-nothing.md)
+*[All experiments](README.md)* · [← 44](44-builders-from-nothing.md) · [46 →](46-act-path.md)
 
 **The owner's idea:** "Do we need to keep questions out? Storing a question with its answer would be good … Store the context with its prediction, and that prediction gets validated or not."
 
