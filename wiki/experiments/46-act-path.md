@@ -1,6 +1,6 @@
 # 46 · The act path, stages 1–2: a babbling act gate replaces the question detector (2026-10-25)
 
-*[All experiments](README.md)* · [← 45](45-validated-records.md)
+*[All experiments](README.md)* · [← 45](45-validated-records.md) · [47 →](47-hearing-itself.md)
 
 **The owner's point:** the reader needs an act path, reached through developmental stages (babbling first), and an act path gives the separation we want because cues for acting get routed there. The plan (project doc `claude/act-path-plan.md`) has four stages: babbling, routing, hearing itself, goal-directed acts. This page builds and tests the first two.
 
