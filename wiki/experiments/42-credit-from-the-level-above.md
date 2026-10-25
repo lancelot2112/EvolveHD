@@ -119,3 +119,30 @@ Its prediction was "." and "?" as the top two on the pilot, with "," "and" "of" 
 - **Forum five's prediction fails offline.** Surprise peaks mark "a content word comes next", not "an event ends".
 - **k90 openness stays for now.** It is itself a branching-factor (entropy-like) statistic, with hand-set fractions.
 - **The candidate for a learned proposer is forum seven's TEM clean-slot ledger.** Its signal is strongest when the stops are most wrong: with no stops, every clause has a collision. Offline it measured collisions in 1.00 of clauses with no stops, and 0 with ". ?".
+
+## The TEM seat's clean-slot ledger as judge (`--sit-bnd-clean`)
+
+**The test.** A clause is clean when:
+- every content word in it (a kind of 3 or more) is bound to another content word within the binding window (no orphan);
+- no content word gets two different content values of one kind (no collision).
+
+A world of several clauses is clean when all its clauses are. The shadow test compares clean(shadow) with clean(default) on the same words. It needs no memory and no questions.
+
+**Runs.** Binaries `sit-42f`, then `sit-42g`, in which a clause includes the stop that opened it, because the walk binds a stop word to the words after it. Scripts `runs/exp42/c1.sh` and `c2.sh`. Single seed, no hand ban.
+
+| Run | Small qa2 | Story set | Pilot 0k / 4k | Stops at the end |
+|---|---|---|---|---|
+| A: disposes k90 proposals | **100%** | 96.0% (where-object 85.2%) | 99 / 100% | qa2 "."; story "."; pilot ". , a and of" |
+| A2: the same, clause includes its opening stop | **100%** | 96.0% | 100 / **38%** | pilot ". ," ("a and of" crossed) |
+| B: surprise-peak proposals, start crossed | 14% | 14.8% | 0 / 0% | none |
+| B2: surprise-peak proposals, start as stops | 34% | 30.7% | 0 / 0% | qa2: the people's names stay stops; story ". " crossed; pilot dozens of book words |
+
+**What this means:**
+- **As a disposer of k90's proposals, the clean ledger nearly matches the clause-value judge.** On small qa2 it drops "the" at word 16k, with 0 wins against 776 losses for putting it back.
+- **It crosses "?", as the TEM seat predicted.** Binding across a question is structurally clean, so the story set falls to 96.0% (98.5% with the clause-value judge).
+- **The TEM seat's second, content-level check at answers (not built) is meant to keep "?".**
+- **It cannot bootstrap either:**
+  - From all-crossed, clauses close only at commit overflow (about 4 words), and any split leaves an orphan, so "." loses 0 / 584.
+  - From all-stop, a stop that cuts nothing visible gets no votes. The names stay stops (0 / 0).
+  - The offline check that predicted bootstrapping used whole sentences and hand-listed kinds.
+- **The current best is k90 openness proposing, with the clause-value judge (length-weighted) disposing.**
