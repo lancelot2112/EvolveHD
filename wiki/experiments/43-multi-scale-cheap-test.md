@@ -12,8 +12,8 @@
 ## The rule (`--sit-scales`)
 
 - No binding stops. Every word binds to every word up to 8 back by exact path.
-- Content words (a kind of 3 or more) also bind to content words 9–32 back, in log-spaced distance bands (9–16, 17–32). The relation is the band plus the value's kind.
-- Everything else is unchanged: commits, drift, the cue walk and the question detector use L. There is no hand ban and no boundary judge.
+- Content words (a kind of 3 or more) also bind to content words 9–32 back, in log-spaced distance bands (as computed: 9–15, 16–31, and exactly 32). The relation is the band plus the value's kind.
+- Everything else is unchanged: commits, drift, the cue walk and the question detector use L. (Commits also fire when the buffer passes 64 bindings, which happens often with 32-word reach: small qa2 committed 50,954 clauses against about 35,000 in experiment 42.) There is no hand ban and no boundary judge.
 
 Binary `sit-43a`, script `runs/exp43/sc1.sh`. Same stacks as experiment 42; small qa2 and full qa2 with chains, `--sit-lt-budget 131072` and `--sit-entity-fair`. One seed.
 
@@ -24,7 +24,7 @@ Binary `sit-43a`, script `runs/exp43/sc1.sh`. Same stacks as experiment 42; smal
 | BABILong pilot 0k / 4k | 97 / 92% | 100 / 100% |
 | Full qa2 0k / 4k | 30 / 24% | 87 / 34% (hand ban 97 / 65%) |
 
-**Cost.** Small qa2 ran 380 s against about 66 s, with 1,019 candidates per predicted word against 389. On full qa2 (2,997 s), the long-term heads reach the budget (131,071), and the largest entities hold about 1,300–1,400 heads each (about 128 with stops and the cap).
+**Cost.** Small qa2 ran 380 s against 61 s for experiment 42's length-weighted judge, with 1,019 candidates per predicted word against 343. On full qa2 (2,997 s), the long-term heads reach the budget (131,071), and at the end the largest entities hold about 1,200–1,400 heads each (the largest peaked at 1,925 around 340k–380k), against about 128 with stops and the same cap.
 
 ## What the panel said (forum round eight, ten seats)
 

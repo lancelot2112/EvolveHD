@@ -10,12 +10,12 @@ Experiment 43 changed only the bindings. Here each builder replaces the learned 
 
 **Results (one seed each):**
 - **G1 fails on every test** (small qa2 39%, story set 40.4%, pilot 14 / 12%). Both its falsifiers are hit (small qa2 < 80, story < 93). The chunks themselves come out as the seat predicted. Two parts break it:
-  - **The write gate does not replace the question drop.** On experiment 42's best stack, swapping the drop for the gate takes small qa2 from 100% to 35%. Stored questions turn "?" and "where" into entities with heads.
-  - **Level-1 bindings across 8 chunks flood the store.** People reach 3,300–4,096 heads. Even with an oracle question drop, small qa2 is 34% at full depth and 77% with level 1 cut to 2 chunks.
-- **G2 builds a sane set on bAbI text and fails on book text.**
+  - **The write gate does not replace the question drop.** On experiment 42's best stack, swapping the drop for the gate takes small qa2 from 100% to 35%. With questions stored, the top routes at test answers start from "?" and "where" as entities (a trace is saved in the session scratchpad, `qdbg.txt`).
+  - **Level-1 bindings across 8 chunks flood the store.** Entities reach a median of 2,600–3,300 heads (about 113 with level 1 cut to 2 chunks). Even with an oracle question drop, small qa2 is 34% at full depth and 77% with level 1 cut to 2 chunks.
+- **G2 builds a sane set on bAbI text and fails on the qa1 book-text streams.**
   - Small qa2: **100%** with no hand ban. It proposes ". ?", never "the".
   - Story set: 95.6%. It proposes ". ? is", as the TEM seat predicted.
-  - Pilot and long BABILong: **0%.** "?" is never proposed, so the reader never answers in answer-only mode, and dozens of book words are proposed.
+  - Pilot and long BABILong (qa1): **0%.** "?" is never proposed there, so the reader never answers in answer-only mode, and dozens of book words are proposed.
   - Full qa2: 92 / 33%, about experiment 42's 87 / 34%, but L fills with book words and the judge crosses ".".
 - **k90 openness stays the proposer.** It is still the only rule that proposes a usable set on book text.
 
@@ -40,11 +40,11 @@ Experiment 43 changed only the bindings. Here each builder replaces the learned 
 | Question detector (answer-only runs, head credit, open queries) | mood counter on L | contrast detector with no L: memory predicts the word after u at least twice as well as after words in general |
 
 - **The write gate:** when memory's top route already predicted w, the head (or slot) behind it is refreshed (its time becomes now) and w creates no bindings. When nothing behind it holds w now (a range, or a chain's value as of an earlier time), w binds as usual.
-- **L is never computed:** every run's report shows "learned boundaries:" empty.
-- **The stack:** the cap (`--sit-entity-fair`) is kept and there is no halving sketch, as the seat asked. Otherwise the stacks are experiment 42's: small and full qa2 with chains and `--sit-lt-budget 131072`, long BABILong with the budget.
+- **L is never computed:** the k90 re-pooling is skipped under `--sit-chunk`, and the old per-word rule (`seg_update`) does not write L because the stack carries `--sit-bnd2`. Every run's report shows "learned boundaries:" empty.
+- **The stack:** the cap (`--sit-entity-fair`) is kept and there is no halving sketch, as the seat asked. The cap acts only with the budget, so on the story set and the pilot (no budget, as in experiment 42) it does nothing. Otherwise the stacks are experiment 42's: small and full qa2 with chains and `--sit-lt-budget 131072`, long BABILong with the budget.
 - **Not built:** the seat's per-level clock, and its later credit step (the level above judging pair-merge flags). Neither was part of its first experiment.
 
-Binaries `sit-44a`–`sit-44g` (the route-level feature from `sit-44e`; `sit-44f`/`sit-44g` add diagnostic switches only, off by default). Script `runs/exp44/g1.sh`.
+Binaries `sit-44a`–`sit-44g` (the route-level feature from `sit-44e`; `sit-44f`/`sit-44g` add diagnostic switches only, off by default). Script `runs/exp44/g1.sh` (default binary `sit-44g`; small qa2 was run on `sit-44e`, the other tests on `sit-44g`, which behave the same without the switches). Level 1 also stops once the path between passes 32 words.
 
 **The chunks are what the seat measured offline:**
 
@@ -62,7 +62,7 @@ Binaries `sit-44a`–`sit-44g` (the route-level feature from `sit-44e`; `sit-44f
 | Story set | **40.4%** (where-object 27.2%) | 98.5% | ≥ 95 (falsified < 93) |
 | Pilot 0k / 4k | **14 / 12%** | 100 / 100% | ≥ 95 / 90 |
 | Full qa2 0k / 4k | FULLQA2 | 87 / 34% (hand ban 97 / 65%) | ≥ 90 / 50 |
-| Long 16k / 64k | LONGBL | 93.3 / 100% (old L + cap, exp 41) | ≥ 90 / 7 of 8 |
+| Long 16k / 64k | **13.3% / 2 of 8** | 93.3 / 100% (old L + cap, exp 41) | ≥ 90 / 7 of 8 |
 
 The contrast detector without L picks content words, not "?":
 - small qa2: "milk went apple football";
@@ -75,14 +75,14 @@ Answers are poor, so the hit rate after "?" never stands out. The detector depen
 
 The diagnostic switches are environment variables, off in the runs above.
 
-| Run | Small qa2 | Heads per person (median) |
+| Run | Small qa2 | Heads per entity at 100k (median over all 26, "went" included) |
 |---|---|---|
-| G1 before the level feature | 28% | 2,040 at 80k |
-| G1 before the level feature, no write gate (questions stored, nothing dropped) | 31% | 3,347 |
-| **G1** | **39%** | — |
+| G1 before the level feature (log overwritten; numbers from the session) | 28% | 2,040 at 80k |
+| G1 before the level feature, no write gate (questions stored, nothing dropped) | 31% | 3,347 (max 4,096) |
+| **G1** | **39%** | 2,643 (max 3,670) |
 | G1, level 1 limited to 2 chunks before the previous one | 44% | 113 |
 | … + oracle commits at "." and oracle drop at "?" (no gate) | **77%** | — |
-| G1 at full depth + oracle commits and drop | 34% | 3,296 |
+| G1 at full depth + oracle commits and drop (about half its commits are buffer overflows, at 64 bindings, not at ".") | 34% | 3,296 (max 4,096) |
 | G1 at depth 2 + oracle detector ("?" only) | 14% | — |
 | G1 at depth 2, no drift at chunk close | 27% | — |
 | **Recurrent E2: exp 42's best stack, write gate in place of the drop** | **35%** ("the" stays a stop; no question word found) | — |
@@ -90,11 +90,11 @@ The diagnostic switches are environment variables, off in the runs above.
 - **The write gate fails as a replacement for the question drop.**
   - At an answer the gate stores the question's bindings whenever memory was wrong, which early on is almost always. Memory then fills with question bindings, it stays wrong, and the loop feeds itself.
   - At one test answer, "where is the football ? kitchen", the top routes ran football → milk → garden, ? → mary → bedroom and where → john → hallway.
-  - The gate's refreshes are mostly function words: "." 17,506 of 18,324, "the" 17,100. But it also skips about a quarter of object mentions ("milk": 668 head refreshes out of 2,483), where the head refreshed may belong to another person. This is the neuroscientist's warning.
+  - The gate's refreshes are mostly function words: "." 17,506 of 18,324, "the" 17,100. But it also skips about a third of object mentions ("milk": 668 head and 236 slot refreshes out of 2,483), where the head refreshed may belong to another person. This is the neuroscientist's warning.
 - **Level-1 bindings across 8 chunks crowd the ranking,** as the superoptimizer and TEM seats predicted.
   - Bindings into the next sentence are newer than the fact, so they take "newest place" (rank 0).
   - Paths with names in them still recur at least 4 times in bAbI's small vocabulary, so they pass the recurrence gate. The seat counted on that gate to pick the level.
-  - Per-entity lists reach the cap (4,096). Small qa2 runs 900 s against 67 s.
+  - Without the gate, lists reach the cap (4,096). Small qa2 runs 900 s against 61 s for experiment 42's best stack.
 - **The variants at depth 2 swing from 14% to 44%,** so single diagnostic runs only show direction while questions are stored. The two large effects (gate against drop, depth 7 against 2) hold across runs.
 
 ## G2: the collision ledger proposes (`--sit-bnd-collide`)
@@ -119,14 +119,14 @@ Binary `sit-44d` (`sit-44b` lacked the resets > 0 condition, so for words 2,000�
   - Small qa2: "." loses 56 / 744 for crossing, and "?" loses 36 / 340.
   - Story set: ". ? is" all stay stops.
 - **On book text it proposes dozens of words** (pilot: "is expect number soon corner afraid toward near …"; long: "from approached number of soon into …"; full qa2: "expression explanation sacrament minister …").
-- **It never proposes "?".** In "where is mary ? kitchen", the frame resets at "mary" (a second person), which is charged to "is", so the answer finds no collision. With no "?" in L, the detector finds nothing and answer-only runs give no answers. The TEM seat's offline check predicted this ("'.' yes, '?' no" on the pilot with approximate kinds).
+- **On the qa1 streams (pilot, long) it never proposes "?"** (on small qa2, the story set and full qa2, "?" is proposed and stays a stop). In "where is mary ? kitchen", the frame resets at "mary" (a second person), which is charged to "is", so the answer finds no collision. With no "?" in L, the detector finds nothing and answer-only runs give no answers. The TEM seat's offline check predicted this ("'.' yes, '?' no" on the pilot with approximate kinds).
 - **On full qa2 the judge crosses "."** (at word 292k, in book text), and the 4k test stays at experiment 42's level.
-- **The story set is 95.6% with the fix and 97.3% without it.** That is the single-seed spread.
+- **The story set is 95.6% with the fix and 97.3% without it,** so one early difference moves a single run by about 2 points.
 
 ## What this means
 
 - **Neither builder replaces k90 openness yet.**
-  - G2's ledger is a sane builder on event text and keeps "the" out without a judge. On book text it has no restraint, and it misses the question mark.
+  - G2's ledger is a sane builder on event text and keeps "the" out without a judge. On book text it has no restraint, and on qa1 it misses the question mark.
   - G1's chunks segment as predicted, but the design around them (gate, far level-1 bindings, a detector that needs working memory) fails.
 - **Questions must not be stored as facts.** The write gate cannot replace the question drop. Answering needs a question signal that does not come from memory's own success, because early on memory is not succeeding.
 - **Level-1 bindings must be selective.** Eight chunks by exact path admits every cross-sentence relation. The TEM seat's alternative (bind frames only through a shared entity) is the untested option.

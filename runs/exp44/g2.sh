@@ -3,7 +3,7 @@
 # length-weighted clause judge (exp 42) disposes. L, so built, does every job it did before (stops via the judge,
 # commits, drift, the cue, the question drop and detector). No hand ban. Same stacks as exp 42's best.
 cd /home/claude/evolvehd
-B=${B:-runs/exp36/sit-44b}; F=$(cat runs/exp37/F.flags); T=${T:-g2}
+B=${B:-runs/exp36/sit-44g}; F=$(cat runs/exp37/F.flags); T=${T:-g2}
 X="--sit-skip --sit-lsh --sit-slotlog 16 --sit-recent 32 --sit-heads-nokind --sit-bnd-hyst --sit-lt-min 4 --sit-lt-credit 64 --sit-wm-horizon 4096"
 G=${G:---sit-bnd-collide --sit-bnd-unit --sit-bnd-unit-len}
 qs() { SIT_DEBUG_BND=1 $B assoc --sit --data runs/exp40/bl_qa2s.ids --vocab runs/exp40/bl_qa2s.txt --sit-kinds --sit-mood --sit-query --sit-pool 0.7 --sit-fpool $F --sit-nest --sit-scope $X --sit-path-forget 2 --sit-chain --sit-lt-budget 131072 $G --sit-freeze-from 102303 --out runs/exp44/R_qa2s_$T 2> runs/exp44/R_qa2s_$T.log; python3 scripts/exp38/score_babilong.py runs/exp40/bl_qa2s runs/exp44/R_qa2s_$T > runs/exp44/R_qa2s_$T.score; }
