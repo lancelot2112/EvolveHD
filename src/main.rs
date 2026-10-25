@@ -99,6 +99,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         validate_slot: flag(args, "--sit-validate-slot"),
         qrec: flag(args, "--sit-qrec"),
         act: flag(args, "--sit-act"),
+        seq_replay: flag(args, "--sit-seq-replay"),
         gate_from: arg(args, "--sit-gate-from").map(|x| x.parse().unwrap()).unwrap_or(0),
         q_contain: flag(args, "--sit-q-contain"),
         q_in_l: flag(args, "--sit-q-in-l"),
@@ -803,7 +804,7 @@ fn main() {
             let snap_every: usize = g("--snap", "20000").parse().unwrap();
             let beta = 256.0;
             let n = ids.len();
-            let nw = *ids.iter().max().unwrap() as usize + 1;
+            let nw = *ids.iter().map(|x| x & 0x7FFF_FFFF).collect::<Vec<u32>>().iter().max().unwrap() as usize + 1;
             let wm_on = cfg.wm_half > 0.0;
             let d = cfg.d;
             let mut mn = Meaning::new(cfg, nw);
@@ -863,7 +864,7 @@ fn main() {
                 .chunks(4)
                 .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
-            let nw = *ids.iter().max().unwrap() as usize + 1;
+            let nw = ids.iter().map(|x| x & 0x7FFF_FFFF).max().unwrap() as usize + 1;
             enum St {
                 A(evolvehd::assoc::Assoc),
                 H(evolvehd::hippo::Hippo),
@@ -911,11 +912,17 @@ fn main() {
             let answer_only: usize = arg(&args, "--sit-answer-only").map(|s| s.parse().unwrap()).unwrap_or(usize::MAX);
             let mut n_answered = 0u64;
             let t_read = Instant::now();
-            for (ti, &w) in ids.iter().enumerate().filter(|_| !(flag(&args, "--sit") && arg(&args, "--sit-shards").is_some())) {
+            // stage 3 (act path): ids with bit 31 are self slots (the reader says the word and hears itself; the low bits
+            // are the teacher's word). --echo-deaf: it does not hear itself; --echo-as-world: it hears itself as if the
+            // world had said it (its words enter structure like any input)
+            let (echo_deaf, echo_world) = (flag(&args, "--echo-deaf"), flag(&args, "--echo-as-world"));
+            for (ti, &w0) in ids.iter().enumerate().filter(|_| !(flag(&args, "--sit") && arg(&args, "--sit-shards").is_some())) {
+                let self_slot = w0 >> 31 == 1;
+                let w = w0 & 0x7FFF_FFFF;
                 if ti == answer_only {
                     eprintln!("answer-only starts at word {ti}, {:.1} s in", t_read.elapsed().as_secs_f64());
                 }
-                if ti >= answer_only {
+                if ti >= answer_only && !self_slot {
                     if let St::S(x) = &mut a {
                         if !x.at_question() {
                             out.push(255);
@@ -956,6 +963,18 @@ fn main() {
                         }
                     }
                 }
+                if self_slot {
+                    if let St::S(x) = &mut a {
+                        let said = sets.first().and_then(|s| s.first()).map(|x| x.0).unwrap_or(u32::MAX);
+                        if echo_world {
+                            x.observe(if said == u32::MAX { w } else { said });
+                        } else {
+                            x.set_self(if echo_deaf { u32::MAX } else { said });
+                            x.observe(w);
+                        }
+                        continue;
+                    }
+                }
                 a.observe(w);
             }
             eprintln!("{} words, {:.1} s", ids.len(), t0.elapsed().as_secs_f64());
@@ -982,6 +1001,9 @@ fn main() {
                 if x.cfg.chunk {
                     let (n, ws) = x.chunk_report();
                     eprintln!("chunks: {} started, {:.2} words each | starts a chunk (of times read): {}", n, x.time() as f64 / n.max(1) as f64, ws.iter().map(|&(w, a, b)| format!("{} {}/{}", name(w), a, b)).collect::<Vec<_>>().join(", "));
+                }
+                if x.self_words > 0 {
+                    eprintln!("self slots {} | acting pays after its own: {}", x.self_words, x.act_self_report().iter().map(|&(w, p, c)| format!("{} {}/{}", name(w), p, c)).collect::<Vec<_>>().join(", "));
                 }
                 if x.cfg.qrec {
                     eprintln!("question records: written {} hits {} misses {}", x.qrec_stats.0, x.qrec_stats.1, x.qrec_stats.2);

@@ -315,6 +315,11 @@ pub struct SitCfg {
     /// detector. Stage 2, routing: at a Go word the clause before it is the act's cue and is not committed to fact
     /// memory (in place of the question drop; the Go word need not be in L).
     pub act: bool,
+    /// --sit-seq-replay: replay (stage 3's motor primitive): a ring of the world's last 256 words (self words never enter it). At each
+    /// prediction, for each of the 3 newest cue words u, the words that followed u's two newest earlier occurrences in
+    /// the ring are offered as candidates (source and rank as features), so the route learner can learn to replay a
+    /// sequence it just heard.
+    pub seq_replay: bool,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -945,6 +950,12 @@ pub struct Situation {
     cf_n: Vec<(u32, u32)>,                          // --sit-bnd-collide: per word, (resets right after it, occurrences)
     cf_all: (u64, u64),                             // --sit-bnd-collide: (resets, words)
     k90set: Vec<bool>,                              // --sit-bnd-union: k90's own proposals (for its hysteresis)
+    pub self_words: u64,                            // stage 3: self slots read
+    self_word: Option<u32>,                         // stage 3: the next observe is a self slot; the word the reader said (MAX: not heard)
+    act_self: Vec<(u32, u32)>,                      // stage 3: per word u said by the reader itself, (acts after it paid, charged)
+    wring: std::collections::VecDeque<u32>,         // --sit-replay: the world's last 256 words
+    self_mark: Option<usize>,                       // stage 3: the history's length before the current act's first self word
+    prev_self: bool,                                // stage 3: the last word in the context was said by the reader
     act_n: Vec<(u32, u32)>,                         // --sit-act: per word u, (acts after u paid, charged)
     qrecs: HashMap<(u64, u32), (u32, u64, u16, u16)>, // --sit-qrec: (form, entity) -> (answer, time, hits, misses)
     qrec_at: (u64, Vec<u32>),                       // --sit-qrec: the open question's form and content cue words
@@ -1049,6 +1060,12 @@ impl Situation {
             hv: HashMap::default(),
             qrecs: HashMap::default(),
             act_n: vec![(0, 0); nw],
+            act_self: vec![(0, 0); nw],
+            prev_self: false,
+            self_mark: None,
+            wring: std::collections::VecDeque::new(),
+            self_word: None,
+            self_words: 0,
             qrec_at: (0, vec![]),
             qrec_stats: (0, 0, 0),
             hv_stats: (0, 0),
@@ -2983,6 +3000,39 @@ impl Situation {
                 }
             }
         }
+        // --sit-replay: what followed the newest cue words' last two earlier occurrences in the world's recent words
+        if self.cfg.seq_replay && !self.wring.is_empty() {
+            let n = self.wring.len();
+            for (j, &u) in cue.iter().enumerate().take(3) {
+                let mut rank = 0u32;
+                // occurrences before the ring's last word (the last word's own successor is not known yet)
+                for i in (0..n - 1).rev() {
+                    if self.wring[i] != u {
+                        continue;
+                    }
+                    // a replayed word may be in the cue: copying is the point (memory's other sources exclude cue words)
+                    let val = self.wring[i + 1];
+                    let kv = self.kk(val);
+                    let mut f = self.route_feats(j, u, &[(0x7E00_0000, kv, rank)]);
+                    f.push(Self::fid(69, 1, self.prev_self as u64)); // the source: replay, after a self word or not
+                    f.push(Self::fid(70, j as u64, rank as u64)); // which cue word, which occurrence
+                    f.push(Self::fid(71, (j as u64) << 8 | rank as u64, self.kk(u) as u64));
+                    let sc = self.qscore(&q, &f, &mut cache);
+                    if dbg {
+                        desc.push(format!("j{}:{}>P r{}={}", j, u, rank, val));
+                    }
+                    cands.push((f, val, sc, i as u64, (0x7E00_0000, kv, u32::MAX, u32::MAX), (rank, u32::MAX)));
+                    csrc.push((5, 0));
+                    ckey1.push(u32::MAX);
+                    chead.push((0, 0, 0, 0));
+                    qroute.push((j, self.kk(u)));
+                    rank += 1;
+                    if rank >= 2 {
+                        break;
+                    }
+                }
+            }
+        }
         // --sit-qrec: the question records of the content cue words
         if self.cfg.qrec && self.after_q {
             let content = |x: u32, me: &Self| me.ksize.get(&me.kk(x)).copied().unwrap_or(0) >= 3;
@@ -4189,6 +4239,15 @@ impl Situation {
     /// Whether boundary u is treated as closing a question now: its mood counter at 8 or more, or with
     /// --sit-mood-floor one time in 16 for any boundary below that, so a detector that fell below threshold keeps
     /// receiving evidence and can climb back (a counter that stops being tested cannot recover).
+    /// Stage 3 (act path): the next observe is a self slot, and `o` is the word the reader said (u32::MAX: it does not
+    /// hear itself).
+    /// (word, paid, charged) for each word after which acting pays when the reader said it itself.
+    pub fn act_self_report(&self) -> Vec<(u32, u32, u32)> {
+        (0..self.nw as u32).filter(|&u| { let (p, c) = self.act_self[u as usize]; p + c >= 16 && p > c }).map(|u| (u, self.act_self[u as usize].0, self.act_self[u as usize].1)).collect()
+    }
+    pub fn set_self(&mut self, o: u32) {
+        self.self_word = Some(o);
+    }
     /// --sit-act: does acting after u pay (more paid than charged, at least 16 counted)?
     fn act_go(&self, u: u32) -> bool {
         let (p, c) = self.act_n.get(u as usize).copied().unwrap_or((0, 0));
@@ -4461,6 +4520,17 @@ impl Situation {
         if self.fm(0) {
             self.rcache.get_mut().clear();
         }
+        // stage 3 (act path): a self slot. w is the teacher's word: the prediction learners below are credited against
+        // it; the word the reader said enters the context only (no bindings, bigrams, kinds or segmentation)
+        let selfw = self.self_word.take();
+        let sm = selfw.is_some();
+        if !sm && std::env::var("SIT_SELF_KEEP").is_err() {
+            // diagnostic SIT_SELF_KEEP keeps the act's words in the history after the act
+            if let Some(m) = self.self_mark.take() {
+                self.hist.truncate(m.min(self.hist.len()));
+                self.prev_self = false;
+            }
+        }
         // --sit-chunk: does w start a chunk? (unless it is the majority successor of the word before, counted before
         // this pair); a chunk that reached 32 words closes anyway
         let ck_start = self.cfg.chunk
@@ -4476,10 +4546,13 @@ impl Situation {
             if let Some(&u) = self.hist.last() {
                 let content = |x: u32, me: &Self| me.ksize.get(&me.kk(x)).copied().unwrap_or(0) >= 3;
                 let a = self.qcands.iter().map(|x| x.1).find(|&x| content(x, self));
-                let acted = self.act_go(u) || hash(self.t, u as u64 + 0xBAB1) & 7 == 0;
+                let go = if self.prev_self { let (p, c) = self.act_self[u as usize]; p + c >= 16 && p > c } else { self.act_go(u) };
+                let acted = go || hash(self.t, u as u64 + 0xBAB1) & 7 == 0;
                 if let (Some(a), true) = (a, acted) {
                     let trivial = self.succ_top.get(&u).map_or(false, |t| t.0 == w);
-                    let e = &mut self.act_n[u as usize];
+                    // after its own word the actor keeps separate books: what pays after a word it said says nothing
+                    // about acting after the same word heard from the world
+                    let e = if self.prev_self { &mut self.act_self[u as usize] } else { &mut self.act_n[u as usize] };
                     if a == w && !trivial {
                         e.0 += 1;
                     } else if a != w {
@@ -4603,7 +4676,7 @@ impl Situation {
         // (not when reading without predicting: there was no proposal)
         // (nor once skill is frozen: the question detector is part of the skill, so a run of wrong answers in a hard
         // test cannot switch answering off)
-        if self.cfg.bnd_unit && !self.idx_only {
+        if self.cfg.bnd_unit && !self.idx_only && !sm {
             let missed = self.last.first().map(|x| x.1) != Some(w);
             self.unit_judge(w, missed);
         }
@@ -4643,7 +4716,7 @@ impl Situation {
             }
         }
         // skippable words: was the word before last seen directly followed by this one?
-        if self.cfg.skip && self.hist.len() >= 2 {
+        if self.cfg.skip && self.hist.len() >= 2 && !sm {
             let (a, u) = (self.hist[self.hist.len() - 2], self.hist[self.hist.len() - 1]);
             let e = &mut self.skip_n[u as usize];
             e.0 += 1;
@@ -4652,13 +4725,13 @@ impl Situation {
             }
         }
         // --sit-bnd-indep: for the word before this one, count (kind of the word before it, kind of this word)
-        if (self.cfg.bnd_indep || self.cfg.bind_indep) && self.hist.len() >= 2 {
+        if (self.cfg.bnd_indep || self.cfg.bind_indep) && self.hist.len() >= 2 && !sm {
             let (p, u) = (self.hist[self.hist.len() - 2], self.hist[self.hist.len() - 1]);
             let (kp, kn) = (self.kk(p), self.kk(w));
             *self.indep.entry(u).or_default().entry((kp, kn)).or_insert(0) += 1;
         }
         // --sit-bnd-collide: the frame ledger (a content word whose kind the open frame already holds resets it)
-        if self.cfg.bnd_collide || self.cfg.bnd_union {
+        if (self.cfg.bnd_collide || self.cfg.bnd_union) && !sm {
             if let Some(&u) = self.hist.last() {
                 let mut reset = false;
                 let k = self.kk(w);
@@ -4681,7 +4754,7 @@ impl Situation {
             }
         }
         // the bigram counts behind mood2 and bnd2 (after the mood update, so they hold only the words before this one)
-        if self.cfg.mood2 || self.cfg.bnd2 || self.cfg.skip || self.cfg.chunk {
+        if (self.cfg.mood2 || self.cfg.bnd2 || self.cfg.skip || self.cfg.chunk) && !sm {
             if let Some(&u) = self.hist.last() {
                 self.succ_n[u as usize] += 1;
                 let c = self.succ.entry((u, w)).or_insert(0);
@@ -4814,9 +4887,35 @@ impl Situation {
                 self.qhops.clear();
                 self.qranks.clear();
                 self.qroute.clear();
+            } else if sm && std::env::var("SIT_SELF_NOLEARN").is_ok() {
+                // diagnostic only: no route learning at self slots
+                self.qcands.clear();
+                self.qbits.clear();
+                self.qhops.clear();
+                self.qranks.clear();
+                self.qroute.clear();
             } else {
                 self.query_learn(w);
             }
+        }
+        if let Some(o) = selfw {
+            // the self word joins the context (unless the reader is deaf to itself), and nothing else
+            if o != u32::MAX {
+                // the history (the cue's context) only: the clause window, which the binding walk reads, keeps the
+                // world's words, so no fact ever binds to a self word; and only for the act (an efference copy):
+                // when the world speaks again the act's words leave the history
+                if self.self_mark.is_none() {
+                    self.self_mark = Some(self.hist.len());
+                }
+                self.hist.push(o);
+                if self.hist.len() > 64 {
+                    self.hist.drain(..32);
+                }
+            }
+            self.self_words += 1;
+            self.prev_self = o != u32::MAX || self.prev_self;
+            self.tick();
+            return;
         }
         // which classes answer this context: those whose slot (of a cue word) holds w
         if !self.cfg.query && self.seen[w as usize] && !self.class_count.is_empty() {
@@ -5072,6 +5171,13 @@ impl Situation {
         if self.clause.len() > 16 {
             self.clause.drain(..8);
         }
+        self.prev_self = false;
+        if self.cfg.seq_replay {
+            self.wring.push_back(w);
+            if self.wring.len() > 256 {
+                self.wring.pop_front();
+            }
+        }
         self.hist.push(w);
         if self.cfg.lookback > 0 {
             self.win.push(w);
@@ -5111,6 +5217,11 @@ impl Situation {
                 self.ctx_ph[i] = (hash(h, 99) & 3) as u8;
             }
         }
+        self.tick();
+    }
+
+    /// The clock moves one word: periodic forgetting, open-query management, re-pooling.
+    fn tick(&mut self) {
         self.t += 1;
         if self.cfg.wm_horizon > 0 && self.t % (self.cfg.wm_horizon / 2).max(1) == 0 {
             self.wm_forget();
