@@ -4,10 +4,10 @@
 
 Stage 3 of the act path (plan: project doc `claude/act-path-plan.md`): the reader says words and hears its own output, tagged as self, starting with echo.
 
-**Results (three seeds for the echo runs; the as-world and no-echo controls, one seed):**
+**Results (three seeds for the story-set echo runs and small qa2 hearing itself; small qa2 deaf, the as-world and no-echo controls, one seed):**
 - **With a replay primitive, the reader learns to echo a sentence it just heard:** on the test half, 97.9–98.7% of words and 92.9–94.7% of whole sentences on the story set, and 99.2–99.6% / 96.1–98.1% on small qa2 (three seeds).
 - **Echo depends on hearing itself.** Deaf to its own words, it gets the first word right (84–96%) and almost nothing after it (0–2%).
-- **The self/world separation matters.** Heard as if the world had said them, its own words wreck QA: small qa2 34% against 95–100%, story set 90.8% against 94–96%. Echo accuracy also falls (22–29% of words).
+- **The self/world separation matters.** Heard as if the world had said them, its own words wreck QA: small qa2 34% against 95–100%, story set 90.8% against 92.8–96.1% (seed 0 as-world against the hearing-itself seeds). Echo accuracy also falls (22–29% of words).
 - **QA with echo trials in the stream:** small qa2 95 / 99 / 99% over three seeds (100% deaf on seed 0; 100% without echo trials). Story set 96.1 / 92.8 / 94.5% (deaf 94.1 / 94.3 / 94.1%; 96.1% without echo trials, with replay). The echo trials themselves cost the story set's where-object questions (75–80% with or without hearing itself, against 88–91% without echo trials).
 - **Echo didn't work until three things were added.** Each is part of the design now:
   - self words kept out of the binding window;
@@ -33,7 +33,7 @@ Story set: 24,659 → 36,094 words, 893 trials. Small qa2: 112,790 → 188,567 w
 
 **Replay** (`--sit-seq-replay`):
 - A ring keeps the world's last 256 words; self words never enter it.
-- At each prediction, for each of the 3 newest cue words u, the words that followed u's two newest earlier occurrences in the ring are offered as candidates. Cue position, rank and whether u was self-said are route features.
+- At each prediction, for each of the 3 newest cue words u, the words that followed u's two newest earlier occurrences in the ring are offered as candidates. Cue position, rank, the cue word's kind and whether the last word in the context was self-said are route features.
 - Unlike memory's other sources, a replayed word may be a cue word, because copying is the point. Before that change, echo could never produce the sentence's first word, which was in the cue, and the first word scored 0%.
 
 **Modes:**
@@ -68,8 +68,8 @@ Seed 0 below. Seeds 1 and 2: story set, hearing itself, 98.7 / 97.9% of words an
 | Echo stream, deaf | 94.1% (76.5%) | 100% |
 | Echo stream, as world | 90.8% (65.4%) | **34%** |
 
-**Before replay (binary `sit-47d`, story set):**
-- The best echo was 47.6% of words with no whole sentences.
+**Before replay (binaries `sit-47b` and `sit-47d`, story set):**
+- The best echo was 47.6% of words with no whole sentences (`sit-47b`, self words kept in the history after the act); with the efference copy (`sit-47d`) it was 42.7%.
 - Memory's sources can only propose stored facts and generic continuations, so it said "julie grabbed john the office ." for "julie moved to the office .".
 - **Before the clause-window rule** (`sit-47a`), self words leaked into the next sentence's bindings, and the story set fell to 87.6%.
 

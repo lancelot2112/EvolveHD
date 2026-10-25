@@ -7,7 +7,7 @@ Two things, in the order proposed after experiment 47:
 2. stage 4 of the act path: a goal-directed act that combines a sentence frame, a word copied from the request, and a fact retrieved from memory.
 
 **Results:**
-- **Full qa2 over three seeds: the act path neither helps nor hurts.** k90 + act path averages 86.3 / 44.0% (0k / 4k), against 84.0 / 47.0% for k90 + judge. Seed spread is ±10 points at 0k and up to ±16 at 4k, larger than either difference. Both stay well below the hand ban's 97 / 65% (experiment 41, one seed).
+- **Full qa2 over three seeds: the act path neither helps nor hurts.** k90 + act path averages 86.3 / 44.0% (0k / 4k), against 84.0 / 47.0% for k90 + judge. Across seeds the scores range over up to 10 points at 0k and up to 20 at 4k, more than either difference. Both stay well below the hand ban's 97 / 65% (experiment 41, one seed).
 - **The reader learns to answer a request with a sentence:**
   - The world says "report emma"; the reader says "emma is in the garden .", word by word, hearing itself.
   - The answer word inside the act is right 82–90% of the time on small qa2 and 80–84% on the story set (where-person), over three seeds.
@@ -22,7 +22,7 @@ Two things, in the order proposed after experiment 47:
 2. "NP is in the ANS ." as self slots (the reader says it and hears its own words; each slot is credited against the teacher's word);
 3. "NP is in the ANS ." said by the world (the teacher).
 
-"report" and "in" are new words. The other questions stay questions.
+"report" is a new word (and "in", on small qa2). The other questions stay questions.
 - Story set: 24,659 → 28,071 words, 406 reports, 791 questions kept.
 - Small qa2: 112,790 → 118,290 words, 550 reports, 550 questions kept.
 
@@ -50,7 +50,7 @@ n = 50 reports on small qa2, 111 (where-person) and 34 (where-object) on the sto
 
 - **The frame is learned almost perfectly on small qa2** (99.0–99.3% of the other words). The misses are the answer: memory proposes another place for the person or object.
 - **Where-object reports are hard** (47–59% with routing). The fact needs a chain (object → holder → place), and the act's cue order ("the milk is in the") differs from a question's, so the routes learned on questions transfer only partly. There are 48 training reports for where-object.
-- **On the story set, routing the teacher's sentence costs the reports some accuracy** (seed 0 where-object 70.6% → 52.9%) and leaves QA unchanged. On small qa2 it is what keeps QA at 100%. On the story set, the stored teacher sentence may be giving the next report about the same object its answer directly.
+- **On the story set, routing the teacher's sentence costs the reports some accuracy** (seed 0 where-object 70.6% → 52.9%) and leaves where-person QA unchanged (98.1% → 97.8%; where-object 85.1% → 78.7%, who-has 90.0% → 85.0%, small n). On small qa2 it is what keeps QA at 100%. On the story set, the stored teacher sentence may be giving the next report about the same object its answer directly.
 
 **Examples of misses** (story set, teacher stored, seed 0):
 

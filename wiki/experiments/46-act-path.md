@@ -41,7 +41,7 @@ Script `runs/exp46/a.sh`. Stacks are experiment 42's: small qa2 with chains and 
 
 ## Seed check on long BABILong (16k / 64k; n = 30 / 8)
 
-The same binary (`sit-46a`) and stacks; seeds change the route learner's hashing and initial weights. Scripts `runs/exp47/seeds.sh`, `base_long.sh`, `split_long.sh`.
+The same binary (`sit-46a`) and stacks (the union's seed 0 without the act path is experiment 45's run, binary `sit-45e`); seeds change the route learner's hashing and initial weights. Scripts `runs/exp47/seeds.sh`, `base_long.sh`, `split_long.sh`.
 
 | Run | Seed 0 | Seed 1 | Seed 2 | Mean |
 |---|---|---|---|---|
