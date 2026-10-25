@@ -9,7 +9,7 @@ Forum round eight (project doc `claude/forum-round-eight.md`) asked for a unit b
 Experiment 43 changed only the bindings. Here each builder replaces the learned boundary set L in **every** job L did.
 
 **Results (one seed each):**
-- **G1 fails on every test** (small qa2 39%, story set 40.4%, pilot 14 / 12%). Both its falsifiers are hit (small qa2 < 80, story < 93). The chunks themselves come out as the seat predicted. Two parts break it:
+- **G1 fails on every test** (small qa2 39%, story set 40.4%, pilot 14 / 12%, full qa2 19 / 2%, long 13.3% / 2 of 8). Both its falsifiers are hit (small qa2 < 80, story < 93). The chunks themselves come out as the seat predicted. Two parts break it:
   - **The write gate does not replace the question drop.** On experiment 42's best stack, swapping the drop for the gate takes small qa2 from 100% to 35%. With questions stored, the top routes at test answers start from "?" and "where" as entities (a trace is saved in the session scratchpad, `qdbg.txt`).
   - **Level-1 bindings across 8 chunks flood the store.** Entities reach a median of 2,600–3,300 heads (about 113 with level 1 cut to 2 chunks). Even with an oracle question drop, small qa2 is 34% at full depth and 77% with level 1 cut to 2 chunks.
 - **G2 builds a sane set on bAbI text and fails on the qa1 book-text streams.**
@@ -61,7 +61,7 @@ Binaries `sit-44a`–`sit-44g` (the route-level feature from `sit-44e`; `sit-44f
 | Small qa2 | **39%** | 100% | ≥ 90 (falsified < 80) |
 | Story set | **40.4%** (where-object 27.2%) | 98.5% | ≥ 95 (falsified < 93) |
 | Pilot 0k / 4k | **14 / 12%** | 100 / 100% | ≥ 95 / 90 |
-| Full qa2 0k / 4k | FULLQA2 | 87 / 34% (hand ban 97 / 65%) | ≥ 90 / 50 |
+| Full qa2 0k / 4k | **19 / 2%** | 87 / 34% (hand ban 97 / 65%) | ≥ 90 / 50 |
 | Long 16k / 64k | **13.3% / 2 of 8** | 93.3 / 100% (old L + cap, exp 41) | ≥ 90 / 7 of 8 |
 
 The contrast detector without L picks content words, not "?":
