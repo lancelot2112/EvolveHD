@@ -249,6 +249,10 @@ pub struct SitCfg {
     /// threshold besides "more surprising than usual"). With --sit-bnd-unit the clause level disposes, and the
     /// learned set L that commits, drifts, cues and detects is the proposals the judge keeps as stops.
     pub bnd_surprise: bool,
+    /// (with --sit-bnd-surprise) the forum-five rule: a surprise peak is a word whose surprisal (bits, given the word
+    /// before) exceeds the running mean (shift 3, the clause timescale); u is proposed when the word after u is a
+    /// peak more often than words are in general (homeostatic: each word against the stream's own rate)
+    pub bnd_peak: bool,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -861,6 +865,9 @@ pub struct Situation {
     sf: Vec<u32>,                                   // --sit-bnd-surprise: running mean of forward surprisal, x16
     sb: Vec<u32>,                                   // --sit-bnd-surprise: running mean of backward surprisal, x16
     sglob: (u32, u32),                              // --sit-bnd-surprise: the stream's running means (forward, backward), x16
+    pk_after: Vec<(u32, u32)>,                      // --sit-bnd-peak: per word, (peaks right after it, occurrences)
+    pk_all: (u64, u64, u32),                        // --sit-bnd-peak: (peaks, words, running mean surprisal x16)
+    ucommit: bool,                                  // --sit-bnd-unit: a commit happened (closes the judge's clause)
     ustop: Vec<bool>,                               // --sit-bnd-unit: does this proposed word stop the binding walk
     uwin: Vec<(u32, u32)>,                          // --sit-bnd-unit: (wins, losses) for flipping the word's decision
     hu: HashMap<u64, [u32; 2]>,                     // --sit-bnd-unit: unit head table, (type, path) -> newest 2 values
@@ -939,6 +946,9 @@ impl Situation {
             sf: vec![0; nw],
             sb: vec![0; nw],
             sglob: (0, 0),
+            pk_after: vec![(0, 0); nw],
+            pk_all: (0, 0, 0),
+            ucommit: false,
             ustop: vec![!cfg.bnd_surprise; nw], // surprise proposals start crossed: the judge makes stops
             uwin: vec![(0, 0); nw],
             hu: HashMap::default(),
@@ -2897,7 +2907,12 @@ impl Situation {
     fn surprise_boundaries(&mut self) {
         let (gf, gb) = self.sglob;
         for u in 0..self.nw {
-            self.proposed[u] = self.n_out[u] > 0 && self.n_in[u] > 0 && self.sf[u] > gf && self.sb[u] > gb;
+            self.proposed[u] = if self.cfg.bnd_peak {
+                let (p, n) = self.pk_after[u];
+                n > 0 && p as u64 * self.pk_all.1 > self.pk_all.0 * n as u64
+            } else {
+                self.n_out[u] > 0 && self.n_in[u] > 0 && self.sf[u] > gf && self.sb[u] > gb
+            };
             self.boundary[u] = self.proposed[u] && (!self.cfg.bnd_unit || self.ustop[u]);
         }
     }
@@ -2927,7 +2942,8 @@ impl Situation {
     /// against their shadow worlds on the same words.
     fn unit_judge(&mut self, w: u32, missed: bool) {
         self.uring.push_back((w, missed));
-        if !self.bstop(w) && self.buf.len() <= 64 {
+        let closing = self.bstop(w) || std::mem::take(&mut self.ucommit);
+        if !closing {
             if self.uring.len() > 256 {
                 // a runaway clause: forget the oldest words (no judgement across them)
                 self.uring.pop_front();
@@ -2970,7 +2986,8 @@ impl Situation {
         }
         // keep only this clause and its stop: the next clause's shadow merges across this stop
         self.uring.drain(..st);
-        self.useg = (self.uring.len(), Some(w), 0);
+        let st_word = if self.bstop(w) { Some(w) } else { None }; // a commit close is not a stop decision
+        self.useg = (self.uring.len(), st_word, 0);
         self.uprev_hits = hd;
     }
     /// --sit-bnd-unit: at a re-pooling, flip the proposed word whose shadow world beat its current decision by the
@@ -4310,6 +4327,19 @@ impl Situation {
                     self.sf[ui] = ema(self.sf[ui], f, 5);
                     self.sb[wi] = ema(self.sb[wi], b, 5);
                     self.sglob = (ema(self.sglob.0, f, 10), ema(self.sglob.1, b, 10));
+                    if self.cfg.bnd_peak {
+                        let pk = f > self.pk_all.2;
+                        self.pk_all.2 = ema(self.pk_all.2, f, 3);
+                        let e = &mut self.pk_after[ui];
+                        *e = (e.0 + pk as u32, e.1 + 1);
+                        if e.1 >= 1 << 16 {
+                            *e = (e.0 >> 1, e.1 >> 1);
+                        }
+                        self.pk_all = (self.pk_all.0 + pk as u64, self.pk_all.1 + 1, self.pk_all.2);
+                        if self.pk_all.1 >= 1 << 24 {
+                            self.pk_all = (self.pk_all.0 >> 1, self.pk_all.1 >> 1, self.pk_all.2);
+                        }
+                    }
                 }
                 let t = self.succ_top.entry(u).or_insert((w, 0));
                 if c > t.1 {
@@ -4618,6 +4648,7 @@ impl Situation {
                 }
                 self.commit();
                 self.committed += 1;
+                self.ucommit = true;
             }
         }
         if self.cfg.q_contain && self.boundary[w as usize] && !self.clause.is_empty() && self.is_q(w) && !self.bstop(w) {
