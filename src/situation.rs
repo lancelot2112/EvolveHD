@@ -281,6 +281,9 @@ pub struct SitCfg {
     /// The write gate in place of the question drop: when memory's top route already predicted w, the head (or slot)
     /// behind it is refreshed and w creates no bindings; on a miss w binds as usual. No clause is ever dropped.
     pub chunk_gate: bool,
+    /// --sit-gate-from T: the write gate starts at word T; before it the question drop works as before (memory gets
+    /// examples first)
+    pub gate_from: u64,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -3047,7 +3050,11 @@ impl Situation {
     /// against their shadow worlds on the same words.
     fn unit_judge(&mut self, w: u32, missed: bool) {
         self.uring.push_back((w, missed));
-        let closing = self.bstop(w) || std::mem::take(&mut self.ucommit);
+        // commits close the judge's clause only for the surprise proposers (their proposals may start crossed, so no
+        // stop would ever close one); with k90's or the ledger's proposals a clause closes at a binding stop only, as in
+        // experiment 42 (closing at every commit cut clauses at a crossed "the" and kept it a stop)
+        let uc = std::mem::take(&mut self.ucommit);
+        let closing = self.bstop(w) || self.cfg.bnd_surprise && uc;
         if !closing {
             if self.uring.len() > 256 {
                 // a runaway clause: forget the oldest words (no judgement across them)
@@ -4380,7 +4387,8 @@ impl Situation {
             };
         // --sit-chunk-gate: memory's top route already predicted w: refresh what stands behind it, create nothing
         let mut gate_skip = false;
-        if self.cfg.chunk_gate && !self.idx_only && self.qcands.first().map(|x| x.1) == Some(w) {
+        // diagnostic only: SIT_GATE_NOSKIP keeps the gate's drop removal but never refreshes or skips
+        if self.cfg.chunk_gate && self.t >= self.cfg.gate_from && !self.idx_only && self.qcands.first().map(|x| x.1) == Some(w) && std::env::var("SIT_GATE_NOSKIP").is_err() {
             self.gate_hits.0 += 1;
             if self.gate_refresh(w) {
                 self.gate_hits.1 += 1;
@@ -4838,7 +4846,8 @@ impl Situation {
         if !self.cfg.chunk && self.boundary[w as usize] || self.buf.len() > 64 {
             // with --sit-q-contrast a question clause is dropped only at a learned boundary that is also a question
             // word: a Q word inside a clause ("the milk" before ".") must not throw away the clause's facts
-            let qdrop = if self.cfg.chunk || self.cfg.chunk_gate {
+            // diagnostic only: SIT_GATE_KEEPDROP keeps the question drop while the gate runs
+            let qdrop = if self.cfg.chunk || self.cfg.chunk_gate && self.t >= self.cfg.gate_from && std::env::var("SIT_GATE_KEEPDROP").is_err() {
                 false // the write gate replaces the question drop: nothing is ever dropped
             } else if self.cfg.q_contain {
                 let q = self.clause_q || self.boundary[w as usize] && self.is_q(w);

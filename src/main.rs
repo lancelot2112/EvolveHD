@@ -93,6 +93,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         chunk: flag(args, "--sit-chunk"),
         bnd_collide: flag(args, "--sit-bnd-collide"),
         chunk_gate: flag(args, "--sit-chunk-gate"),
+        gate_from: arg(args, "--sit-gate-from").map(|x| x.parse().unwrap()).unwrap_or(0),
         q_contain: flag(args, "--sit-q-contain"),
         q_in_l: flag(args, "--sit-q-in-l"),
         lt_min: arg(args, "--sit-lt-min").map(|s| s.parse().unwrap()).unwrap_or(0),
