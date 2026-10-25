@@ -8,7 +8,7 @@
 - **The act gate learns "?" and nothing else, on every stream** (small qa2, story set, pilot, long BABILong), from babbling alone. It needs neither L nor working memory: experiment 44's contrast detector found "milk went apple football", and the old mood counter only looks at words in L.
 - **It replaces the question detector and the question drop at no cost** on experiment 42's stack: small qa2 99%, story set 97.0%, pilot 100 / 100%.
 - **It unblocks the collision ledger,** which never puts "?" in L: pilot 0 / 0% → 72 / 38%.
-- **The union of k90 and the ledger, with the act path, scores 100% / 8 of 8 on long BABILong** (16k / 64k), the best long result so far.
+- **On long BABILong over three seeds (checked in experiment 47's session), the act path helps on k90 and the union is unstable.** k90 + act path: 16k 93.3% on average (against 84.4% without it), 64k 87.5% (against 95.8%; n = 8). The union + act path scored 100% / 8 of 8 on seed 0, but 53% / 2 of 8 and 33% / 3 of 8 on seeds 1 and 2. Keep k90 as the proposer.
 
 ## The rules (`--sit-act`, binary `sit-46a`)
 
@@ -39,8 +39,24 @@ Script `runs/exp46/a.sh`. Stacks are experiment 42's: small qa2 with chains and 
 - **The ledger still fills L with book words on qa1,** which caps the pilot (72 / 38%). The act path removes the "?" dependence, not the noise.
 - **The pilot's 1k training stories drop** with the act path (train qa1 1k: 73% on k90, against 96–97.5% before). The test is unaffected (100 / 100%). The gate needs counts before it opens, so early padded stories answer less. Not investigated.
 
+## Seed check on long BABILong (16k / 64k; n = 30 / 8)
+
+The same binary (`sit-46a`) and stacks; seeds change the route learner's hashing and initial weights. Scripts `runs/exp47/seeds.sh`, `base_long.sh`, `split_long.sh`.
+
+| Run | Seed 0 | Seed 1 | Seed 2 | Mean |
+|---|---|---|---|---|
+| k90 + judge (mood detector, question drop) | 93.3 / 100% | 76.7 / 100% | 83.3 / 87.5% | 84.4 / 95.8% |
+| **k90 + judge + act path** | 100 / 100% | 90.0 / 62.5% | 90.0 / 100% | **93.3 / 87.5%** |
+| Union + judge | 100 / 87.5% | 100 / 87.5% | 76.7 / 50.0% | 92.2 / 75.0% |
+| Union + judge + act path | 100 / 100% | 53.3 / 25.0% | 33.3 / 37.5% | 62.2 / 54.2% |
+
+- **The seed matters a great deal.** Union + act path seeds 0 and 1 have identical internal counts in their logs (clauses committed and dropped, heads), yet they score 100% and 53% at 16k. The difference is in which routes the learner settles on. No single-seed long result can rank rules.
+- **k90 with the act path is the best on average at 16k** and holds 64k on two seeds of three.
+- **The union's book words make it fragile,** and the act path makes that worse.
+- **Full qa2 0k / 4k, union + act path:** seed 1 95 / 75%, seed 2 68 / 29%. The same instability.
+
 ## Next
 
 1. **Stage 3: hearing itself.** Feed the actor's output back into the stream, tagged as self, starting with echo (paid by match).
-2. **Three seeds** of the union with the act path on full qa2 and long, against experiment 42's best. The full qa2 4k test needs them (experiment 45: 25–71% across variants on one seed).
+2. (Done: the seed table above. k90 + act path is the stack to keep.) Three seeds of k90 + act path on full qa2.
 3. **Find the story set's lost 1–2 points:** compare routing at Go words with the mood counter's drop at the same words.
