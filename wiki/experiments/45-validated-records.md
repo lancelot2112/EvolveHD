@@ -5,6 +5,8 @@
 **The owner's idea:** "Do we need to keep questions out? Storing a question with its answer would be good … Store the context with its prediction, and that prediction gets validated or not."
 
 **Results (one seed each, experiment 42's best stack unless stated):**
+- **The union of k90 and the ledger as the proposer is the best all-round set so far:** small qa2 100%, story set 97.8%, pilot 100 / 100%, long 100% / 7 of 8; full qa2 87 / 25%. The full qa2 4k test swings from 25% to 71% across proposers and seeds (G2 itself: 71% on seed 0, 47% on seed 1).
+- **Question records keyed by (question form, entity), each with its own validation, change nothing:** a repeated question's stored answer is right only 18–26% of the time.
 - **Questions stored with no drop cost nothing on small qa2 or the pilot, but cost the story set's where-object questions** (64% against 92.6%).
 - **The damage is not stale facts. It is shortcuts through function words.** A stored "where is the apple ? kitchen" gives "?", "the" and "where" place slots holding the latest answer. At the next where-object question the top route reads "the"'s or "?"'s place slot (the previous answer, or the last place mentioned) instead of the chain apple → mary → kitchen.
 - **Validating each head by its own hits and misses does not help,** in any of four variants (story set 71.5–92.6%, against 94.5% without validation). The wrong answers mostly come from working-memory slots of function words, not from long-term heads.
@@ -57,6 +59,24 @@ The fix the first round pointed to, built as the owner asked ("store the context
 - **They do not cure the shortcut either:** with no drop, the story set is unchanged (94.1%). The damage comes from the raw question bindings, which the records do not replace.
 - **So in these tasks the facts carry the answers, not remembered answers.** Validation works as intended: it keeps stale answers out. But a remembered answer is rarely worth keeping here.
 
+## G2 follow-ups: an L-free detector, and the union of k90 and the ledger
+
+- **G2 + L-free contrast detector** (`--sit-q-contrast`): the ledger proposes, the judge disposes, and the question detector no longer needs "?" in L.
+- **Union** (`--sit-bnd-union`, binary `sit-45e`): L = k90's proposals ∪ the ledger's, the judge disposes, the usual detector on L. k90's hysteresis sees only k90's own set.
+
+| Run | Small qa2 | Story set | Pilot 0k / 4k | Full qa2 0k / 4k | Long 16k / 64k |
+|---|---|---|---|---|---|
+| Exp 42's best (k90 + judge) | 100% | 98.5% | 100 / 100% | 87 / 34% | — |
+| Old L + cap (exp 41) | — | — | — | — | 93.3% / 8 of 8 |
+| G2 (exp 44, L-tied detector) | 100% | 95.8% | 0 / 0% | 92 / 71% | 0 / 0% |
+| G2 + L-free detector | 100% | 96.5% | 58 / 38% | 87 / 36% | **100% / 8 of 8** |
+| **Union + judge** | **100%** | 97.8% | **100 / 100%** | 87 / 25% | **100% / 7 of 8** |
+| G2, seed 1 | — | — | — | 88 / 47% | — |
+
+- **The union keeps "?" on qa1 book text, so the pilot is back to 100 / 100%**, and long BABILong reaches 100% / 7 of 8. On small qa2 "the" is proposed again by k90, and the judge removes it (100%).
+- **On full qa2 the 4k test swings from 25% to 71% across these variants,** with the same plain-text score (87–92%). G2's 71% (exp 44) is not robust: the same proposer with a different detector gives 36%. The 4k test on one seed cannot rank these rules: G2 on seed 1 gives 88 / 47%.
+- **The L-free detector picks content words as well as "?"** ("milk went apple ? football owner stories" on full qa2), so it predicts at many extra places. That's harmless for scoring, but it adds noise to head credit.
+
 ## What this means
 
 - **Storing a question with its answer is good only if it is keyed by the question's content.** Today a stored question becomes bindings of "?", "the" and "where" to the answer, which the route learner then uses as a cheap recency trick. A validated record would be keyed by (question form, entity) → answer.
@@ -66,4 +86,5 @@ The fix the first round pointed to, built as the owner asked ("store the context
 ## Next
 
 1. (Done above: question records change nothing, because stored answers are stale 3 times in 4.)
-2. G2 with the L-free detector on long BABILong and full qa2, and the union of k90's and the ledger's proposals, so book words stop entering L.
+2. (Done above: the union keeps the pilot at 100 / 100% and long at 100% / 7 of 8; the full qa2 4k test is too noisy on one seed to rank proposers.)
+3. Three seeds of the union and of exp 42's best on full qa2 and long, before choosing a proposer.
