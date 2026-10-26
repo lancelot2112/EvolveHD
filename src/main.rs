@@ -101,6 +101,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         act: flag(args, "--sit-act"),
         seq_replay: flag(args, "--sit-seq-replay"),
         teacher_route: flag(args, "--sit-teacher-route"),
+        rel_merge: flag(args, "--sit-rel-merge"),
         gate_from: arg(args, "--sit-gate-from").map(|x| x.parse().unwrap()).unwrap_or(0),
         q_contain: flag(args, "--sit-q-contain"),
         q_in_l: flag(args, "--sit-q-in-l"),
@@ -1002,6 +1003,10 @@ fn main() {
                 if x.cfg.chunk {
                     let (n, ws) = x.chunk_report();
                     eprintln!("chunks: {} started, {:.2} words each | starts a chunk (of times read): {}", n, x.time() as f64 / n.max(1) as f64, ws.iter().map(|&(w, a, b)| format!("{} {}/{}", name(w), a, b)).collect::<Vec<_>>().join(", "));
+                }
+                if x.cfg.rel_merge {
+                    let g = x.rel_report();
+                    eprintln!("relation merges {} into {} groups; largest: {}", x.rel_merges, g.len(), g.iter().take(6).map(|grp| format!("[{}]", grp.iter().take(8).map(|p| p.iter().skip(1).rev().map(|&w| name(w)).collect::<Vec<_>>().join(" ") + &format!("/{}", p.first().copied().unwrap_or(9))).collect::<Vec<_>>().join(" | "))).collect::<Vec<_>>().join(" "));
                 }
                 if x.self_words > 0 {
                     eprintln!("self slots {} | acting pays after its own: {}", x.self_words, x.act_self_report().iter().map(|&(w, p, c)| format!("{} {}/{}", name(w), p, c)).collect::<Vec<_>>().join(", "));

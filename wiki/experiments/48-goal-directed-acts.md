@@ -1,6 +1,6 @@
 # 48 · The act path, stage 4: goal-directed acts (report requests), and full qa2 over seeds (2026-10-25)
 
-*[All experiments](README.md)* · [← 47](47-hearing-itself.md)
+*[All experiments](README.md)* · [← 47](47-hearing-itself.md) · [49 →](49-learned-relation-merging.md)
 
 Two things, in the order proposed after experiment 47:
 1. three seeds of k90 + the act path on full qa2 (the long test was very seed-sensitive in experiment 46's check);

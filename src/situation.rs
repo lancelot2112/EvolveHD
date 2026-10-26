@@ -321,8 +321,18 @@ pub struct SitCfg {
     /// sequence it just heard.
     pub seq_replay: bool,
     /// Stage 4: the world's sentence right after an act (the teacher saying what the reader should have said) is
-    /// feedback for the act path, not a fact: its clause is not committed to fact memory.
+    /// feedback for the act path, not a fact: its clause is not committed to fact memory. Likewise the clause the act
+    /// starts in (the request, "report the apple") is the act's cue: it is dropped when the act begins.
     pub teacher_route: bool,
+    /// Learned relation merging (the lossy step, learned from the overwrite rule; nothing about the input's modality is
+    /// assumed): two relation keys are the same relation when, for the same entity, the newer of their two values is
+    /// the one that answers. At each answer, for every cue entity, its long-term heads are grouped by the value's kind
+    /// and ranked newest first; for each pair of keys in a group, the pair wins when only the newer value leads to
+    /// the answer and loses when only the older does. A value leads to the answer when it is the answer, or when its
+    /// own newest head of the answer's kind is the answer (one hop). A pair merges when wins are significant,
+    /// (wins - losses)^2 > 9 (wins + losses), and losses are at most an eighth of wins (at least 8 wins). Merged keys share one key from then on: new heads are written under it,
+    /// recurrence is counted for it, and the route learner sees it.
+    pub rel_merge: bool,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -957,6 +967,11 @@ pub struct Situation {
     self_word: Option<u32>,                         // stage 3: the next observe is a self slot; the word the reader said (MAX: not heard)
     act_self: Vec<(u32, u32)>,                      // stage 3: per word u said by the reader itself, (acts after it paid, charged)
     wring: std::collections::VecDeque<u32>,         // --sit-replay: the world's last 256 words
+    rel_parent: HashMap<u32, u32>,                  // --sit-rel-merge: merged relation keys (union-find over raw path keys)
+    rel_pair: HashMap<(u32, u32), (u16, u16)>,      // --sit-rel-merge: per key pair, (wins, losses) at answers
+    rel_ex: HashMap<u32, Vec<u32>>,                 // --sit-rel-merge: an example path per key (for the report)
+    pub rel_merges: u64,                            // --sit-rel-merge: merges made
+    in_act: bool,                                   // stage 3-4: inside an act (self slots since the last world word)
     in_teacher: bool,                               // --sit-teacher-route: reading the teacher's sentence after an act
     self_mark: Option<usize>,                       // stage 3: the history's length before the current act's first self word
     prev_self: bool,                                // stage 3: the last word in the context was said by the reader
@@ -1068,6 +1083,11 @@ impl Situation {
             prev_self: false,
             self_mark: None,
             in_teacher: false,
+            in_act: false,
+            rel_parent: HashMap::default(),
+            rel_pair: HashMap::default(),
+            rel_ex: HashMap::default(),
+            rel_merges: 0,
             wring: std::collections::VecDeque::new(),
             self_word: None,
             self_words: 0,
@@ -2788,6 +2808,12 @@ impl Situation {
                     f1.push(Self::fid(43, j as u64, c as u64));
                     if self.cfg.heads_path {
                         f1.push(Self::fid(44, key as u64, 0)); // the exact relation path ("found the" is not "got the")
+                        if self.cfg.rel_merge {
+                            // and its merged key, as an added feature, so merging adds sharing without discarding what
+                            // the route learner already knows about the exact key
+                            let fk = self.rel_canon(key & 0x7FFF_FFFF) | (key & 0x8000_0000);
+                            f1.push(Self::fid(72, fk as u64, 0));
+                        }
                     }
                     if self.cfg.chunk {
                         f1.push(Self::fid(47, (key >> 29 & 1) as u64, k as u64)); // --sit-chunk: the level, with the value's kind
@@ -2951,7 +2977,15 @@ impl Situation {
                         {
                             let mut f = self.route_feats(j, e, &[(c1, self.kk(v1), r1 as u32), (c2, self.kk(v), r2)]);
                             f.push(Self::fid(64, r2 as u64, which)); // hop 2's recency, now or then
+                            let (fk1, fk2) = if self.cfg.rel_merge {
+                                (self.rel_canon(key1 & 0x3FFF_FFFF) | (key1 & 0xC000_0000), self.rel_canon(key2 & 0x7FFF_FFFF) | (key2 & 0x8000_0000))
+                            } else {
+                                (key1, key2)
+                            };
                             f.push(Self::fid(60, key1 as u64, key2 as u64)); // the two relation paths
+                            if self.cfg.rel_merge {
+                                f.push(Self::fid(73, fk1 as u64, fk2 as u64)); // and their merged keys
+                            }
                             f.push(Self::fid(61, which, key1 as u64)); // now or then, by hop 1's relation
                             f.push(Self::fid(62, r1 as u64, which)); // hop 1's recency, now or then
                             f.push(Self::fid(63, 1, 0)); // the source: a chain of heads
@@ -4244,6 +4278,91 @@ impl Situation {
     /// Whether boundary u is treated as closing a question now: its mood counter at 8 or more, or with
     /// --sit-mood-floor one time in 16 for any boundary below that, so a detector that fell below threshold keeps
     /// receiving evidence and can climb back (a counter that stops being tested cannot recover).
+    /// --sit-rel-merge: a raw relation key's merged key.
+    fn rel_canon(&self, raw: u32) -> u32 {
+        let mut k = raw;
+        for _ in 0..64 {
+            match self.rel_parent.get(&k) {
+                Some(&p) if p != k => k = p,
+                _ => break,
+            }
+        }
+        k
+    }
+    /// --sit-rel-merge: at an answer w, judge pairs of relation keys of each cue entity (see `rel_merge`).
+    fn rel_judge(&mut self, w: u32) {
+        let content = |x: u32, me: &Self| me.ksize.get(&me.kk(x)).copied().unwrap_or(0) >= 3;
+        let kw = self.kk(w);
+        let cue = self.cue_words();
+        // does value v lead to w: v is w, or v's own newest head of w's kind holds w
+        let leads = |v: u32, me: &Self| -> bool {
+            if v == w {
+                return true;
+            }
+            if me.kk(v) == kw {
+                return false;
+            }
+            me.heads_of
+                .get(&v)
+                .and_then(|l| l.iter().filter(|h| me.kk(h.2) == kw).max_by_key(|h| h.3))
+                .map_or(false, |h| h.2 == w)
+        };
+        let mut ups: Vec<((u32, u32), bool)> = vec![];
+        for &e in cue.iter().filter(|&&e| content(e, self)) {
+            let Some(l) = self.heads_of.get(&e) else { continue };
+            let mut groups: HashMap<u32, Vec<(u64, u32, bool)>> = HashMap::default();
+            for h in l {
+                if h.2 == e {
+                    continue;
+                }
+                groups.entry(self.kk(h.2)).or_default().push((h.3, self.rel_canon(h.0 & 0x7FFF_FFFF), leads(h.2, self)));
+            }
+            for (_, mut g) in groups {
+                g.sort_by(|a, b| b.0.cmp(&a.0));
+                g.truncate(6);
+                for i in 0..g.len() {
+                    for j in i + 1..g.len() {
+                        let (a, b) = (g[i], g[j]);
+                        if a.1 == b.1 || a.2 == b.2 {
+                            continue; // the same relation already, or no evidence
+                        }
+                        ups.push(((a.1.min(b.1), a.1.max(b.1)), a.2));
+                    }
+                }
+            }
+        }
+        for (pair, win) in ups {
+            let x = self.rel_pair.entry(pair).or_insert((0, 0));
+            if win {
+                x.0 = x.0.saturating_add(1);
+            } else {
+                x.1 = x.1.saturating_add(1);
+            }
+            let (wn, ls) = (x.0 as u64, x.1 as u64);
+            if wn >= 8 * ls.max(1) && (wn - ls) * (wn - ls) > 9 * (wn + ls) {
+                let (ra, rb) = (self.rel_canon(pair.0), self.rel_canon(pair.1));
+                if ra != rb {
+                    let (root, child) = (ra.min(rb), ra.max(rb));
+                    self.rel_parent.insert(child, root);
+                    self.rel_merges += 1;
+                }
+            }
+        }
+    }
+    /// --sit-rel-merge: the merged groups, each as its members' example paths (direction, then the path's symbols).
+    pub fn rel_report(&self) -> Vec<Vec<Vec<u32>>> {
+        let mut groups: HashMap<u32, Vec<Vec<u32>>> = HashMap::default();
+        let mut keys: Vec<u32> = self.rel_parent.keys().copied().collect();
+        keys.extend(self.rel_parent.values().copied());
+        keys.sort_unstable();
+        keys.dedup();
+        for k in keys {
+            groups.entry(self.rel_canon(k)).or_default().push(self.rel_ex.get(&k).cloned().unwrap_or_default());
+        }
+        let mut out: Vec<Vec<Vec<u32>>> = groups.into_values().collect();
+        out.sort_by(|a, b| b.len().cmp(&a.len()));
+        out
+    }
     /// Stage 3 (act path): the next observe is a self slot, and `o` is the word the reader said (u32::MAX: it does not
     /// hear itself).
     /// (word, paid, charged) for each word after which acting pays when the reader said it itself.
@@ -4529,6 +4648,9 @@ impl Situation {
         // it; the word the reader said enters the context only (no bindings, bigrams, kinds or segmentation)
         let selfw = self.self_word.take();
         let sm = selfw.is_some();
+        if !sm {
+            self.in_act = false;
+        }
         if !sm && std::env::var("SIT_SELF_KEEP").is_err() {
             // diagnostic SIT_SELF_KEEP keeps the act's words in the history after the act
             if let Some(m) = self.self_mark.take() {
@@ -4547,6 +4669,10 @@ impl Situation {
                         || self.chunks.last().map_or(true, |c| c.len() >= 32)
                 }
             };
+        // --sit-rel-merge: at an answer, judge which relation keys are one relation
+        if self.cfg.rel_merge && self.after_q && !self.idx_only && !sm && self.t < self.cfg.freeze_from {
+            self.rel_judge(w);
+        }
         // --sit-act: the actor's babbling and acts after the word before, paid against the level below
         if self.cfg.act && !self.idx_only && self.t < self.cfg.freeze_from {
             if let Some(&u) = self.hist.last() {
@@ -4905,6 +5031,14 @@ impl Situation {
             }
         }
         if let Some(o) = selfw {
+            if !self.in_act {
+                self.in_act = true;
+                if self.cfg.teacher_route {
+                    // the clause the act starts in is its cue (the request), not a fact
+                    self.buf.clear();
+                    self.bufp.clear();
+                }
+            }
             // the self word joins the context (unless the reader is deaf to itself), and nothing else
             if o != u32::MAX {
                 // the history (the cue's context) only: the clause window, which the binding walk reads, keeps the
@@ -5069,6 +5203,9 @@ impl Situation {
                     let pk = p.iter().enumerate().filter(|(i, &x)| *i == 0 || !skippable(x)).fold(0x9A7, |h, (_, &x)| hash(h, x as u64));
                     let pkv = (hash(pk, 77) & 0x7FFF_FFFF) as u32;
                     self.bufp.push(pkv);
+                    if self.cfg.rel_merge && self.rel_ex.len() < 1 << 18 {
+                        self.rel_ex.entry(pkv).or_insert_with(|| p.clone());
+                    }
                     if self.cfg.bnd_use {
                         let cu = path.iter().find(|&&x| self.boundary[x as usize]).copied();
                         if let Some(u) = cu {
@@ -5557,6 +5694,9 @@ impl Situation {
         let buf = std::mem::take(&mut self.buf);
         let bufp = std::mem::take(&mut self.bufp);
         for (bi, (x, c, dir, v)) in buf.into_iter().enumerate() {
+            // the binding's relation key (with --sit-rel-merge, its merged key)
+            let rawk = bufp.get(bi).copied().unwrap_or(c);
+            let rawk = if self.cfg.rel_merge { self.rel_canon(rawk) } else { rawk };
             let kd = self.kk(v);
             if self.cfg.supersede {
                 let others: Vec<u32> = self.dcl.get(&(x, dir as u8)).cloned().unwrap_or_default();
@@ -5595,7 +5735,7 @@ impl Situation {
                 // strong, one-off paths weak
                 recurring = !(self.cfg.heads && c < COMP && content_val && self.ksize.get(&self.kk(x)).copied().unwrap_or(0) < 3);
                 if recurring && self.cfg.heads && c < COMP && content_val {
-                    let pk = bufp.get(bi).copied().unwrap_or(c) as u64;
+                    let pk = rawk as u64;
                     let m = self.sketch_bump(pk);
                     first_tag = (16 - m.leading_zeros()).min(15) as u8;
                     if self.cfg.lt_min > 0 && (m as u32) < self.cfg.lt_min {
@@ -5606,13 +5746,13 @@ impl Situation {
                 recurring = false; // long-term facts are about content words (a kind of 3 or more)
             } else if self.cfg.lt_min > 0 && self.cfg.heads && c < COMP && content_val {
                 // count the path in the sketch; a relation is long-term once it recurs
-                let pk = bufp.get(bi).copied().unwrap_or(c) as u64;
+                let pk = rawk as u64;
                 let m = self.sketch_bump(pk);
                 recurring = m as u32 >= self.cfg.lt_min;
             }
             if recurring && self.cfg.lt_budget == 0 && self.cfg.lt_credit > 0 && self.cfg.heads && c < COMP && content_val {
                 // kept by credit: a path's first lt_credit bindings, then only if it has helped answer
-                let key = if self.cfg.heads_path { bufp.get(bi).copied().unwrap_or(c) | 0x8000_0000 } else { c };
+                let key = if self.cfg.heads_path { rawk | 0x8000_0000 } else { c };
                 if self.key_credit.get(&key).copied().unwrap_or(0) == 0 {
                     let n = self.key_writes.entry(key).or_insert(0);
                     *n += 1;
@@ -5623,7 +5763,7 @@ impl Situation {
                 eprintln!("HDBG t {} x {} v {} kd {} ksize {:?} c {} content_val {} recurring {} dir {}", self.t, x, v, kd, self.ksize.get(&kd), c, content_val, recurring, dir);
             }
             if self.cfg.heads && c < COMP && content_val && recurring {
-                let key = if self.cfg.heads_path { bufp.get(bi).copied().unwrap_or(c) | 0x8000_0000 } else { c };
+                let key = if self.cfg.heads_path { rawk | 0x8000_0000 } else { c };
                 let hk = if self.cfg.heads_nokind { self.kn } else { kd };
                 let now = self.t;
                 if let Some(ent) = self.heads_tab.get_mut(&(x, key, hk)) {
