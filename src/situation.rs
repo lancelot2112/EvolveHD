@@ -315,6 +315,11 @@ pub struct SitCfg {
     /// detector. Stage 2, routing: at a Go word the clause before it is the act's cue and is not committed to fact
     /// memory (in place of the question drop; the Go word need not be in L).
     pub act: bool,
+    /// --sit-act with a contrast gate: Go after u when acts after u are paid at least twice as often as acts in
+    /// general (paid(u)·N ≥ 2·P·n(u), at least 16 counted), instead of paid > charged. A gate that never stops learning
+    /// must not close in hard material: there an act after "?" is paid less than half the time, but still far more
+    /// often than an act anywhere else.
+    pub act_contrast: bool,
     /// --sit-seq-replay: replay (stage 3's motor primitive): a ring of the world's last 256 words (self words never enter it). At each
     /// prediction, for each of the 3 newest cue words u, the words that followed u's two newest earlier occurrences in
     /// the ring are offered as candidates (source and rank as features), so the route learner can learn to replay a
@@ -991,6 +996,7 @@ pub struct Situation {
     in_teacher: bool,                               // --sit-teacher-route: reading the teacher's sentence after an act
     self_mark: Option<usize>,                       // stage 3: the history's length before the current act's first self word
     prev_self: bool,                                // stage 3: the last word in the context was said by the reader
+    act_all: (u64, u64),                            // --sit-act-contrast: (acts paid, acts counted) over all words
     act_n: Vec<(u32, u32)>,                         // --sit-act: per word u, (acts after u paid, charged)
     qrecs: HashMap<(u64, u32), (u32, u64, u16, u16)>, // --sit-qrec: (form, entity) -> (answer, time, hits, misses)
     qrec_at: (u64, Vec<u32>),                       // --sit-qrec: the open question's form and content cue words
@@ -1097,6 +1103,7 @@ impl Situation {
             qcount: vec![0; NF],
             qrecs: HashMap::default(),
             act_n: vec![(0, 0); nw],
+            act_all: (0, 0),
             act_self: vec![(0, 0); nw],
             prev_self: false,
             self_mark: None,
@@ -4429,6 +4436,10 @@ impl Situation {
     /// --sit-act: does acting after u pay (more paid than charged, at least 16 counted)?
     fn act_go(&self, u: u32) -> bool {
         let (p, c) = self.act_n.get(u as usize).copied().unwrap_or((0, 0));
+        if self.cfg.act_contrast {
+            let n = (p + c) as u64;
+            return n >= 16 && p as u64 * self.act_all.1.max(1) >= 2 * self.act_all.0 * n;
+        }
         p + c >= 16 && p > c
     }
     fn is_q(&self, u: u32) -> bool {
@@ -4753,6 +4764,7 @@ impl Situation {
                     // after its own word the actor keeps separate books: what pays after a word it said says nothing
                     // about acting after the same word heard from the world
                     let e = if self.prev_self { &mut self.act_self[u as usize] } else { &mut self.act_n[u as usize] };
+                    let (paid, counted) = (a == w && !trivial, a != w || !trivial);
                     if a == w && !trivial {
                         e.0 += 1;
                     } else if a != w {
@@ -4760,6 +4772,12 @@ impl Situation {
                     }
                     if e.0 + e.1 >= 4096 {
                         *e = (e.0 >> 1, e.1 >> 1);
+                    }
+                    if counted {
+                        self.act_all = (self.act_all.0 + paid as u64, self.act_all.1 + 1);
+                        if self.act_all.1 >= 1 << 24 {
+                            self.act_all = (self.act_all.0 >> 1, self.act_all.1 >> 1);
+                        }
                     }
                 }
             }

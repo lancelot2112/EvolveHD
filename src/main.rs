@@ -99,6 +99,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         validate_slot: flag(args, "--sit-validate-slot"),
         qrec: flag(args, "--sit-qrec"),
         act: flag(args, "--sit-act"),
+        act_contrast: flag(args, "--sit-act-contrast"),
         seq_replay: flag(args, "--sit-seq-replay"),
         teacher_route: flag(args, "--sit-teacher-route"),
         rel_merge: flag(args, "--sit-rel-merge"),
