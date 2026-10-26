@@ -36,9 +36,30 @@ Seed 0 also answers a third of training questions from working-memory slots; see
 | Best-ranked route credited (default) | 83.6 / 88.0% | 60 / 32% |
 | Up to 4 routes credited | 67.9 / 53.0% | 63 / 41% |
 
+## Does the bad seed come out of it? (learning left on through the test)
+
+**During training it is never in a bad state.** Training answers, per 100 in order:
+- seed 2: 86–96% throughout, and 90% on the book-padded 1k stories;
+- seed 0: 88–98%, falling to 83% and 54 of 71 on the 1k stories.
+
+Seed 2 fails only on the plain test stories after the freeze. Its router settled on what worked for the book-padded stories it saw last, which doesn't work for plain ones.
+
+**With the router left learning through the test** (`FREEZE=99999999`, prequential: each answer is scored before it is learned from), it recovers within about 20 questions:
+
+| Run | 0k | 4k | 0k answers right, per 20 in order |
+|---|---|---|---|
+| Seed 2, frozen | 60% | 32% | 15, 12, 11, 13, 9 |
+| **Seed 2, learning on** | **89%** | **66%** | 16, 18, 19, 19, 17 |
+| Seed 0, frozen | 96% | 68% | 20, 19, 19, 20, 18 |
+| Seed 0, learning on | 90% | 66% | 20, 18, 18, 18, 16 |
+
+- **With learning on, the two seeds end equal** (89 / 66% and 90 / 66%). The seed gap is a frozen router's leftover tuning to the last training phase, not a broken memory or a fatal merge.
+- **The merges don't block the recovery.** They are permanent, and seed 2 still recovers: the router can lean on the exact keys again once it sees examples.
+- **Learning on costs seed 0 a little at 0k** (96% to 90%): it drifts too. So "freeze skill after training" trades this drift against the bad seed's lock-in. A slower learning rate, or learning only from mistakes made with high confidence, may get both.
+
 ## What this means
 
-- **The seed lottery is in the router's choice among stored facts.** Memory is fine; the chain options (which holder event, now or then, which hop-2 option) are ranked by weights that settle differently per seed.
+- **The seed lottery is in the router's choice among stored facts,** and it is a frozen router's leftover tuning: with learning left on, the bad seed recovers within about 20 questions. Memory is fine; the chain options (which holder event, now or then, which hop-2 option) are ranked by weights that settle differently per seed.
 - **Compression has to be judged by what reads it, not only by how facts overwrite.** The merge rule asks whether the newer value answers, using the holder's place now. For dropped objects the answer is the place then, so the rule can't see that "dropped" differs from "got".
 - **The owner's direction stands, but the credit signal has to separate signal from coincidence.** Fan-out must reach the compressed features that right routes share, not every route that happens to hold the right word. In a small world, half the routes hold the right place by chance.
 
