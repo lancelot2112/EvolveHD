@@ -330,8 +330,10 @@ pub struct SitCfg {
     /// and ranked newest first; for each pair of keys in a group, the pair wins when only the newer value leads to
     /// the answer and loses when only the older does. A value leads to the answer when it is the answer, or when its
     /// own newest head of the answer's kind is the answer (one hop). A pair merges when wins are significant,
-    /// (wins - losses)^2 > 9 (wins + losses), and losses are at most an eighth of wins (at least 8 wins). Merged keys share one key from then on: new heads are written under it,
-    /// recurrence is counted for it, and the route learner sees it.
+    /// (wins - losses)^2 > 9 (wins + losses), and losses are at most an eighth of wins (at least 8 wins). The
+    /// condensed version sits next to the exact one: a binding whose relation has merged is written under its exact
+    /// key and also, as a separate card, under the merged relation's own key (counted for recurrence on its own), and
+    /// the route learner sees each head's merged key as an added feature. Merging stops when skill freezes.
     pub rel_merge: bool,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
@@ -969,6 +971,7 @@ pub struct Situation {
     wring: std::collections::VecDeque<u32>,         // --sit-replay: the world's last 256 words
     rel_parent: HashMap<u32, u32>,                  // --sit-rel-merge: merged relation keys (union-find over raw path keys)
     rel_pair: HashMap<(u32, u32), (u16, u16)>,      // --sit-rel-merge: per key pair, (wins, losses) at answers
+    rel_cards: std::collections::HashSet<u32>,      // --sit-rel-merge: keys of merged cards (condensed copies)
     rel_ex: HashMap<u32, Vec<u32>>,                 // --sit-rel-merge: an example path per key (for the report)
     pub rel_merges: u64,                            // --sit-rel-merge: merges made
     in_act: bool,                                   // stage 3-4: inside an act (self slots since the last world word)
@@ -1087,6 +1090,7 @@ impl Situation {
             rel_parent: HashMap::default(),
             rel_pair: HashMap::default(),
             rel_ex: HashMap::default(),
+            rel_cards: std::collections::HashSet::default(),
             rel_merges: 0,
             wring: std::collections::VecDeque::new(),
             self_word: None,
@@ -2812,7 +2816,7 @@ impl Situation {
                             // and its merged key, as an added feature, so merging adds sharing without discarding what
                             // the route learner already knows about the exact key
                             let fk = self.rel_canon(key & 0x7FFF_FFFF) | (key & 0x8000_0000);
-                            f1.push(Self::fid(72, fk as u64, 0));
+                            f1.push(Self::fid(72, fk as u64, self.rel_cards.contains(&(key & 0x7FFF_FFFF)) as u64));
                         }
                     }
                     if self.cfg.chunk {
@@ -4312,8 +4316,8 @@ impl Situation {
             let Some(l) = self.heads_of.get(&e) else { continue };
             let mut groups: HashMap<u32, Vec<(u64, u32, bool)>> = HashMap::default();
             for h in l {
-                if h.2 == e {
-                    continue;
+                if h.2 == e || self.rel_cards.contains(&(h.0 & 0x7FFF_FFFF)) {
+                    continue; // condensed copies are not judged (their members are)
                 }
                 groups.entry(self.kk(h.2)).or_default().push((h.3, self.rel_canon(h.0 & 0x7FFF_FFFF), leads(h.2, self)));
             }
@@ -5691,12 +5695,26 @@ impl Situation {
         (self.ck_n, ws)
     }
     fn commit(&mut self) {
-        let buf = std::mem::take(&mut self.buf);
-        let bufp = std::mem::take(&mut self.bufp);
+        let mut buf = std::mem::take(&mut self.buf);
+        let mut bufp = std::mem::take(&mut self.bufp);
+        if self.cfg.rel_merge {
+            // the condensed version next to the exact one: a binding whose relation has merged is also written under
+            // the merged relation's own key (a separate card), so no exact fact is ever overwritten by a merge
+            let n = buf.len().min(bufp.len());
+            for bi in 0..n {
+                let raw = bufp[bi];
+                let root = self.rel_canon(raw);
+                if root != raw {
+                    let mk = (hash(root as u64, 0xC0DE) & 0x7FFF_FFFF) as u32;
+                    self.rel_cards.insert(mk);
+                    buf.push(buf[bi]);
+                    bufp.push(mk);
+                }
+            }
+        }
         for (bi, (x, c, dir, v)) in buf.into_iter().enumerate() {
-            // the binding's relation key (with --sit-rel-merge, its merged key)
+            // the binding's relation key (exact; with --sit-rel-merge the condensed copies carry the merged card's key)
             let rawk = bufp.get(bi).copied().unwrap_or(c);
-            let rawk = if self.cfg.rel_merge { self.rel_canon(rawk) } else { rawk };
             let kd = self.kk(v);
             if self.cfg.supersede {
                 let others: Vec<u32> = self.dcl.get(&(x, dir as u8)).cloned().unwrap_or_default();

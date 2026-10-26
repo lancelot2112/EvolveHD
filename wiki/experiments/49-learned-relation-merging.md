@@ -11,9 +11,9 @@
   - story set: [moved / walked / travelled to the] and [grabbed / took / picked up / got / dropped the];
   - small qa2: [picked up / took / grabbed / got / put down / discarded / dropped / left the];
   - pilot: [journeyed / travelled / moved / went to the] (in one run).
-- **It does not improve answers.** Over three seeds on the report streams, merging gives small qa2 reports 92 / 90 / 70% against 90 / 92 / 88% without it, and the story set 75.2 / 71.7 / 69.0% against 73.1 / 78.6 / 77.2%. Standard sets are unchanged (small qa2 100%, story set 97.3%, pilot 100 / 100%).
-- **In noisier streams it also merges junk** (on the small-qa2 report stream: [the apple / the milk / the / the football], and the two empty paths).
-- **Two fixes were needed to stop it doing harm.** Merged keys are added as a feature rather than replacing the exact key, and merging stops when the route learner freezes. Before them, a merge late in the pilot run dropped 0k to 83% (the frozen router lost its features), and small qa2 reports fell to 64%.
+- **It does not improve answers, nor hurt them once the condensed cards sit next to the exact ones.** Over three seeds on the report streams: small qa2 reports 82 / 98 / 80% with condensed cards, against 90 / 92 / 88% without merging; the story set 73.1 / 71.7 / 76.6% against 73.1 / 78.6 / 77.2%. The differences are within the seed spread. Standard sets are unchanged (small qa2 100%, story set 97.3%, pilot 100 / 100%).
+- **On the small-qa2 report stream it also merges links with an object inside them** ([the apple / the milk / the / the football]: "did something with an object"), and the two empty paths. The owner's point: that is a regularity too, a category like "food", and it does no harm as long as the condensed version sits next to the exact one.
+- **Three fixes were needed so that merging can't do harm.** Merged keys are added as a feature rather than replacing the exact key; merging stops when the route learner freezes; and each fact whose relation has merged is stored twice, under its exact key and as a separate condensed card (binary `sit-49e`). Before the third fix, facts were stored under the merged key in place of the exact one, so a merge could make one fact overwrite another (experiment 35's failure). Before them, a merge late in the pilot run dropped 0k to 83% (the frozen router lost its features), and small qa2 reports fell to 64%.
 - **Found on the way: the clause an act starts in (the request, "report the apple") is the act's cue and must not be stored as a fact,** like the question before an answer and the teacher's reply after an act. With it, small qa2 reports are 88–92% over three seeds.
 
 ## The rule (`--sit-rel-merge`, binaries `sit-49a`–`sit-49d`)
@@ -32,7 +32,8 @@ Script `runs/exp49/a.sh` (standard sets) and `r.sh` (report streams). The stack 
 | Run | Small qa2 reports: answer (QA kept) | Story set reports: answer, all / where-object | Standard sets: small qa2 / story / pilot |
 |---|---|---|---|
 | No merging, request routed, seeds 0 / 1 / 2 | 90 (98) / 92 (100) / 88% (86%) | 73.1 / 38.2; 78.6 / 64.7; 77.2 / 58.8% | — |
-| Merging, request routed, seeds 0 / 1 / 2 | 92 (96) / 90 (94) / 70% (78%) | 75.2 / 47.1; 71.7 / 58.8; 69.0 / 44.1% | 100% / 97.3% / 100 / 100% (seed 0) |
+| Merging, request routed, merged key replacing the exact one in storage (sit-49d), seeds 0 / 1 / 2 | 92 (96) / 90 (94) / 70% (78%) | 75.2 / 47.1; 71.7 / 58.8; 69.0 / 44.1% | 100% / 97.3% / 100 / 100% (seed 0) |
+| **Merging, condensed cards next to exact ones (sit-49e), seeds 0 / 1 / 2** | 82 (92) / 98 (100) / 80% (78%) | 73.1 / 41.2; 71.7 / 58.8; 76.6 / 52.9% | — |
 | Merging replacing the exact key, no freeze stop (sit-49a) | 64% (96%) | 67.6 / 38.2% | 100% / 96.8% / 83 / 100% |
 
 ## What this means
@@ -48,4 +49,4 @@ Script `runs/exp49/a.sh` (standard sets) and `r.sh` (report streams). The stack 
 
 1. Route features by role, not position (the cue word's kind and which value kind is asked), so questions and reports share routes.
 2. Merging on book text (full qa2, BABILong), where exact keys don't recur.
-3. Merge only keys that each recur, to keep junk keys out.
+3. Merge across more than one hop and across kinds of value, and let the router weigh the condensed cards: the regularities found so far (movement, handling, objects) are the ones bAbI has.
