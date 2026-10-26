@@ -340,6 +340,9 @@ pub struct SitCfg {
     /// route is blamed once. What the right routes share (the compressed features: classes, kinds, merged keys) then
     /// learns fastest, and the features of a route that held the answer by chance average out.
     pub credit_fan: usize,
+    /// Slow learning after the freeze: from --sit-freeze-from on, the route learner still learns, at one word in N
+    /// (an integer rate: its weights step by 1, so learning less often is learning slower). 0: frozen, as before.
+    pub slow_after: u64,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -5053,7 +5056,8 @@ impl Situation {
             if self.cfg.bnd_use && !self.qcands.is_empty() {
                 self.bnd_use_update(w);
             }
-            if self.t >= self.cfg.freeze_from {
+            let slow = self.cfg.slow_after > 0 && hash(self.t, 0x510E) % self.cfg.slow_after == 0;
+            if self.t >= self.cfg.freeze_from && !slow {
                 // frozen: the proposals are dropped unlearned
                 self.qcands.clear();
                 self.qbits.clear();
