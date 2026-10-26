@@ -1,6 +1,6 @@
 # 49 · Learned relation merging: the lossy step, from the overwrite rule (2026-10-25)
 
-*[All experiments](README.md)* · [← 48](48-goal-directed-acts.md)
+*[All experiments](README.md)* · [← 48](48-goal-directed-acts.md) · [50 →](50-merging-on-book-text.md)
 
 **The owner's question:** the glue between facts ("went to the", "journeyed to the") and the forms of questions are meant to be abstracted a little; what happened to the lossy compression step? Build it, and make it agnostic to the kind of information processed: maybe it isn't text.
 
