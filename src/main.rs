@@ -102,6 +102,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         seq_replay: flag(args, "--sit-seq-replay"),
         teacher_route: flag(args, "--sit-teacher-route"),
         rel_merge: flag(args, "--sit-rel-merge"),
+        credit_fan: arg(args, "--sit-credit-fan").map(|x| x.parse().unwrap()).unwrap_or(1),
         gate_from: arg(args, "--sit-gate-from").map(|x| x.parse().unwrap()).unwrap_or(0),
         q_contain: flag(args, "--sit-q-contain"),
         q_in_l: flag(args, "--sit-q-in-l"),

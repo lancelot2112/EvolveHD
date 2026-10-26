@@ -1,6 +1,6 @@
 # 50 · Relation merging on book text (2026-10-26)
 
-*[All experiments](README.md)* · [← 49](49-learned-relation-merging.md)
+*[All experiments](README.md)* · [← 49](49-learned-relation-merging.md) · [51 →](51-why-seeds-differ.md)
 
 **The question:** experiment 49's learned relation merging (condensed cards next to exact facts) did nothing on plain bAbI, where every relation recurs anyway. Does it pay on book text, where exact keys run out?
 

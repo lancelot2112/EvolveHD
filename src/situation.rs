@@ -335,6 +335,11 @@ pub struct SitCfg {
     /// key and also, as a separate card, under the merged relation's own key (counted for recurrence on its own), and
     /// the route learner sees each head's merged key as an added feature. Merging stops when skill freezes.
     pub rel_merge: bool,
+    /// Credit fan-out (the owner's "compression + fanout in the teaching signal"): on a mistake, every candidate route
+    /// that held the right answer (up to N distinct routes) is credited, not only the best-ranked one, and the wrong top
+    /// route is blamed once. What the right routes share (the compressed features: classes, kinds, merged keys) then
+    /// learns fastest, and the features of a route that held the answer by chance average out.
+    pub credit_fan: usize,
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -3546,7 +3551,25 @@ impl Situation {
             if top.1 != w {
                 if let Some(good) = cands.iter().find(|x| x.1 == w) {
                     let (gf, tf) = (good.0.clone(), top.0.clone());
-                    self.qupdate(&q, &gf, 1);
+                    if self.cfg.credit_fan > 1 {
+                        // every route that held the answer (distinct feature sets), up to credit_fan
+                        let mut seen: Vec<&Vec<u32>> = vec![];
+                        for x in cands.iter().filter(|x| x.1 == w) {
+                            if seen.iter().any(|s| **s == x.0) {
+                                continue;
+                            }
+                            seen.push(&x.0);
+                            if seen.len() >= self.cfg.credit_fan {
+                                break;
+                            }
+                        }
+                        let goods: Vec<Vec<u32>> = seen.into_iter().cloned().collect();
+                        for g in &goods {
+                            self.qupdate(&q, g, 1);
+                        }
+                    } else {
+                        self.qupdate(&q, &gf, 1);
+                    }
                     self.qupdate(&q, &tf, -1);
                     // keep the mistake for replay: the routes as they were, with their answer
                     if self.cfg.replay > 0 && (!self.cfg.replay_q || self.after_q) {
@@ -4673,6 +4696,20 @@ impl Situation {
                         || self.chunks.last().map_or(true, |c| c.len() >= 32)
                 }
             };
+        // diagnostic SIT_ANSDBG: at each answer, the top candidate's source and route, and where the right answer ranked
+        if self.after_q && !self.idx_only && !sm && !self.qcands.is_empty() && std::env::var("SIT_ANSDBG").is_ok() {
+            let top = self.qcands[0].1;
+            let rank = self.qcands.iter().position(|x| x.1 == w).map_or(-1, |r| r as i64);
+            let src = self.qsrc.first().map_or(9, |x| x.0);
+            let h = self.qhops.first().copied().unwrap_or((0, 0, 0, 0));
+            let rt = self.qroute.first().copied().unwrap_or((0, 0));
+            let wsrc = if rank >= 0 { self.qsrc.get(rank as usize).map_or(9, |x| x.0) } else { 9 };
+            let rk = self.qranks.first().copied().unwrap_or((0, 0));
+            let (wrk, wh) = if rank >= 0 { (self.qranks.get(rank as usize).copied().unwrap_or((0, 0)), self.qhops.get(rank as usize).copied().unwrap_or((0, 0, 0, 0))) } else { ((0, 0), (0, 0, 0, 0)) };
+            let k1 = self.qkey1.first().copied().unwrap_or(0);
+            let wk1 = if rank >= 0 { self.qkey1.get(rank as usize).copied().unwrap_or(0) } else { 0 };
+            eprintln!("ANS {} w {} top {} ok {} src {} hops {} j {} rank {} wsrc {} n {} s0 {} s1 {} r1 {} which {} key1 {} | w r1 {} which {} key1 {} c1 {} wc1 {}", self.t, w, top, (top == w) as u8, src, (h.2 != u32::MAX) as u8 + 1, rt.0, rank, wsrc, self.qcands.len(), self.qcands[0].2, self.qcands.get(1).map_or(0, |x| x.2), rk.0, rk.1, k1, wrk.0, wrk.1, wk1, h.0, wh.0);
+        }
         // --sit-rel-merge: at an answer, judge which relation keys are one relation
         if self.cfg.rel_merge && self.after_q && !self.idx_only && !sm && self.t < self.cfg.freeze_from {
             self.rel_judge(w);
