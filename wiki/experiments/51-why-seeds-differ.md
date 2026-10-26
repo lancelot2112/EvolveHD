@@ -1,6 +1,6 @@
 # 51 · Why some seeds settle badly, and credit fan-out (2026-10-26)
 
-*[All experiments](README.md)* · [← 50](50-merging-on-book-text.md)
+*[All experiments](README.md)* · [← 50](50-merging-on-book-text.md) · [52 →](52-slow-learning-after-freeze.md)
 
 **The question:** with relation merging on, full qa2's plain-text test (0k) was 96% on seed 0 and 60% on seed 2, with normal training scores in both. Why? And the owner's idea: compression plus fan-out could be part of the teaching signal, to help relate concepts.
 
