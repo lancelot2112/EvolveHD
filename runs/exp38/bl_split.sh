@@ -3,6 +3,6 @@
 D=$1  # a stream in runs/exp38 (bl_l16, bl_l64, bl_long); BIN= picks the binary (default the old sit-38x)
 F=$(sed "s/--sit-seed 0/--sit-seed ${SEED:-0}/" runs/exp37/F.flags)
 X="--sit-skip --sit-lsh --sit-slotlog 16 --sit-recent 32 --sit-heads-nokind --sit-bnd-hyst --sit-lt-min 4 --sit-lt-credit 64 --sit-wm-horizon 4096 --sit-path-forget 2"
-SIT_TIMING=1 ${BIN:-runs/exp36/sit-38x} assoc --sit --data runs/exp38/$D.ids --vocab runs/exp38/$D.txt --sit-kinds --sit-mood --sit-query --sit-pool 0.7 --sit-fpool $F --sit-nest --sit-scope $X --sit-answer-only 156952 --sit-freeze-from 156952 $EXTRA --out runs/exp38/R_${D}${TAG} 2> runs/exp38/R_${D}${TAG}.log
+SIT_TIMING=1 ${BIN:-runs/exp36/sit-38x} assoc --sit --data runs/exp38/$D.ids --vocab runs/exp38/$D.txt --sit-kinds --sit-mood --sit-query --sit-pool 0.7 --sit-fpool $F --sit-nest --sit-scope $X --sit-answer-only 156952 --sit-freeze-from ${FREEZE:-156952} $EXTRA --out runs/exp38/R_${D}${TAG} 2> runs/exp38/R_${D}${TAG}.log
 python3 scripts/exp38/score_babilong.py runs/exp38/$D runs/exp38/R_${D}${TAG} > runs/exp38/R_${D}${TAG}.score
 cat runs/exp38/R_${D}${TAG}.score

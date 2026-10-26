@@ -343,6 +343,11 @@ pub struct SitCfg {
     /// Slow learning after the freeze: from --sit-freeze-from on, the route learner still learns, at one word in N
     /// (an integer rate: its weights step by 1, so learning less often is learning slower). 0: frozen, as before.
     pub slow_after: u64,
+    /// The route learner's schedule (the owner's rule: learn fast at first to get seeded, then slow down, never stop):
+    /// each route feature counts its own updates, and an update to a feature that has had n of them is applied one
+    /// time in 2^min(floor, bitlen(n >> seed)). So a new feature learns at full rate for its first 2^seed updates,
+    /// then at half, a quarter ..., down to one in 2^floor, and never stops. (seed, floor); (0, 0) is off.
+    pub learn_sched: (u32, u32),
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -990,6 +995,7 @@ pub struct Situation {
     qrecs: HashMap<(u64, u32), (u32, u64, u16, u16)>, // --sit-qrec: (form, entity) -> (answer, time, hits, misses)
     qrec_at: (u64, Vec<u32>),                       // --sit-qrec: the open question's form and content cue words
     pub qrec_stats: (u64, u64, u64),                // --sit-qrec: (records written, hits, misses)
+    qcount: Vec<u32>,                               // --sit-learn-sched: per route feature, updates seen
     hv: HashMap<(u32, u32, u32), (u16, u16)>,         // --sit-validate: per head (entity, key, kind), (hits, misses) at answers
     pub hv_stats: (u64, u64),                       // --sit-validate: (hits, misses) counted
     gate_by: Vec<(u32, u32)>,                       // --sit-chunk-gate: per word, (refreshed from a head, from a slot)
@@ -1088,6 +1094,7 @@ impl Situation {
             gate_hits: (0, 0),
             gate_by: vec![(0, 0); nw],
             hv: HashMap::default(),
+            qcount: vec![0; NF],
             qrecs: HashMap::default(),
             act_n: vec![(0, 0); nw],
             act_self: vec![(0, 0); nw],
@@ -2719,8 +2726,25 @@ impl Situation {
         ((h as usize) & (self.qh.len() - 1), if (h >> 63) & 1 == 1 { 1 } else { -1 })
     }
     fn qupdate(&mut self, q: &[u32], f: &[u32], d: i16) {
+        // --sit-learn-sched: each feature's own rate, by how often it has been updated
+        let keep: Vec<bool> = if self.cfg.learn_sched.1 > 0 {
+            let (sd, fl) = self.cfg.learn_sched;
+            f.iter()
+                .map(|&fi| {
+                    let n = self.qcount[fi as usize];
+                    self.qcount[fi as usize] = n.saturating_add(1);
+                    let k = (32 - (n >> sd).leading_zeros()).min(fl);
+                    k == 0 || hash(self.t, fi as u64 + 0x5C4ED) & ((1u64 << k) - 1) == 0
+                })
+                .collect()
+        } else {
+            vec![]
+        };
         for &b in q {
-            for &fi in f {
+            for (ix, &fi) in f.iter().enumerate() {
+                if !keep.is_empty() && !keep[ix] {
+                    continue;
+                }
                 if self.cfg.qsparse == 3 {
                     let (i, sg) = self.qbind(b, fi);
                     self.qh[i] = self.qh[i].saturating_add((sg * d as i64) as i8);

@@ -104,6 +104,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         rel_merge: flag(args, "--sit-rel-merge"),
         credit_fan: arg(args, "--sit-credit-fan").map(|x| x.parse().unwrap()).unwrap_or(1),
         slow_after: arg(args, "--sit-slow-after").map(|x| x.parse().unwrap()).unwrap_or(0),
+        learn_sched: arg(args, "--sit-learn-sched").map(|x| { let v: Vec<u32> = x.split(',').map(|y| y.parse().unwrap()).collect(); (v[0], v[1]) }).unwrap_or((0, 0)),
         gate_from: arg(args, "--sit-gate-from").map(|x| x.parse().unwrap()).unwrap_or(0),
         q_contain: flag(args, "--sit-q-contain"),
         q_in_l: flag(args, "--sit-q-in-l"),
