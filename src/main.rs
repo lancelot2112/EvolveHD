@@ -1099,7 +1099,7 @@ fn main() {
             }
             eprintln!("{} words, {:.1} s", ids.len(), t0.elapsed().as_secs_f64());
             if n_bits > 0 {
-                eprintln!("prequential bits per word where the reader predicted ({} words): counts {:.3}, counts + reader {:.3} (the reader's gain {:.3}); best weight by context (not acting, then acting; by confidence) {:?}", n_bits, sum_c / n_bits as f64, sum_m / n_bits as f64, (sum_c - sum_m) / n_bits as f64, mix_lw.iter().map(|b| MIXA[(0..MIXA.len()).max_by(|&i, &j| b[i].partial_cmp(&b[j]).unwrap()).unwrap()]).collect::<Vec<f64>>());
+                eprintln!("prequential bits per word where the reader predicted ({} words): counts {:.3}, counts + reader {:.3} (the reader's gain {:.3}); best weight by context (not acting, then acting; by confidence; - none seen) {:?}", n_bits, sum_c / n_bits as f64, sum_m / n_bits as f64, (sum_c - sum_m) / n_bits as f64, mix_lw.iter().zip(&rank_n).map(|(b, rn)| if rn.iter().sum::<u32>() == 0 { "-".to_string() } else { format!("{}", MIXA[(0..MIXA.len()).rev().max_by(|&i, &j| b[i].partial_cmp(&b[j]).unwrap()).unwrap()]) }).collect::<Vec<String>>());
             }
             if answer_only < ids.len() {
                 eprintln!("answer-only from word {answer_only}: {n_answered} predictions at question boundaries; {:.1} s in all", t_read.elapsed().as_secs_f64());
