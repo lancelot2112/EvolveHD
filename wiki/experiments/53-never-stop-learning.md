@@ -1,6 +1,6 @@
 # 53 · Never stop learning: a schedule, and an act gate that can't shut itself off (2026-10-26)
 
-*[All experiments](README.md)* · [← 52](52-slow-learning-after-freeze.md)
+*[All experiments](README.md)* · [← 52](52-slow-learning-after-freeze.md) · [54 →](54-learning-by-surprise.md)
 
 **The owner's rule:** learning should be quick at first, to get seeded, then slow down, and never stop.
 
