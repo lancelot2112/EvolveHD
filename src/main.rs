@@ -146,6 +146,9 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         qslot_hopconj: flag(args, "--sit-qslot-hopconj"),
         curious: flag(args, "--sit-curious"),
         kframes: flag(args, "--sit-kframes"),
+        q_kind: arg(args, "--sit-q-kind").map(|s| s.parse().unwrap()).unwrap_or(0),
+        kind_instant: flag(args, "--sit-kind-instant"),
+        kind_instant_move: flag(args, "--sit-kind-instant-move"),
         kslow: g("--sit-kslow", "0").parse().unwrap(),
         kshift: g("--sit-kshift", "2").parse().unwrap(),
         curious_coarse: flag(args, "--sit-curious-coarse"),
@@ -1180,6 +1183,10 @@ fn main() {
                 }
                 if x.cfg.kinds {
                     eprintln!("kinds: {}", x.kind_groups().iter().map(|g| g.iter().map(|&w| name(w)).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>().join(" | "));
+                    if flag(&args, "--sit-kind-instant") {
+                        let r = x.kind_instant_report();
+                        eprintln!("instant kinds: {} votes cast, {} taken at once, {} taken after reclustering", r[2], r[0], r[1]);
+                    }
                 }
                 for cl in x.classes(8) {
                     let ps: Vec<String> = cl.iter().map(|p| format!("{} {}", if p[0] == 0 { "f" } else { "b" }, p[1..].iter().rev().map(|&w| name(w)).collect::<Vec<_>>().join(" "))).collect();

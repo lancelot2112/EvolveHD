@@ -542,6 +542,20 @@ pub struct SitCfg {
     /// The "two words before" frame feature uses the kind of the word two back, not its identity: ⟨kind, word before⟩.
     /// Synonyms (picked up / grabbed / took …) then count as one frame instead of diluting it.
     pub kframes: bool,
+    /// --sit-q-kind N: the route learner's query code names each cue word by its kind, not its identity, so what it
+    /// learned for one word carries to the others of its kind. 1: the identity bits and the question-form bits use
+    /// the kind; 2: also the cue words' frame codes are replaced by kind bits (the query is kinds only).
+    pub q_kind: u32,
+    /// --sit-kind-instant: a young word takes the kind of the words that filled the same places before. Each place
+    /// around a word (pairs of its neighbours, one or two away) keeps counts of the kinds of the established words
+    /// seen there; a word's occurrence votes for a kind when two or more of its places are dominated by it (3/4 of
+    /// at least 8). A young word (under 32 occurrences) whose own kind is still unsettled takes its vote at once, and
+    /// after each reclustering any word left in a group of fewer than 3 takes a clear vote (3/4 of its votes) for a
+    /// content kind (3 or more members).
+    pub kind_instant: bool,
+    /// --sit-kind-instant-move: after reclustering, a word with a clear vote also leaves a group of 3 or more for a
+    /// larger one it is voted into.
+    pub kind_instant_move: bool,
     /// Slow merges: two established kinds (each with at least 2 members) merge only after `kslow` reclusters in a row
     /// propose it; until then the proposed cluster is split back by the old kinds (0 = merge at once). Splits are free.
     pub kslow: u32,
@@ -959,6 +973,9 @@ pub struct Situation {
     sq_next: u32,
     sq_pid: HashMap<((u32, u32), (u32, u32)), u32>, // a pattern's id, kept across closes (its derived class and weights)
     kmerge: HashMap<(u32, u32), u32>,               // slow merges: proposals in a row per pair of old kinds
+    slot_ctx: HashMap<u64, Vec<(u32, u32)>>,         // --sit-kind-instant: per place, (kind, count) of established words seen there
+    kvote: HashMap<u32, Vec<(u32, u32)>>,            // --sit-kind-instant: per word, (kind, votes) from its places
+    kinst_n: [u64; 3],                               // --sit-kind-instant: instant takes, takes after reclustering, votes
     kind_area: crate::area::Area,                   // --sit-area-kinds: the matchers that name the kinds
     kpres: Vec<u64>,
     kmatch: Vec<u32>,                               // --sit-area-kinds: the matcher that won each word last                                // --sit-area-kinds: a word's count when last presented
@@ -1248,6 +1265,9 @@ impl Situation {
             sq_next: 0,
             sq_pid: HashMap::default(),
             kmerge: HashMap::default(),
+            slot_ctx: HashMap::default(),
+            kvote: HashMap::default(),
+            kinst_n: [0; 3],
             kind_area: {
                 let mut a = crate::area::Area::new(2);
                 a.anti = cfg.area_anti;
@@ -2054,6 +2074,9 @@ impl Situation {
         }
         self.kind = newk;
         self.finish_kinds();
+        if self.cfg.kind_instant {
+            self.kind_instant_apply();
+        }
     }
     /// An area of matchers in place of leader clustering (--sit-area-kinds): the words whose context codes changed
     /// since the last presentation (all, the first time), most frequent first; a word's kind is the name of the
@@ -2116,6 +2139,113 @@ impl Situation {
     /// Whether w may act as a cue entity (with --sit-entity-cues: a word of a kind with at least 3 members).
     fn is_entity(&self, w: u32) -> bool {
         !self.cfg.entity_cues || self.ksize.get(&self.kind[w as usize]).copied().unwrap_or(0) >= 3
+    }
+    /// --sit-kind-instant, at each word w: the word two back (x) now has neighbours on both sides. Its places vote
+    /// for a kind, an established x teaches its places its kind, and a young x takes a vote at once.
+    fn kind_places(&mut self, w: u32) {
+        const EST: u64 = 32;
+        let n = self.hist.len();
+        let (p2, p1, x, n1) = (self.hist[n - 4] as u64, self.hist[n - 3] as u64, self.hist[n - 2], self.hist[n - 1] as u64);
+        let n2 = w as u64;
+        let ctxs = [hash(hash(1, p1), n1), hash(hash(2, p1), n2), hash(hash(3, p2), n1), hash(hash(4, n1), n2), hash(hash(5, p2), p1)];
+        // the vote: kinds that dominate two or more of x's places
+        let mut tops: Vec<u32> = vec![];
+        for c in &ctxs {
+            if let Some(v) = self.slot_ctx.get(c) {
+                let tot: u32 = v.iter().map(|e| e.1).sum();
+                if let Some(&(k, m)) = v.iter().max_by_key(|e| e.1) {
+                    if tot >= 8 && 4 * m >= 3 * tot {
+                        tops.push(k);
+                    }
+                }
+            }
+        }
+        let mut voted = None;
+        for &k in &tops {
+            if tops.iter().filter(|&&j| j == k).count() >= 2 {
+                voted = Some(k);
+                break;
+            }
+        }
+        let xc = self.wcount[x as usize];
+        let xk = self.kind[x as usize];
+        if let Some(k) = voted {
+            self.kinst_n[2] += 1;
+            let v = self.kvote.entry(x).or_default();
+            match v.iter_mut().find(|e| e.0 == k) {
+                Some(e) => e.1 += 1,
+                None => v.push((k, 1)),
+            }
+            // young and unsettled (no kind yet, or a group of fewer than 3): take the vote now
+            if xc < EST && k != xk && k != self.kn && (xk == self.kn || self.ksize.get(&xk).copied().unwrap_or(0) < 3) && self.ksize.get(&k).copied().unwrap_or(0) >= 3 {
+                self.set_kind(x, k);
+                self.kinst_n[0] += 1;
+            }
+        }
+        // an established word teaches its places its kind
+        if xc >= EST && xk != self.kn {
+            for c in ctxs {
+                let v = self.slot_ctx.entry(c).or_default();
+                match v.iter_mut().find(|e| e.0 == xk) {
+                    Some(e) => e.1 += 1,
+                    None => v.push((xk, 1)),
+                }
+                if v.iter().map(|e| e.1).sum::<u32>() > 1024 {
+                    v.iter_mut().for_each(|e| e.1 >>= 1); // halve together: places follow change
+                    v.retain(|e| e.1 > 0);
+                }
+            }
+        }
+    }
+    /// Move w to kind k, keeping the kind sizes and member lists.
+    fn set_kind(&mut self, w: u32, k: u32) {
+        let old = self.kind[w as usize];
+        if old == k {
+            return;
+        }
+        if self.wcount[w as usize] > 0 {
+            if let Some(c) = self.ksize.get_mut(&old) {
+                *c = c.saturating_sub(1);
+            }
+            *self.ksize.entry(k).or_insert(0) += 1;
+        }
+        if self.fm(0) {
+            if let Some(m) = self.members.get_mut(&old) {
+                m.retain(|&x| x != w);
+            }
+            if self.words.contains(&w) {
+                self.members.entry(k).or_default().push(w);
+            }
+            self.rcache.get_mut().clear();
+        }
+        self.kind[w as usize] = k;
+    }
+    /// After a reclustering: any word left in a group of fewer than 3 takes a clear vote (3/4 of its votes, at
+    /// least 2) for a content kind (3 or more members).
+    fn kind_instant_apply(&mut self) {
+        let ws: Vec<(u32, u32)> = self
+            .kvote
+            .iter()
+            .filter_map(|(&w, v)| {
+                let tot: u32 = v.iter().map(|e| e.1).sum();
+                let &(k, m) = v.iter().max_by_key(|e| e.1)?;
+                (tot >= 2 && 4 * m >= 3 * tot).then_some((w, k))
+            })
+            .collect();
+        for (w, k) in ws {
+            let xk = self.kind[w as usize];
+            let (sx, sk) = (self.ksize.get(&xk).copied().unwrap_or(0), self.ksize.get(&k).copied().unwrap_or(0));
+            // a small group (under 3), or with --sit-kind-instant-move a smaller group than the one voted for
+            let small = sx < 3 || (self.cfg.kind_instant_move && sx < sk);
+            if k != xk && k != self.kn && small && sk >= 3 {
+                self.set_kind(w, k);
+                self.kinst_n[1] += 1;
+            }
+        }
+    }
+    /// --sit-kind-instant's counts: (instant takes, takes after reclustering, votes cast).
+    pub fn kind_instant_report(&self) -> [u64; 3] {
+        self.kinst_n
     }
     fn kk(&self, v: u32) -> u32 {
         if self.cfg.kinds { self.kind[v as usize] } else { self.kn }
@@ -2463,26 +2593,35 @@ impl Situation {
     /// block of its position, plus 4 identity bits per position.
     fn query_bits(&self, cue: &[u32]) -> Vec<u32> {
         let mut q = vec![];
+        // --sit-q-kind: a cue word is named by its kind (offset so kind ids and word ids never share a hash)
+        let qk = self.cfg.q_kind > 0 && self.cfg.kinds;
+        let nm = |u: u32| -> u64 { if qk && u != u32::MAX { (1u64 << 40) + self.kk(u) as u64 } else { u as u64 } };
         for (j, &u) in cue.iter().enumerate().take(4) {
-            for (b, on) in self.frame_code(u).into_iter().enumerate() {
-                if on {
-                    q.push((j * FB + b) as u32);
+            if qk && self.cfg.q_kind >= 2 {
+                for i in 0..8u64 {
+                    q.push((j * FB + (hash(nm(u) + 57, i) % FB as u64) as usize) as u32);
+                }
+            } else {
+                for (b, on) in self.frame_code(u).into_iter().enumerate() {
+                    if on {
+                        q.push((j * FB + b) as u32);
+                    }
                 }
             }
             for i in 0..4u64 {
-                q.push((4 * FB + j * 64 + (hash(u as u64 + 31, i) % 64) as usize) as u32);
+                q.push((4 * FB + j * 64 + (hash(nm(u) + 31, i) % 64) as usize) as u32);
             }
         }
         // conjunctive context bits: a hash of the words 1 and 3 back together, skipping the entity between them
         // (the question form)
-        let w0 = cue.first().copied().unwrap_or(u32::MAX) as u64;
-        let w2 = cue.get(2).copied().unwrap_or(u32::MAX) as u64;
+        let w0 = cue.first().map(|&u| nm(u)).unwrap_or(u32::MAX as u64);
+        let w2 = cue.get(2).map(|&u| nm(u)).unwrap_or(u32::MAX as u64);
         let cx = hash(hash(w0, 7), w2);
         for i in 0..4u64 {
             q.push((4 * FB + 256 + (hash(cx, i) % 256) as usize) as u32);
         }
         if self.cfg.qform14 {
-            let w3 = cue.get(3).copied().unwrap_or(u32::MAX) as u64;
+            let w3 = cue.get(3).map(|&u| nm(u)).unwrap_or(u32::MAX as u64);
             let cy = hash(hash(w0, 11), w3);
             for i in 0..4u64 {
                 q.push((4 * FB + 512 + (hash(cy, i) % 256) as usize) as u32);
@@ -2796,7 +2935,7 @@ impl Situation {
     /// The query learner's candidates: every one- and two-hop route from the cue words' newest live slots, scored.
     fn query_recall(&mut self, cue: &[u32]) -> Vec<(u32, u32)> {
         let q = self.query_bits(cue);
-        self.qform = if self.cfg.qslot_kforms {
+        self.qform = if self.cfg.qslot_kforms || (self.cfg.q_kind > 0 && self.cfg.kinds) {
             cue.iter().take(4).fold(0x9F0u64, |h, &u| hash(h, self.kk(u) as u64))
         } else {
             Self::qform_of(cue)
@@ -5274,6 +5413,9 @@ impl Situation {
                 self.frame_bump(w, f);
             }
             self.frame_bump(u, Self::fb(3, w as u64));
+        }
+        if self.cfg.kinds && self.cfg.kind_instant && n >= 4 {
+            self.kind_places(w);
         }
         if self.cfg.chunk && ck_start && !self.chunks.is_empty() {
             self.chunk_close(); // the chunk before w closes: its range text, its facts committed, the context drifts
