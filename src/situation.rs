@@ -357,6 +357,11 @@ pub struct SitCfg {
     /// time in 2^min(floor, bitlen(n >> seed)). So a new feature learns at full rate for its first 2^seed updates,
     /// then at half, a quarter ..., down to one in 2^floor, and never stops. (seed, floor); (0, 0) is off.
     pub learn_sched: (u32, u32),
+    /// The route learner's rate by surprise, never zero (seed, floor): a feature learns at full rate for its first
+    /// 2^seed updates (seeding); after that, at full rate while the router is surprised at answers (its recent hit
+    /// rate, over about 8 answers, is more than an eighth below its long-run rate, over about 128), and at one update
+    /// in 2^floor otherwise. (0, 0) is off.
+    pub learn_surprise: (u32, u32),
     /// (with --sit-q-contrast) question words only among the learned boundaries
     pub q_in_l: bool,
     /// Relation classes by locality-sensitive hashing instead of a search over prototypes: a path's code (its
@@ -1006,6 +1011,8 @@ pub struct Situation {
     qrecs: HashMap<(u64, u32), (u32, u64, u16, u16)>, // --sit-qrec: (form, entity) -> (answer, time, hits, misses)
     qrec_at: (u64, Vec<u32>),                       // --sit-qrec: the open question's form and content cue words
     pub qrec_stats: (u64, u64, u64),                // --sit-qrec: (records written, hits, misses)
+    pub qsurp: (u64, u64),                          // --sit-learn-surprise: (updates while surprised, updates)
+    qhit_ema: (i64, i64),                           // --sit-learn-surprise: the router's hit rate, short and long (x 65536)
     qcount: Vec<u32>,                               // --sit-learn-sched: per route feature, updates seen
     hv: HashMap<(u32, u32, u32), (u16, u16)>,         // --sit-validate: per head (entity, key, kind), (hits, misses) at answers
     pub hv_stats: (u64, u64),                       // --sit-validate: (hits, misses) counted
@@ -1106,6 +1113,8 @@ impl Situation {
             gate_by: vec![(0, 0); nw],
             hv: HashMap::default(),
             qcount: vec![0; NF],
+            qhit_ema: (0, 0),
+            qsurp: (0, 0),
             qrecs: HashMap::default(),
             act_n: vec![(0, 0); nw],
             act_all: (0, 0),
@@ -2740,7 +2749,19 @@ impl Situation {
     }
     fn qupdate(&mut self, q: &[u32], f: &[u32], d: i16) {
         // --sit-learn-sched: each feature's own rate, by how often it has been updated
-        let keep: Vec<bool> = if self.cfg.learn_sched.1 > 0 {
+        let keep: Vec<bool> = if self.cfg.learn_surprise.1 > 0 {
+            let (sd, fl) = self.cfg.learn_surprise;
+            let (sh, lo) = self.qhit_ema;
+            let surprised = sh < lo - (lo >> 3);
+            self.qsurp = (self.qsurp.0 + surprised as u64, self.qsurp.1 + 1);
+            f.iter()
+                .map(|&fi| {
+                    let n = self.qcount[fi as usize];
+                    self.qcount[fi as usize] = n.saturating_add(1);
+                    n < (1u32 << sd) || surprised || hash(self.t, fi as u64 + 0x5C4ED) & ((1u64 << fl) - 1) == 0
+                })
+                .collect()
+        } else if self.cfg.learn_sched.1 > 0 {
             let (sd, fl) = self.cfg.learn_sched;
             f.iter()
                 .map(|&fi| {
@@ -3470,6 +3491,13 @@ impl Situation {
         }
     }
     fn query_learn(&mut self, w: u32) {
+        if self.cfg.learn_surprise.1 > 0 && (self.after_q || std::env::var("SIT_SURPRISE_ALL").is_ok()) {
+            // the router's surprise at answers (the level above's teacher): its recent hit rate (about 8 answers)
+            // against its long-run rate (about 128); diagnostic SIT_SURPRISE_ALL measures it at every prediction
+            let hit = (self.qcands.first().map(|x| x.1) == Some(w)) as i64 * 65536;
+            let (sh, lo) = self.qhit_ema;
+            self.qhit_ema = (sh + ((hit - sh) >> 3), lo + ((hit - lo) >> 7));
+        }
         if self.cfg.chain_learn && (!self.cfg.chain_learn_q || self.after_q) {
             // the best-ranked route holding the next word: if a chain, count its hop-2 class in its hop-1 relation's row
             if let Some(b) = self.qcands.iter().position(|x| x.1 == w) {

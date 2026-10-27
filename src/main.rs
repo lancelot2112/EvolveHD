@@ -106,6 +106,7 @@ fn sit_cfg(args: &[String]) -> evolvehd::situation::SitCfg {
         rel_merge: flag(args, "--sit-rel-merge"),
         credit_fan: arg(args, "--sit-credit-fan").map(|x| x.parse().unwrap()).unwrap_or(1),
         slow_after: arg(args, "--sit-slow-after").map(|x| x.parse().unwrap()).unwrap_or(0),
+        learn_surprise: arg(args, "--sit-learn-surprise").map(|x| { let v: Vec<u32> = x.split(',').map(|y| y.parse().unwrap()).collect(); (v[0], v[1]) }).unwrap_or((0, 0)),
         learn_sched: arg(args, "--sit-learn-sched").map(|x| { let v: Vec<u32> = x.split(',').map(|y| y.parse().unwrap()).collect(); (v[0], v[1]) }).unwrap_or((0, 0)),
         gate_from: arg(args, "--sit-gate-from").map(|x| x.parse().unwrap()).unwrap_or(0),
         q_contain: flag(args, "--sit-q-contain"),
@@ -1008,6 +1009,9 @@ fn main() {
                 if x.cfg.chunk {
                     let (n, ws) = x.chunk_report();
                     eprintln!("chunks: {} started, {:.2} words each | starts a chunk (of times read): {}", n, x.time() as f64 / n.max(1) as f64, ws.iter().map(|&(w, a, b)| format!("{} {}/{}", name(w), a, b)).collect::<Vec<_>>().join(", "));
+                }
+                if x.qsurp.1 > 0 {
+                    eprintln!("learning by surprise: {} of {} updates while surprised ({:.1}%)", x.qsurp.0, x.qsurp.1, 100.0 * x.qsurp.0 as f64 / x.qsurp.1 as f64);
                 }
                 if x.cfg.rel_merge {
                     let g = x.rel_report();
