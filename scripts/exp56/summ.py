@@ -12,7 +12,7 @@ for tag in sys.argv[1:]:
     row = tag.ljust(8)
     for S, P in cols:
         pat = f"runs/exp55/R_{S}_{P}_s?.score" if tag == "off" else f"runs/exp56/R_{tag}_{S}_{P}_s?.score"
-        fs = sorted(glob.glob(pat))
+        fs = sorted(glob.glob(pat)) or sorted(glob.glob(f"runs/exp56/R_{tag}_{S}_{P}_s?.score"))
         if not fs:
             row += "-".rjust(15); continue
         a = [acc(f) for f in fs]
