@@ -1,6 +1,6 @@
 # 52 · Slow learning after the freeze (2026-10-26)
 
-*[All experiments](README.md)* · [← 51](51-why-seeds-differ.md)
+*[All experiments](README.md)* · [← 51](51-why-seeds-differ.md) · [53 →](53-never-stop-learning.md)
 
 **The question:** experiment 51 showed that a frozen route learner locks in its last training phase. The bad seed recovered within about 20 questions when learning stayed on, but learning on also cost the good seed some accuracy. Does slow learning after the freeze keep the recovery without the drift?
 
