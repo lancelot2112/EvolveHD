@@ -1,6 +1,6 @@
 # 54 · The route learner's rate by surprise (2026-10-27)
 
-*[All experiments](README.md)* · [← 53](53-never-stop-learning.md)
+*[All experiments](README.md)* · [← 53](53-never-stop-learning.md) · [55 →](55-generalization-probes.md)
 
 **The owner's rule:** learn fast to get seeded, then slow down, never stop. Experiment 53 showed that slowing by a feature's age hurts when the material changes mid-training. So here the rate follows surprise: full rate while the router is being wrong more than usual, slow otherwise.
 
