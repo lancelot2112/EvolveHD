@@ -1,6 +1,6 @@
 # 55 · Measuring generalization: bits per word, and probes the reader never saw (2026-10-27)
 
-*[All experiments](README.md)* · [← 54](54-learning-by-surprise.md)
+*[All experiments](README.md)* · [← 54](54-learning-by-surprise.md) · [56 →](56-instant-kinds.md)
 
 **The owner's question:** how do we measure generalization? Perplexity?
 
