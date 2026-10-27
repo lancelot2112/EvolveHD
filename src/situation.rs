@@ -320,6 +320,10 @@ pub struct SitCfg {
     /// must not close in hard material: there an act after "?" is paid less than half the time, but still far more
     /// often than an act anywhere else.
     pub act_contrast: bool,
+    /// --sit-act with hysteresis: the gate after u opens by majority (paid > charged, at least 16 counted) and, once
+    /// open, closes only when acts there fall below twice the rate of acts in general (the contrast rule). Opening
+    /// stays strict (no content word passes), and hard material can't shut answering off.
+    pub act_hyst: bool,
     /// --sit-seq-replay: replay (stage 3's motor primitive): a ring of the world's last 256 words (self words never enter it). At each
     /// prediction, for each of the 3 newest cue words u, the words that followed u's two newest earlier occurrences in
     /// the ring are offered as candidates (source and rank as features), so the route learner can learn to replay a
@@ -996,6 +1000,7 @@ pub struct Situation {
     in_teacher: bool,                               // --sit-teacher-route: reading the teacher's sentence after an act
     self_mark: Option<usize>,                       // stage 3: the history's length before the current act's first self word
     prev_self: bool,                                // stage 3: the last word in the context was said by the reader
+    act_open: Vec<bool>,                            // --sit-act-hyst: the gate's state per word
     act_all: (u64, u64),                            // --sit-act-contrast: (acts paid, acts counted) over all words
     act_n: Vec<(u32, u32)>,                         // --sit-act: per word u, (acts after u paid, charged)
     qrecs: HashMap<(u64, u32), (u32, u64, u16, u16)>, // --sit-qrec: (form, entity) -> (answer, time, hits, misses)
@@ -1104,6 +1109,7 @@ impl Situation {
             qrecs: HashMap::default(),
             act_n: vec![(0, 0); nw],
             act_all: (0, 0),
+            act_open: vec![false; nw],
             act_self: vec![(0, 0); nw],
             prev_self: false,
             self_mark: None,
@@ -4436,6 +4442,9 @@ impl Situation {
     /// --sit-act: does acting after u pay (more paid than charged, at least 16 counted)?
     fn act_go(&self, u: u32) -> bool {
         let (p, c) = self.act_n.get(u as usize).copied().unwrap_or((0, 0));
+        if self.cfg.act_hyst {
+            return self.act_open.get(u as usize).copied().unwrap_or(false);
+        }
         if self.cfg.act_contrast {
             let n = (p + c) as u64;
             return n >= 16 && p as u64 * self.act_all.1.max(1) >= 2 * self.act_all.0 * n;
@@ -4772,6 +4781,16 @@ impl Situation {
                     }
                     if e.0 + e.1 >= 4096 {
                         *e = (e.0 >> 1, e.1 >> 1);
+                    }
+                    if self.cfg.act_hyst {
+                        let (p, c) = self.act_n[u as usize];
+                        let n = (p + c) as u64;
+                        let ui = u as usize;
+                        if !self.act_open[ui] && n >= 16 && p > c {
+                            self.act_open[ui] = true;
+                        } else if self.act_open[ui] && (p as u64) * self.act_all.1.max(1) < 2 * self.act_all.0 * n {
+                            self.act_open[ui] = false;
+                        }
                     }
                     if counted {
                         self.act_all = (self.act_all.0 + paid as u64, self.act_all.1 + 1);
