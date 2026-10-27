@@ -908,6 +908,31 @@ fn main() {
             let t0 = Instant::now();
             let mut out: Vec<u8> = Vec::with_capacity(ids.len() * hops);
             let mut top: Vec<u32> = Vec::with_capacity(ids.len() * hops);
+            // prequential bits per word (generalization as code length): each word is scored before anything learns
+            // from it. A count model (Witten-Bell bigram over a unigram, built here from the words seen so far) gives
+            // the baseline. The reader's own distribution is mixed in with a weight a, and the code is a Bayesian mixture
+            // over a few fixed weights (each weight's posterior is the product of its past probabilities, so the mixture is
+            // itself prequential and costs at most log2(#weights) bits over the best weight in hindsight). One mixture per
+            // bucket of the reader's own confidence (its top probability, in eighths), so where it is sure it can be
+            // trusted more. OUT.bits holds per word (counts bits, the reader's probability of the word, its top
+            // probability, flag) as f32, f32, f32, u8; flag 1: the reader predicted, 0: it did not (answer-only
+            // reading), 2: a self slot (not scored).
+            // The reader's scores are not calibrated (its top probability averages 0.15 where it is right 58% of the
+            // time), so its ranking is turned into a distribution by counting, also prequentially, how often the word
+            // turns out to be at each rank, per confidence bucket; the mass for "not among the candidates" is spread
+            // over the other words in proportion to the count model. The context for both is the reader's own state:
+            // whether it is acting (its act gate open), and its confidence. Flag 3 in OUT.bits: predicted while acting.
+            let mut rank_n = [[0u32; 17]; 16];
+            const MIXA: [f64; 8] = [0.0, 0.0625, 0.125, 0.25, 0.5, 0.75, 0.875, 0.96875];
+            let mut mix_lw = [[0f64; 8]; 16]; // per context (acting or not, confidence bucket): log2 posterior weights, unnormalized
+            let mut bits_out: Vec<u8> = Vec::with_capacity(ids.len() * 13);
+            let mut bc_uni: Vec<u32> = vec![];
+            let mut bc_tot: u64 = 0;
+            let mut bc_big: std::collections::HashMap<(u32, u32), u32> = std::collections::HashMap::new();
+            let mut bc_from: std::collections::HashMap<u32, (u32, u32)> = std::collections::HashMap::new(); // (count, distinct successors)
+            let mut bc_prev: Option<u32> = None;
+            let (mut sum_c, mut sum_m, mut n_bits) = (0f64, 0f64, 0u64);
+            let vsz = (ids.iter().map(|x| x & 0x7FFF_FFFF).max().unwrap_or(0) + 1) as f64;
             let mut chans: Vec<u32> = vec![];
             if flag(&args, "--sit") && arg(&args, "--sit-shards").is_some() {
                 let (o, tp, x) = sharded_read(&args, &ids, nw);
@@ -927,12 +952,38 @@ fn main() {
             for (ti, &w0) in ids.iter().enumerate().filter(|_| !(flag(&args, "--sit") && arg(&args, "--sit-shards").is_some())) {
                 let self_slot = w0 >> 31 == 1;
                 let w = w0 & 0x7FFF_FFFF;
+                // the count model's probability of w, before it is counted
+                let p_uni = (bc_uni.get(w as usize).copied().unwrap_or(0) as f64 + 1.0) / (bc_tot as f64 + vsz);
+                let p_cnt = match bc_prev.and_then(|u| bc_from.get(&u).map(|&(n, d)| (u, n, d))) {
+                    Some((u, n, d)) => (bc_big.get(&(u, w)).copied().unwrap_or(0) as f64 + d as f64 * p_uni) / (n as f64 + d as f64),
+                    None => p_uni,
+                };
                 if ti == answer_only {
                     eprintln!("answer-only starts at word {ti}, {:.1} s in", t_read.elapsed().as_secs_f64());
                 }
                 if ti >= answer_only && !self_slot {
                     if let St::S(x) = &mut a {
                         if !x.at_question() {
+                            let bcw = -p_cnt.log2();
+                            bits_out.extend((bcw as f32).to_le_bytes());
+                            bits_out.extend(0f32.to_le_bytes());
+                            bits_out.extend(0f32.to_le_bytes());
+                            bits_out.push(0);
+                            if !self_slot {
+                                bc_uni.resize(bc_uni.len().max(w as usize + 1), 0);
+                                bc_uni[w as usize] += 1;
+                                bc_tot += 1;
+                                if let Some(u) = bc_prev {
+                                    let c = bc_big.entry((u, w)).or_insert(0);
+                                    let e = bc_from.entry(u).or_insert((0, 0));
+                                    if *c == 0 {
+                                        e.1 += 1;
+                                    }
+                                    *c += 1;
+                                    e.0 += 1;
+                                }
+                                bc_prev = Some(w);
+                            }
                             out.push(255);
                             top.extend(std::iter::repeat(u32::MAX).take(kk));
                             x.observe_only(w);
@@ -942,6 +993,53 @@ fn main() {
                     }
                 }
                 let sets = a.recall();
+                if !self_slot {
+                    let ptop = sets.first().and_then(|s| s.iter().map(|x| x.1).reduce(f64::max)).unwrap_or(0.0);
+                    let acting = if let St::S(x) = &a { x.acting() } else { false };
+                    let bk = ((ptop * 8.0) as usize).min(7) + 8 * acting as usize;
+                    let mix_lw = &mut mix_lw[bk];
+                    let cands: Vec<u32> = sets.first().map(|s| s.iter().take(16).map(|x| x.0).collect()).unwrap_or_default();
+                    let pc = |v: u32| {
+                        let pu = (bc_uni.get(v as usize).copied().unwrap_or(0) as f64 + 1.0) / (bc_tot as f64 + vsz);
+                        match bc_prev.and_then(|u| bc_from.get(&u).map(|&(n, d)| (u, n, d))) {
+                            Some((u, n, d)) => (bc_big.get(&(u, v)).copied().unwrap_or(0) as f64 + d as f64 * pu) / (n as f64 + d as f64),
+                            None => pu,
+                        }
+                    };
+                    let rn = &mut rank_n[bk];
+                    let rtot: f64 = rn.iter().map(|&c| c as f64 + 0.5).sum();
+                    let rk = cands.iter().position(|&v| v == w);
+                    let pr = match rk {
+                        Some(r) if r < cands.len() => (rn[r] as f64 + 0.5) / rtot,
+                        _ => {
+                            let incand: f64 = cands.iter().map(|&v| pc(v)).sum::<f64>().min(0.999);
+                            (rn[16] as f64 + 0.5) / rtot * p_cnt / (1.0 - incand)
+                        }
+                    };
+                    rn[rk.unwrap_or(16)] += 1;
+                    let bcw = -p_cnt.log2();
+                    let pa: Vec<f64> = MIXA.iter().map(|&al| (1.0 - al) * p_cnt + al * pr).collect();
+                    let mx = mix_lw.iter().cloned().fold(f64::MIN, f64::max);
+                    let wsum: f64 = mix_lw.iter().map(|l| (l - mx).exp2()).sum();
+                    let pm: f64 = mix_lw.iter().zip(&pa).map(|(l, p)| (l - mx).exp2() * p).sum::<f64>() / wsum;
+                    for i in 0..MIXA.len() {
+                        mix_lw[i] += pa[i].log2();
+                    }
+                    let bmw = -pm.log2();
+                    bits_out.extend((bcw as f32).to_le_bytes());
+                    bits_out.extend((pr as f32).to_le_bytes());
+                    bits_out.extend((ptop as f32).to_le_bytes());
+                    bits_out.push(1 + 2 * acting as u8);
+                    sum_c += bcw;
+                    sum_m += bmw;
+                    n_bits += 1;
+                } else {
+                    // a self slot: no record of its own content (flag 2 keeps OUT.bits aligned with the stream)
+                    bits_out.extend(0f32.to_le_bytes());
+                    bits_out.extend(0f32.to_le_bytes());
+                    bits_out.extend(0f32.to_le_bytes());
+                    bits_out.push(2);
+                }
                 for h in 0..hops {
                     let r = sets
                         .get(h)
@@ -984,8 +1082,25 @@ fn main() {
                     }
                 }
                 a.observe(w);
+                // the count model learns the word (self slots never reach here)
+                bc_uni.resize(bc_uni.len().max(w as usize + 1), 0);
+                bc_uni[w as usize] += 1;
+                bc_tot += 1;
+                if let Some(u) = bc_prev {
+                    let c = bc_big.entry((u, w)).or_insert(0);
+                    let e = bc_from.entry(u).or_insert((0, 0));
+                    if *c == 0 {
+                        e.1 += 1;
+                    }
+                    *c += 1;
+                    e.0 += 1;
+                }
+                bc_prev = Some(w);
             }
             eprintln!("{} words, {:.1} s", ids.len(), t0.elapsed().as_secs_f64());
+            if n_bits > 0 {
+                eprintln!("prequential bits per word where the reader predicted ({} words): counts {:.3}, counts + reader {:.3} (the reader's gain {:.3}); best weight by context (not acting, then acting; by confidence) {:?}", n_bits, sum_c / n_bits as f64, sum_m / n_bits as f64, (sum_c - sum_m) / n_bits as f64, mix_lw.iter().map(|b| MIXA[(0..MIXA.len()).max_by(|&i, &j| b[i].partial_cmp(&b[j]).unwrap()).unwrap()]).collect::<Vec<f64>>());
+            }
             if answer_only < ids.len() {
                 eprintln!("answer-only from word {answer_only}: {n_answered} predictions at question boundaries; {:.1} s in all", t_read.elapsed().as_secs_f64());
             }
@@ -1117,6 +1232,7 @@ fn main() {
                 }
             }
             let o = arg(&args, "--out").expect("--out");
+            std::fs::write(format!("{o}.bits"), &bits_out).unwrap();
             std::fs::write(format!("{o}.rank"), out).unwrap();
             std::fs::write(
                 format!("{o}.top"),

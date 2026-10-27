@@ -4339,6 +4339,15 @@ impl Situation {
         self.qr.apply(d);
     }
     /// Whether the next word answers a question: the last word is a learned question boundary.
+    /// Is the reader about to act (its act gate open after the last word; without the act path, a learned question
+    /// boundary)? Its own state, used by the harness as the context for mixing its predictions into the code length.
+    pub fn acting(&self) -> bool {
+        match self.hist.last() {
+            Some(&u) if self.cfg.act => self.act_go(u),
+            Some(&u) => self.is_q(u),
+            None => false,
+        }
+    }
     pub fn at_question(&self) -> bool {
         self.hist.last().map_or(false, |&u| self.is_q(u))
     }
