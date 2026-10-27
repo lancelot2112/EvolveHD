@@ -720,6 +720,9 @@ fn main() {
                 std::fs::write(format!("{dir}/level{l}.json"), b.summary_json(1000, secs)).unwrap();
                 let raw: Vec<u8> = b.syms[..b.t].iter().flat_map(|x| x.to_le_bytes()).collect();
                 std::fs::write(format!("{dir}/level{l}.syms"), raw).unwrap();
+                // the level's prequential bits per tick (f32), for per-file scoring and mixing with other coders
+                let bits: Vec<u8> = b.bits[..b.t].iter().flat_map(|&x| (x as f32).to_le_bytes()).collect();
+                std::fs::write(format!("{dir}/level{l}.bits"), bits).unwrap();
                 if l + 1 < st.levels.len() {
                     // the vocabulary this level hands up
                     std::fs::write(format!("{dir}/level{l}.vocab.txt"), st.maps[l].dump()).unwrap();

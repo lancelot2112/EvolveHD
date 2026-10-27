@@ -1,6 +1,6 @@
 # 56 · Instant kinds, and route features by kind (2026-10-27)
 
-*[All experiments](README.md)* · [← 55](55-generalization-probes.md)
+*[All experiments](README.md)* · [← 55](55-generalization-probes.md) · [57 →](57-byte-stream-trial.md)
 
 **The owner's request:** make the router's features per group, and add instant grouping. Experiment 55 found that new names fail to join the person kind when their company is new too (new names with a new verb: small qa2 70.3%). On the story set, new names cost "who has" answers 29 points.
 
