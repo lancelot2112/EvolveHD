@@ -52,7 +52,7 @@ Small qa2, seed 0, bits per word:
 | Test, answers (n 100) | 2.608 | 0.187 | 0.222 |
 | Test, other words | 1.515 | 2.235 | 1.515 |
 
-A fixed half-and-half mixture, tried first, made the code longer (2.27 bits per word against 1.53, on a check run whose output was overwritten). So did one learned weight for all words: the best single weight was 0, because answers are only 1% of the words.
+A fixed half-and-half mixture, tried first, made the code longer (2.27 bits per word against 1.53, on a check run whose output was overwritten). One learned weight for all words gained nothing (the best single weight was 0), because answers are only 1% of the words.
 
 ## The probes (`scripts/exp55/probe_stream.py`)
 
