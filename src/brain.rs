@@ -55,6 +55,8 @@ pub struct Cfg {
     /// --map-cap N: a cell's byte counts (the map from the cell that matched to the byte it stood for) are halved
     /// together once they pass N, so a stretch of other material can't fix the map for good (0: never).
     pub map_cap: u32,
+    /// --map-two N: a fast map (halved past N) beside the slow one, mixed (see `cellfast`).
+    pub map_two: u32,
     pub bind_cap: usize,
     pub hebb: f64,
     /// Writer masks drop their lowest-numbered eligible bits, as the Python reference did.
@@ -191,6 +193,7 @@ impl Default for Cfg {
             floor: false,
             prune_guard: false,
             map_cap: 0,
+            map_two: 0,
             bind_cap: 1024,
             hebb: 1.0,
             drop_lowest: true,
@@ -759,6 +762,11 @@ pub struct Brain {
     pub hit: Vec<bool>,
     cellbyte: Vec<Vec<u32>>,
     cellbyte_n: Vec<u32>,
+    /// --map-two N: a second, fast map per cell (counts halved past N) beside the slow one, and a switching
+    /// mixture over the two (fixed share), so a change of material is followed without forgetting what holds.
+    cellfast: Vec<Vec<u32>>,
+    cellfast_n: Vec<u32>,
+    map_w: [f64; 2],
     tix: TargetIndex,
     alive_idx: Vec<usize>,
     pos: Vec<i64>,
@@ -934,6 +942,9 @@ impl Brain {
             hit: vec![false; tt],
             cellbyte: vec![vec![0; vocab]; cap],
             cellbyte_n: vec![0; cap],
+            cellfast: if cfg.map_two > 0 { vec![vec![0; vocab]; cap] } else { vec![] },
+            cellfast_n: if cfg.map_two > 0 { vec![0; cap] } else { vec![] },
+            map_w: [0.5, 0.5],
             tix: TargetIndex::new(),
             alive_idx: vec![],
             pos: vec![-1; cap],
@@ -1602,8 +1613,27 @@ impl Brain {
             q = eps / self.vocab as f64;
         }
         let yu = y as usize;
-        let pb = (self.cellbyte[yu][byte as usize] as f64 + 0.02)
+        let mut pb = (self.cellbyte[yu][byte as usize] as f64 + 0.02)
             / (self.cellbyte_n[yu] as f64 + 0.02 * self.vocab as f64);
+        if self.cfg.map_two > 0 {
+            let pf = (self.cellfast[yu][byte as usize] as f64 + 0.02) / (self.cellfast_n[yu] as f64 + 0.02 * self.vocab as f64);
+            let p = self.map_w[0] * pb + self.map_w[1] * pf;
+            let (a, b) = (self.map_w[0] * pb / p, self.map_w[1] * pf / p);
+            const SH: f64 = 1.0 / 1000.0;
+            self.map_w = [(1.0 - SH) * a + SH * b, (1.0 - SH) * b + SH * a];
+            pb = p;
+            self.cellfast[yu][byte as usize] += 1;
+            self.cellfast_n[yu] += 1;
+            if self.cellfast_n[yu] > self.cfg.map_two {
+                let row = &mut self.cellfast[yu];
+                let mut n = 0;
+                for x in row.iter_mut() {
+                    *x >>= 1;
+                    n += *x;
+                }
+                self.cellfast_n[yu] = n;
+            }
+        }
         self.cellbyte[yu][byte as usize] += 1;
         self.cellbyte_n[yu] += 1;
         if self.cfg.map_cap > 0 && self.cellbyte_n[yu] > self.cfg.map_cap {

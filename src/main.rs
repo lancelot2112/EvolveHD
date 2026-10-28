@@ -429,6 +429,9 @@ fn cfg_from(args: &[String]) -> Cfg {
     if let Some(x) = arg(args, "--map-cap") {
         c.map_cap = x.parse().unwrap();
     }
+    if let Some(x) = arg(args, "--map-two") {
+        c.map_two = x.parse().unwrap();
+    }
     c.fresh_extensions = flag(args, "--fresh-extensions");
     if let Some(x) = arg(args, "--mix-thr") {
         c.mix_thr = x.parse().unwrap();
