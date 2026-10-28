@@ -1,6 +1,6 @@
 # 59 · A copy act beside the byte brain, and format docs first (2026-10-28)
 
-*[All experiments](README.md)* · [← 58](58-floor-guard-two-maps.md)
+*[All experiments](README.md)* · [← 58](58-floor-guard-two-maps.md) · [60 →](60-descriptions-before-files.md)
 
 **The questions:**
 1. xz still beat the byte brain most on the ELF executables (experiment 58: 2.98 / 3.52 against 2.43 / 2.49 bits per byte), because it finds long repeats and copies them. Does a seek-and-copy act close the gap?
