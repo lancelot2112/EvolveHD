@@ -426,6 +426,7 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.screen_mix = flag(args, "--screen-mix");
     c.floor = flag(args, "--floor");
     c.prune_guard = flag(args, "--prune-guard");
+    c.copy_act = flag(args, "--copy-act");
     if let Some(x) = arg(args, "--map-cap") {
         c.map_cap = x.parse().unwrap();
     }
@@ -763,6 +764,10 @@ fn main() {
                     .map(|&e| b.nodes[b.slab_src(e)].name.clone())
                     .collect();
                 rep += &format!("  kept: {}\n", kept.join(" "));
+                if b.cfg.copy_act {
+                    let c = b.copy_stats;
+                    rep += &format!("  copy act: {} offers, {} right ({:.1}%), {} seeks that found a match\n", c[0], c[1], 100.0 * c[1] as f64 / c[0].max(1) as f64, c[2]);
+                }
                 if b.cfg.prune_guard {
                     rep += &format!("  prune judgments skipped over noise windows: {}\n", b.guarded);
                 }

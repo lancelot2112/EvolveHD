@@ -57,6 +57,14 @@ pub struct Cfg {
     pub map_cap: u32,
     /// --map-two N: a fast map (halved past N) beside the slow one, mixed (see `cellfast`).
     pub map_two: u32,
+    /// --copy-act: a seek-and-copy act beside the level. At each byte it points back to the last place the current
+    /// context (the last 5 bytes, then checked backwards up to 32) occurred, and offers the byte that followed
+    /// there. It reads on while it is right, and past a wrong byte too (up to 8 in a row) with its length reset;
+    /// a seek replaces the pointer when it finds a longer match (while the current one is under 16). Its offer is
+    /// trusted by how often offers of the same match length and recent record (right in 0-1, 2-4, 5-6 or 7-8 of
+    /// its last 8 offers) were right before (counted, prequential). The code is a switching mixture over
+    /// the level (after its floor), the act and a uniform guess, one per match-length bucket (implies the floor).
+    pub copy_act: bool,
     pub bind_cap: usize,
     pub hebb: f64,
     /// Writer masks drop their lowest-numbered eligible bits, as the Python reference did.
@@ -194,6 +202,7 @@ impl Default for Cfg {
             prune_guard: false,
             map_cap: 0,
             map_two: 0,
+            copy_act: false,
             bind_cap: 1024,
             hebb: 1.0,
             drop_lowest: true,
@@ -756,6 +765,19 @@ pub struct Brain {
     /// --floor: the code length after the learned floor (what `bpb` reports when the floor is on).
     pub coded: Vec<f64>,
     floor_w: Vec<f64>,
+    /// --copy-act state: last position after each 5-byte context (hash table), the pointer, the match length,
+    /// per length bucket (right, offered) counts and the mixture weights; counts of offers and hits.
+    copy_tab: Vec<u32>,
+    copy_ptr: Option<usize>,
+    copy_len: usize,
+    copy_cal: Vec<(u32, u32)>,
+    copy_mw: Vec<[f64; 3]>,
+    pub copy_stats: [u64; 3],
+    copy_cap: u32,
+    copy_hist: u32,
+    copy_ctx: bool,
+    copy_keep: bool,
+    copy_miss: u32,
     /// --prune-guard: prune judgments skipped over noise windows.
     pub guarded: usize,
     pub novel: Vec<bool>,
@@ -938,6 +960,19 @@ impl Brain {
             coded: vec![0.0; tt],
             floor_w: vec![],
             guarded: 0,
+            copy_tab: vec![],
+            copy_ptr: None,
+            copy_len: 0,
+            copy_cal: vec![],
+            copy_mw: vec![],
+            copy_stats: [0; 3],
+            copy_cap: std::env::var("COPY_CAP").ok().and_then(|x| x.parse().ok()).unwrap_or(4096),
+            copy_hist: 0,
+            // the act's rule: read on past a wrong byte, and trust by length and recent record (COPY_PLAIN: neither,
+            // the first version)
+            copy_ctx: std::env::var("COPY_PLAIN").is_err(),
+            copy_keep: std::env::var("COPY_PLAIN").is_err(),
+            copy_miss: 0,
             novel: vec![false; tt],
             hit: vec![false; tt],
             cellbyte: vec![vec![0; vocab]; cap],
@@ -1648,7 +1683,11 @@ impl Brain {
         }
         self.bits[t] = -q.log2() - pb.log2();
         self.bits_map[t] = -pb.log2();
-        if self.cfg.floor {
+        if self.cfg.copy_act && self.bytes {
+            // the level's code after its floor is the first expert beside the act
+            let fl = self.floor_code(self.bits[t]);
+            self.coded[t] = self.copy_code(t, fl);
+        } else if self.cfg.floor {
             self.coded[t] = self.floor_code(self.bits[t]);
         }
         self.novel[t] = novel;
@@ -3052,7 +3091,108 @@ impl Brain {
     }
     /// The code length per tick as reported: after the learned floor with --floor, else the raw bits.
     pub fn code_bits(&self) -> &[f64] {
-        if self.cfg.floor { &self.coded } else { &self.bits }
+        if self.cfg.floor || self.cfg.copy_act { &self.coded } else { &self.bits }
+    }
+    /// --copy-act: code byte t (raw level cost `raw` bits) through the mixture of the level, the copy act and a
+    /// uniform guess, then move the act on (read on if right, else seek) and record the context.
+    fn copy_code(&mut self, t: usize, raw: f64) -> f64 {
+        const K: usize = 5;
+        const TB: usize = 22;
+        const NB: usize = 18 * 4; // buckets: 0 = no offer, 1..=17 by match length; times 4 by the act's recent record
+        const SH: f64 = 1.0 / 1000.0;
+        if self.copy_tab.is_empty() {
+            self.copy_tab = vec![u32::MAX; 1 << TB];
+            self.copy_cal = vec![(0, 0); NB];
+            self.copy_mw = vec![[1.0 / 3.0; 3]; NB];
+        }
+        let y = self.data[t];
+        let offer = self.copy_ptr.filter(|&p| p < t).map(|p| self.data[p]);
+        let bk = if offer.is_some() { 1 + self.copy_len.min(32) / 2 } else { 0 };
+        // the act's recent record: how many of its last 8 offers were right (0-1, 2-4, 5-6, 7-8)
+        let rc = match self.copy_hist.count_ones() { 0..=1 => 0, 2..=4 => 1, 5..=6 => 2, _ => 3 };
+        let bk = bk.min(17) * 4 + if self.copy_ctx { rc } else { 0 };
+        let u = 1.0 / 256.0;
+        let pl = (-raw).exp2();
+        let pc = match offer {
+            Some(o) => {
+                let (r, n) = self.copy_cal[bk];
+                let c = (r as f64 + 0.5) / (n as f64 + 1.0);
+                if o == y { c } else { (1.0 - c) / 255.0 }
+            }
+            None => u,
+        };
+        let pk = [pl, pc, u];
+        let w = self.copy_mw[bk];
+        let p: f64 = w.iter().zip(&pk).map(|(a, b)| a * b).sum();
+        let mut nw = [0.0; 3];
+        for i in 0..3 {
+            nw[i] = w[i] * pk[i] / p;
+        }
+        for i in 0..3 {
+            nw[i] = (1.0 - SH) * nw[i] + SH * (1.0 - nw[i]) / 2.0;
+        }
+        self.copy_mw[bk] = nw;
+        // credit the act, then read on or seek
+        if let Some(o) = offer {
+            self.copy_stats[0] += 1;
+            let e = &mut self.copy_cal[bk];
+            e.1 += 1;
+            if o == y {
+                e.0 += 1;
+                self.copy_stats[1] += 1;
+            }
+            if e.1 > self.copy_cap {
+                e.0 >>= 1;
+                e.1 >>= 1;
+            }
+            self.copy_hist = (self.copy_hist << 1 | (o == y) as u8 as u32) & 0xFF;
+            if o == y {
+                self.copy_ptr = self.copy_ptr.map(|p| p + 1);
+                self.copy_len += 1;
+            } else if self.copy_keep {
+                // keep reading on past a wrong byte (a changed address, a different value), with no trust from
+                // length; a better match found by the seek below replaces it
+                self.copy_ptr = self.copy_ptr.map(|p| p + 1);
+                self.copy_len = 0;
+                self.copy_miss += 1;
+                if self.copy_miss > 8 {
+                    self.copy_ptr = None;
+                    self.copy_miss = 0;
+                }
+            } else {
+                self.copy_ptr = None;
+                self.copy_len = 0;
+            }
+            if o == y {
+                self.copy_miss = 0;
+            }
+        }
+        if t + 1 >= K {
+            let mut h: u64 = 0;
+            for &b in &self.data[t + 1 - K..=t] {
+                h = (h ^ b as u64).wrapping_mul(0x100000001B3);
+            }
+            let slot = (h >> (64 - TB)) as usize;
+            if self.copy_ptr.is_none() || (self.copy_keep && self.copy_len < 16) {
+                let q = self.copy_tab[slot];
+                if q != u32::MAX && (q as usize) <= t {
+                    // check the match backwards: how many bytes before q equal the bytes up to t
+                    let q = q as usize;
+                    let mut l = 0;
+                    while l < 32 && l < q && self.data[q - 1 - l] == self.data[t - l] {
+                        l += 1;
+                    }
+                    if l >= K && (self.copy_ptr.is_none() || l > self.copy_len) {
+                        self.copy_ptr = Some(q);
+                        self.copy_miss = 0;
+                        self.copy_len = l;
+                        self.copy_stats[2] += 1;
+                    }
+                }
+            }
+            self.copy_tab[slot] = (t + 1) as u32;
+        }
+        -p.log2()
     }
     /// --floor: code a tick whose raw cost is `raw` bits through the switching mixture over uniform weights,
     /// then update the mixture (prequential: the weights used come from the ticks before).
