@@ -63,7 +63,9 @@ pub struct Cfg {
     /// a seek replaces the pointer when it finds a longer match (while the current one is under 16). Its offer is
     /// trusted by how often offers of the same match length and recent record (right in 0-1, 2-4, 5-6 or 7-8 of
     /// its last 8 offers) were right before (counted, prequential). The code is a switching mixture over
-    /// the level (after its floor), the act and a uniform guess, one per match-length bucket (implies the floor).
+    /// the level (after its floor), the act and a uniform guess, one per trust context (match length and recent
+    /// record; implies the floor). Env COPY_PLAIN: the first version (no reading on, trust by length only);
+    /// COPY_CAP: halve the trust counts past this many offers (default 4096).
     pub copy_act: bool,
     pub bind_cap: usize,
     pub hebb: f64,

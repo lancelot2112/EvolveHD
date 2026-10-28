@@ -7,20 +7,20 @@
 2. The owner's question: would reading a format's documentation before reading the files help?
 
 **Results:**
-- **The copy act helps everywhere there are repeats.** Whole stream: 3.22 → 3.08 bits per byte (order-4 counts 3.66, xz 2.89).
+- **The copy act helps wherever there are repeats.** Whole stream: 3.22 → 3.08 bits per byte (order-4 counts 3.66, xz 2.89). About 0.01 of that is not copying: the gzip files gain 0.09 each (8.09 → 8.00) from the mixture's extra uniform expert, with almost no offers there.
   - JSON: round A 1.03 → 0.53 (xz 0.41); round B 1.92 → 1.48 (xz 1.27).
   - ELF: round A 2.98 → 2.82; round B 3.52 → 3.05. Still behind xz (2.43 / 2.49).
-  - xml, Rust and the bitmaps gain 0.02–0.10; plain prose and csv barely move.
+  - xml, Rust and the bitmaps gain 0.04–0.10, prose in the stream 0.03–0.04; csv barely moves (0.003 / 0.023).
   - Round A without gzip 2.19 → 2.05; round B without gzip 2.86 → 2.69.
   - Plain text (three Austen novels): no gain and almost no cost, second half 1.8632 against 1.8618. Half of its offers there are right (49.9%), and prose repeats are short.
 - **Two details matter:**
-  - **The act must be mixed with the brain after its floor, not with the raw brain and a uniform guess side by side.** Mixed raw, the ELF files got worse (round A 3.11). A floored brain is a better single expert than a switch between "trust the brain" and "know nothing".
-  - **Reading on past a wrong byte helps binaries.** In machine code a repeat often differs in one byte (an address, a constant). Keeping the pointer through up to 8 wrong bytes takes ELF from 2.93 to 2.82 (round A) and 3.12 to 3.05 (round B). Trusting the act by its recent record, as well as by match length, adds a little more.
+  - **The act must be mixed with the brain after its floor, not with the raw brain and a uniform guess side by side.** Mixed raw, the first ELF file got worse (2.98 → 3.11) and the second gained less (3.52 → 3.36, against 3.12 mixed after the floor). A floored brain is a better single expert than a switch between "trust the brain" and "know nothing".
+  - **Reading on past a wrong byte helps binaries.** In machine code a repeat often differs in one byte (an address, a constant). Keeping the pointer through up to 8 wrong bytes takes ELF from 2.93 to 2.85 (round A) and 3.12 to 3.08 (round B). Trusting the act by its recent record as well as by match length then takes them to 2.82 and 3.05.
 - **Format docs first: no help, as expected for this reader.** 24 KB of the ELF manual page placed just before the first ELF file:
   - ELF file 2.821 bits per byte after the manual;
   - 2.846 after an unrelated manual page of the same length (socket(7));
   - 2.821 with nothing inserted.
-  - The manual is better than another manual by 0.025, which is about what any inserted text costs. Against nothing inserted it is worth nothing.
+  - The manual is better than another manual by 0.025, but against nothing inserted it is worth nothing. With one run of each, 0.025 is within how much an insertion moves other files (round B's Rust, csv and text move by 0.04–0.16, both ways). By 4 KB, the manual made the first four chunks of the ELF file slightly worse, the header region it describes included; only the fifth improved.
 
 ## The act (`--copy-act`, binary `sit-59f`)
 
@@ -31,7 +31,7 @@
 **Offering and reading on:**
 - It offers the byte that followed there.
 - If right, the pointer moves on and the match grows.
-- If wrong, the pointer still moves on with its length reset; after 8 wrong bytes in a row it is dropped.
+- If wrong, the pointer still moves on with its length reset; it survives 8 wrong bytes in a row and is dropped at the 9th.
 
 **Trust, counted:**
 - How often offers were right, per context: match length (in pairs of bytes, up to 32) × the act's recent record (right in 0–1, 2–4, 5–6 or 7–8 of its last 8 offers).
@@ -47,7 +47,7 @@
 - 310,015 offers (81% of bytes), 62.5% right; 39,493 seeks that found a match.
 - The first version, which dropped its pointer at the first wrong byte, made 213,933 offers, 81.2% right.
 
-Stack (all runs): `stack --levels 1 --words --run-window 200000 --conjoin-words --long-trials 5 --grow-pools --pool-budget 524288 --readout3 --screen-mix --fresh-extensions --floor --prune-guard --map-two 127 --copy-act`.
+Stack (all runs with the act; "Before" is the same without `--copy-act`): `stack --levels 1 --words --run-window 200000 --conjoin-words --long-trials 5 --grow-pools --pool-budget 524288 --readout3 --screen-mix --fresh-extensions --floor --prune-guard --map-two 127 --copy-act`.
 
 ## Bits per byte, per file
 
@@ -80,9 +80,9 @@ Columns:
 | A without gzip | | 2.319 | 1.885 | 2.193 | 2.105 | 2.073 | 2.057 | 2.053 |
 | B without gzip | | 2.915 | 2.418 | 2.856 | 2.747 | 2.704 | 2.696 | 2.693 |
 
-- **Trust counts halved faster** (past 255 or 63 instead of 4,096) changed the whole stream by under 0.003.
-- **Recent record alone** (on the first act, mixed raw) changed nothing. It only pays once the act reads on past wrong bytes, when its record varies.
-- **An offline copy of the act** (`scripts/exp57/copy_sim.py`, mixing the first act with experiment 58's floored code) found the cause of the raw-mixing loss: the same act mixed after the floor gave ELF 2.93 / 3.10 instead of 3.11 / 3.36.
+- **Trust counts halved faster** (past 255 or 63 instead of 4,096; on the first act, mixed raw) changed the whole stream by under 0.003, though the first ELF file by 0.02–0.03 (3.11 → 3.09 / 3.08).
+- **Recent record alone** (on the first act, mixed raw) changed nothing (3.124 against 3.123; a control run of the same binary without it reproduced the first act exactly). It pays once the act reads on past wrong bytes; that it is because its record then varies is a guess, not tested.
+- **An offline copy of the act** (`scripts/exp57/copy_sim.py`, mixing the first act with experiment 58's floored code) found the cause of the raw-mixing loss: the same act mixed after the floor gave ELF 2.93 / 3.10 instead of 3.11 / 3.36. It is an approximate copy: an exact 5-byte dictionary (no hash collisions) and counts never halved; it offers on 58.2% of bytes, 79.0% right (the brain's first act: 55.7%, 81.2%).
 
 ## Plain text (three Austen novels, 2,026,385 bytes)
 
@@ -104,7 +104,7 @@ Script `scripts/exp57/insert_doc.py`. It places 24,000 bytes of a manual page (f
 | elf(5), the ELF manual | 2.821 | 1.62 2.42 1.33 1.99 5.32 4.25 | 3.058 | 2.160 |
 | socket(7), unrelated | 2.846 | 1.64 2.41 1.33 2.05 5.37 4.28 | 3.056 | 2.630 |
 
-- **What the files share is too little.** The first 24 KB of `/usr/bin/xz` contains none of the section names the manual lists (".text", ".data", ".dynsym", ".shstrtab" sit in the section-name table at the end of the file). It contains "ELF" once and "GLIBC" 11 times.
+- **What the files share is too little.** The first 24 KB of `/usr/bin/xz` contains none of the section names (".text", ".data", ".dynsym", ".shstrtab" sit in the section-name table near the end of the file, around byte 86,700 of 89,008). It contains "ELF" once and "GLIBC" 11 times. The inserted part of the manual (its bytes 1,986–25,986 of 51,032) also stops just before the manual's list of section names, so of those names the reader only saw ".bss".
 - **What the reader takes from text is too little.** The byte brain reads the manual as more text to predict. Nothing in it can turn "e_phoff holds the program header table's file offset" into an expectation about bytes 32–39.
 
 ## What this means
