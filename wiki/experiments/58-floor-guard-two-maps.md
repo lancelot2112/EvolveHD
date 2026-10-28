@@ -9,20 +9,20 @@
 - **A guard against pruning on noise keeps more of the structure:** 5 kept edges through the gzip file instead of 1. Round B (without gzip): 3.73 → 3.42.
 - **Most of the forgetting was in the map from cells to bytes.**
   - The brain matches each byte to a cell, and a count table per cell maps it back to the byte.
-  - During the gzip file every byte value was counted into those tables, and the uncapped counts never recovered: the map cost rose from 0.08 to 1.34 bits per byte on round B's text.
-  - A map whose counts halve past a cap follows the change. With a cap of 127, round B costs 2.86 (was 3.42), and round B's text 3.33, better than round A's (3.67).
+  - The uncapped counts carry the earlier files' bytes into every later file. The map cost was 0.08 bits per byte on round A's text and 1.34 on round B's (falling to about 0.74–0.92 by its last blocks, still about ten times round A's). The likely source is the gzip file, where every byte value was counted into the tables, but the bitmap and the ELF file before it already had high map costs (0.80 and 1.05) and no run isolates the gzip file.
+  - A map whose counts halve past a cap follows the change. With a cap of 127, round B costs 2.86 (was 3.42), and round B's text 3.33, better than round A's in the same run (3.72). (They are different books, so this is not a measure of what was kept.)
   - A single capped map costs where nothing changes: plain text 1.945 bits per byte against 1.877.
-- **Two maps side by side, mixed, keep both.** A slow map (all counts) and a fast map (halved past 127) per cell, with a switching mixture over the two:
-  - **Byte stream:** 3.22 bits per byte. Round A without gzip 2.19 (was 2.23, better than either map alone); round B without gzip 2.86 (as the fast map alone). Order-4 counts: 3.66; xz in the stream: 2.89.
-  - **Plain text (three Austen novels, 2 MB):** second half 1.862, against 1.877 before. Better even where nothing is noise.
-- **The floor and the guard cost nothing on plain text** (1.879 against 1.877).
+- **Two maps side by side, mixed, keep most of both.** A slow map (all counts) and a fast map (halved past 127) per cell, with one switching mixture (one pair of weights for all cells) over the two:
+  - **Byte stream:** 3.22 bits per byte. Round A without gzip 2.19 (better than either map alone: 2.23 slow, 2.24 fast); round B without gzip 2.86 (as the fast map alone). Order-4 counts: 3.66; xz in the stream: 2.89. File by file it is not always the best of the two: slightly worse than the slow map alone on round A's JSON, csv and Rust (by 0.01–0.03).
+  - **Plain text (three Austen novels, 2 MB):** second half 1.862, against 1.877 before. One run, so a modest gain, but no cost where nothing is noise.
+- **The floor and the guard cost almost nothing on plain text** (1.879 against 1.877; the guard skipped no judgments there, so this is the floor's mixture overhead).
 
 ## The rules (binaries `sit-58a`–`sit-58c`)
 
 **`--floor`:**
 - The code length reported for each byte comes from a switching mixture (fixed share, 1/1000 per byte) over nine fixed weights l of a uniform guess: (1 − l) p + l / 256, with l from 1/4096 to 15/16.
 - It is prequential: the weights used for a byte come from the bytes before it.
-- The brain's own learning (surprise, screens, chunk starts) still reads its raw bits, so the floor changes the code, not what is learned.
+- The brain's own learning (surprise, screens, chunk starts, the guard) still reads its raw bits, so the floor changes the code, not what is learned: runs with and without it choose the same cells byte for byte.
 
 **`--prune-guard`:**
 - A kept edge is not judged over a window where the level codes worse than a uniform guess (raw bits per byte above 8). Nothing predicts there, so the window says nothing about the edge.
@@ -33,7 +33,7 @@
 **`--map-two N`:**
 - A second, fast map per cell (halved past N) beside the slow one.
 - The byte's probability given the cell is a switching mixture of the two maps (fixed share, 1/1000).
-- This changes the brain's raw bits too, so its learning sees the better map.
+- This changes the brain's raw bits too, so its surprise (chunk starts, screens) and the guard read the better map. The edges' training does not: it uses the cell's probability, which leaves the map out.
 
 All other flags as in experiment 57: `stack --levels 1 --words --run-window 200000 --conjoin-words --long-trials 5 --grow-pools --pool-budget 524288 --readout3 --screen-mix --fresh-extensions`.
 
@@ -77,7 +77,7 @@ Other caps (with floor and guard; all / round A / round B, both without gzip):
   - before: 1.34;
   - one map capped at 127: 0.35;
   - two maps: 0.35.
-- Round A's text: 0.08 in all three; the single capped map 0.13.
+- Round A's text: 0.08 before and with two maps; 0.13 with the single capped map.
 - A rerun of the cap 255 run after a container restart gave identical numbers (the runs are deterministic).
 
 ## Plain text (three Austen novels, 2,026,385 bytes)
@@ -94,10 +94,10 @@ Script `runs/exp57/text.sh` (binary from `B`).
 
 ## What this means
 
-- **"I don't know" has to be a code, not an error.** The floor is a learned mixture with a uniform guess, chosen byte by byte from what came before. It costs nothing where the brain is right (plain text +0.002) and caps it where it isn't.
+- **"I don't know" has to be a code, not an error.** The floor is a learned mixture with a uniform guess, chosen byte by byte from what came before. It costs almost nothing where the brain is right (plain text +0.002) and caps it where it isn't.
 - **A stretch that nothing predicts says nothing about what predicted before.** Judging edges there throws away good structure. The guard simply waits.
-- **Two timescales side by side beat one compromise.** This matches the project's principle that compression sits next to the uncompressed version: a fast map that follows change sits next to a slow map that keeps everything, and a mixture chooses per byte. It wins on the mixed stream and on plain text. The same pattern may pay elsewhere: the edges' own weights, and the word reader's route weights (experiment 53 found full-rate learning best, but never tried two rates side by side).
-- **Round B still doesn't recall round A.** Round B's text is better than round A's now, but no faster at first than a fresh start would be. Nothing in the brain recognizes "this is text again" and brings back what it knew.
+- **Two timescales side by side beat one compromise.** This matches the project's principle that compression sits next to the uncompressed version: a fast map that follows change sits next to a slow map that keeps everything, and a mixture chooses per byte. It wins on the mixed stream and on plain text (one run each). The same pattern may pay elsewhere: the edges' own weights, and the word reader's route weights (experiment 53 found full-rate learning best, but never tried two rates side by side).
+- **Round B still doesn't recall round A.** Round B's text still opens worse than round A's fresh start, though by much less than before (two maps: 7.16 against 5.97 bits per byte over the first 500 bytes, 6.58 against 5.30 over the first 1,000; before: 11.3 against 7.0 over the first 500). It catches up after about 8 KB. Nothing in the brain recognizes "this is text again" and brings back what it knew.
 
 ## Next
 
