@@ -1,6 +1,6 @@
 # 57 · A first trial on raw bytes from real files (2026-10-27)
 
-*[All experiments](README.md)* · [← 56](56-instant-kinds.md)
+*[All experiments](README.md)* · [← 56](56-instant-kinds.md) · [58 →](58-floor-guard-two-maps.md)
 
 **The owner's question:** can the system read raw files, bytes and all, and learn the consistencies in them, rather than having everything interpreted for it? This trial is the first step: uncompressed files of several types, read from nothing, scored in bits per byte.
 
