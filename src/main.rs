@@ -424,6 +424,11 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.bias_edge = flag(args, "--bias-edge");
     c.bitwise_levels = flag(args, "--bitwise-levels");
     c.screen_mix = flag(args, "--screen-mix");
+    c.floor = flag(args, "--floor");
+    c.prune_guard = flag(args, "--prune-guard");
+    if let Some(x) = arg(args, "--map-cap") {
+        c.map_cap = x.parse().unwrap();
+    }
     c.fresh_extensions = flag(args, "--fresh-extensions");
     if let Some(x) = arg(args, "--mix-thr") {
         c.mix_thr = x.parse().unwrap();
@@ -721,7 +726,7 @@ fn main() {
                 let raw: Vec<u8> = b.syms[..b.t].iter().flat_map(|x| x.to_le_bytes()).collect();
                 std::fs::write(format!("{dir}/level{l}.syms"), raw).unwrap();
                 // the level's prequential bits per tick (f32), for per-file scoring and mixing with other coders
-                let bits: Vec<u8> = b.bits[..b.t].iter().flat_map(|&x| (x as f32).to_le_bytes()).collect();
+                let bits: Vec<u8> = b.code_bits()[..b.t].iter().flat_map(|&x| (x as f32).to_le_bytes()).collect();
                 std::fs::write(format!("{dir}/level{l}.bits"), bits).unwrap();
                 if l + 1 < st.levels.len() {
                     // the vocabulary this level hands up
@@ -755,6 +760,9 @@ fn main() {
                     .map(|&e| b.nodes[b.slab_src(e)].name.clone())
                     .collect();
                 rep += &format!("  kept: {}\n", kept.join(" "));
+                if b.cfg.prune_guard {
+                    rep += &format!("  prune judgments skipped over noise windows: {}\n", b.guarded);
+                }
                 if l + 1 < st.levels.len() && st.maps[l].halflife > 0 {
                     rep += &format!(
                         "  vocabulary handed up: {} slots given a new text\n",

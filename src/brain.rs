@@ -43,6 +43,18 @@ pub struct Cfg {
     pub max_derived: usize,
     pub distill_gain: f64,
     pub eps: f64,
+    /// --floor: the code length reported for each byte comes from a learned floor over the level's prediction:
+    /// a switching mixture (fixed share) over a few fixed weights of a uniform guess, (1 - l) p + l / vocab, so a
+    /// stretch the level can't predict costs about log2(vocab) bits instead of the eps floor's 17. The level's own
+    /// learning (surprise, screens, chunk starts) still reads its raw bits.
+    pub floor: bool,
+    /// --prune-guard: a kept edge is not judged over a window where the level codes worse than a uniform guess
+    /// (raw bits per tick above log2(vocab)): nothing predicts there, so the window says nothing about the edge.
+    /// Its window starts again instead.
+    pub prune_guard: bool,
+    /// --map-cap N: a cell's byte counts (the map from the cell that matched to the byte it stood for) are halved
+    /// together once they pass N, so a stretch of other material can't fix the map for good (0: never).
+    pub map_cap: u32,
     pub bind_cap: usize,
     pub hebb: f64,
     /// Writer masks drop their lowest-numbered eligible bits, as the Python reference did.
@@ -176,6 +188,9 @@ impl Default for Cfg {
             max_derived: 24,
             distill_gain: 0.05,
             eps: 0.002,
+            floor: false,
+            prune_guard: false,
+            map_cap: 0,
             bind_cap: 1024,
             hebb: 1.0,
             drop_lowest: true,
@@ -735,6 +750,11 @@ pub struct Brain {
     pub bits: Vec<f64>,
     /// The part of `bits` paid for mapping the winner cell back to a byte.
     pub bits_map: Vec<f64>,
+    /// --floor: the code length after the learned floor (what `bpb` reports when the floor is on).
+    pub coded: Vec<f64>,
+    floor_w: Vec<f64>,
+    /// --prune-guard: prune judgments skipped over noise windows.
+    pub guarded: usize,
     pub novel: Vec<bool>,
     pub hit: Vec<bool>,
     cellbyte: Vec<Vec<u32>>,
@@ -907,6 +927,9 @@ impl Brain {
             tried: HashSet::new(),
             bits: vec![0.0; tt],
             bits_map: vec![0.0; tt],
+            coded: vec![0.0; tt],
+            floor_w: vec![],
+            guarded: 0,
             novel: vec![false; tt],
             hit: vec![false; tt],
             cellbyte: vec![vec![0; vocab]; cap],
@@ -1583,8 +1606,21 @@ impl Brain {
             / (self.cellbyte_n[yu] as f64 + 0.02 * self.vocab as f64);
         self.cellbyte[yu][byte as usize] += 1;
         self.cellbyte_n[yu] += 1;
+        if self.cfg.map_cap > 0 && self.cellbyte_n[yu] > self.cfg.map_cap {
+            // --map-cap: halve the cell's byte counts together, so its map follows what the cell means now
+            let row = &mut self.cellbyte[yu];
+            let mut n = 0;
+            for x in row.iter_mut() {
+                *x >>= 1;
+                n += *x;
+            }
+            self.cellbyte_n[yu] = n;
+        }
         self.bits[t] = -q.log2() - pb.log2();
         self.bits_map[t] = -pb.log2();
+        if self.cfg.floor {
+            self.coded[t] = self.floor_code(self.bits[t]);
+        }
         self.novel[t] = novel;
         if yi >= 0 && na > 0 && !self.frozen {
             let yi = yi as usize;
@@ -1791,6 +1827,7 @@ impl Brain {
         self.syms.resize(self.tt, 0);
         self.bits.resize(self.tt, 0.0);
         self.bits_map.resize(self.tt, 0.0);
+        self.coded.resize(self.tt, 0.0);
         self.novel.resize(self.tt, false);
         self.hit.resize(self.tt, false);
         self.mu.resize(self.tt, 0.0);
@@ -2284,12 +2321,24 @@ impl Brain {
             }
         }
         // prune kept edges
+        let noise_from = |me: &Self, t0: usize| -> bool {
+            // the window [t0, t] codes worse than uniform (raw bits)
+            let lo = t0.min(t);
+            t > lo && me.bits[lo..=t].iter().sum::<f64>() / (t + 1 - lo) as f64 > (me.vocab as f64).log2()
+        };
         for e in self.kept[1..].to_vec() {
             let k = self.name_of_edge(e);
-            if t - self.kept_since.get(&k).copied().unwrap_or(0) >= c.prune_every
+            let since = self.kept_since.get(&k).copied().unwrap_or(0);
+            if t - since >= c.prune_every
                 && self.slab[e].n > 100
             {
                 let (m, z) = self.slab[e].stats();
+                if c.prune_guard && noise_from(self, since) {
+                    self.guarded += 1;
+                    self.slab[e].reset_stats();
+                    self.kept_since.insert(k, t);
+                    continue;
+                }
                 if Some(e) == self.story_edge || self.ext.contains(&e) {
                     // measured, not pruned: log its gain over the window
                     self.events.push(Event {
@@ -2969,7 +3018,34 @@ impl Brain {
     /// Mean bits per byte over [lo, hi).
     pub fn bpb(&self, lo: usize, hi: usize) -> f64 {
         let hi = hi.min(self.t);
-        self.bits[lo..hi].iter().sum::<f64>() / (hi - lo) as f64
+        self.code_bits()[lo..hi].iter().sum::<f64>() / (hi - lo) as f64
+    }
+    /// The code length per tick as reported: after the learned floor with --floor, else the raw bits.
+    pub fn code_bits(&self) -> &[f64] {
+        if self.cfg.floor { &self.coded } else { &self.bits }
+    }
+    /// --floor: code a tick whose raw cost is `raw` bits through the switching mixture over uniform weights,
+    /// then update the mixture (prequential: the weights used come from the ticks before).
+    fn floor_code(&mut self, raw: f64) -> f64 {
+        const L: [f64; 9] = [1.0 / 4096.0, 1.0 / 512.0, 1.0 / 128.0, 1.0 / 32.0, 1.0 / 8.0, 0.25, 0.5, 0.75, 0.9375];
+        const SHARE: f64 = 1.0 / 1000.0;
+        if self.floor_w.is_empty() {
+            self.floor_w = vec![1.0 / L.len() as f64; L.len()];
+        }
+        let pm = (-raw).exp2();
+        let u = 1.0 / self.vocab as f64;
+        let pk: Vec<f64> = L.iter().map(|&l| (1.0 - l) * pm + l * u).collect();
+        let p: f64 = self.floor_w.iter().zip(&pk).map(|(w, q)| w * q).sum();
+        let k = L.len() as f64;
+        for (w, q) in self.floor_w.iter_mut().zip(&pk) {
+            *w *= q / p;
+        }
+        let tot: f64 = self.floor_w.iter().sum();
+        for w in self.floor_w.iter_mut() {
+            let x = *w / tot;
+            *w = (1.0 - SHARE) * x + SHARE * (1.0 - x) / (k - 1.0);
+        }
+        -p.log2()
     }
 
     pub fn summary_json(&self, blocks: usize, secs: f64) -> String {
