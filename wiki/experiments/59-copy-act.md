@@ -12,6 +12,7 @@
   - ELF: round A 2.98 → 2.82; round B 3.52 → 3.05. Still behind xz (2.43 / 2.49).
   - xml, Rust and the bitmaps gain 0.02–0.10; plain prose and csv barely move.
   - Round A without gzip 2.19 → 2.05; round B without gzip 2.86 → 2.69.
+  - Plain text (three Austen novels): no gain and almost no cost, second half 1.8632 against 1.8618. Half of its offers there are right (49.9%), and prose repeats are short.
 - **Two details matter:**
   - **The act must be mixed with the brain after its floor, not with the raw brain and a uniform guess side by side.** Mixed raw, the ELF files got worse (round A 3.11). A floored brain is a better single expert than a switch between "trust the brain" and "know nothing".
   - **Reading on past a wrong byte helps binaries.** In machine code a repeat often differs in one byte (an address, a constant). Keeping the pointer through up to 8 wrong bytes takes ELF from 2.93 to 2.82 (round A) and 3.12 to 3.05 (round B). Trusting the act by its recent record, as well as by match length, adds a little more.
@@ -82,6 +83,16 @@ Columns:
 - **Trust counts halved faster** (past 255 or 63 instead of 4,096) changed the whole stream by under 0.003.
 - **Recent record alone** (on the first act, mixed raw) changed nothing. It only pays once the act reads on past wrong bytes, when its record varies.
 - **An offline copy of the act** (`scripts/exp57/copy_sim.py`, mixing the first act with experiment 58's floored code) found the cause of the raw-mixing loss: the same act mixed after the floor gave ELF 2.93 / 3.10 instead of 3.11 / 3.36.
+
+## Plain text (three Austen novels, 2,026,385 bytes)
+
+| Run | Whole | Second half |
+|---|---|---|
+| Experiment 58 before its changes | 1.956 | 1.877 |
+| Floor, guard, two maps (experiment 58) | 1.945 | 1.862 |
+| + copy act | 1.946 | 1.863 |
+
+The act made 2,023,721 offers there (99.9% of bytes), 49.9% right, with 705,815 seeks that found a match.
 
 ## Format docs first
 

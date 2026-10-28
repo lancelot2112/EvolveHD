@@ -1,6 +1,6 @@
 # 58 · The byte brain: a floor, a guard, and two maps (2026-10-27)
 
-*[All experiments](README.md)* · [← 57](57-byte-stream-trial.md)
+*[All experiments](README.md)* · [← 57](57-byte-stream-trial.md) · [59 →](59-copy-act.md)
 
 **The question:** experiment 57's byte brain learned text formats from raw bytes but had no floor (gzip at 18–19 bits per byte) and lost what it had learned (round B's text opened worse than a fresh start). Can it survive what it can't read?
 
