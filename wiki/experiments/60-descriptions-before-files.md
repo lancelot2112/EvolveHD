@@ -11,8 +11,8 @@
 
 **Results:**
 - **The byte brain uses descriptions only as names.**
-  - On later files of a format, the right description helps a lot. Magic bytes cost 5.3 bits per byte under R, against 8.5 under W and 9.4 under N.
-  - On the first file of a format, it doesn't help at all: 10.9 under R against 9.7 under N.
+  - On later files of a format, the right description helps a lot. In the second half of the stream, magic bytes cost 5.3 bits per byte under R, against 8.5 under W and 9.5 under N.
+  - On the first file of a format, it doesn't help at all: 11.1 under R against 9.7 under N.
   - The description works as a key: the copy act recalls what followed the same description last time. That is association, not reading.
 - **A description expert learns the notation from nothing.**
   - It learns which token of the description each file byte comes from (an alignment, as in word alignment for translation) and what byte each token stands for.
@@ -20,8 +20,8 @@
 - **With it, descriptions help decode formats never seen before.** Over the second half of the stream, on the first file of each new format:
   - **Magic bytes:** the expert codes them at 5.0 bits per byte under R, against 9.0 under W and 8.0 under N. The first magic byte costs 3.3 bits under R and 8.9 under W.
   - **Mixed with the brain:** 6.3 under R, against 9.1 under W and 8.4 under N.
-  - **Constant bytes stated in the description** ("byte 7f"): 6.9 under R, 7.8 under W, 8.0 under N (expert alone).
-  - The right description helps and the wrong one hurts, so the reader is using what the description says.
+  - **Constant bytes stated in the description** ("byte 7f"): 6.9 under R, 7.8 under W, 8.0 under N (expert alone). Mixed with the brain the difference is gone (7.72 R, 7.67 W).
+  - On the magic, the right description helps and the wrong one hurts, so the reader is using what the description says. On the other fields it is not yet clear: a wrong description doesn't hurt the constants, and the version digit is not read at all.
 - **The gain is still small over whole files.** On the first files of new formats (whole stream), mixed:
   - 3.57 bits per byte under R, against 3.59 under W and 3.71 under N.
   - Most of R's gain over N also comes with a wrong description: the expert learns generic shapes, such as count and version bytes being small numbers.
@@ -48,18 +48,18 @@
 - 593,485 bytes, of which 284,735 are file bytes.
 - Each item's condition is drawn at random.
 - Formats arrive through the stream: a format's first file comes at its turn, its other files within 60 formats after it. So new formats keep coming to the end.
-- A first stream (300 formats, 8 files each, all introduced at the start) had no new formats late in the stream. It is kept for the baseline and early expert runs (`runs/exp60/fmt`).
+- A first stream (300 formats, 8 files each, all introduced at the start) had no new formats late in the stream. It is kept for the first baseline and expert runs (`runs/exp60/fmt`). The example description above is that stream's format 0.
 
 ## The byte brain (baseline)
 
-Binary `sit-60a` (experiment 59's code, rebuilt after the container moved to another CPU; it reproduces experiment 59's byte stream exactly). Stack: floor, guard, two maps, copy act (`runs/exp60/run.sh`).
+Binary `sit-60a` (experiment 59's code, rebuilt after the container moved to another CPU; on experiment 59's byte stream its output is identical to experiment 59's). Stack: floor, guard, two maps, copy act (`runs/exp60/run.sh`).
 
 | Second half, magic bytes | R | W | N |
 |---|---|---|---|
 | First file of a new format | 11.05 | 11.09 | 9.73 |
 | Later files | 5.26 | 8.52 | 9.47 |
 
-The brain is worse than uniform (8 bits) on new magics: at a file's start the copy act offers the magic that followed the previous description, which is usually wrong.
+The brain is worse than uniform (8 bits) on new magics under every condition, with no description too (9.73). Why was not tested; at a file's start the copy act may be offering bytes that followed the same context elsewhere.
 
 ## The description expert (`scripts/exp60/desc_expert.py`)
 
@@ -77,7 +77,7 @@ It is a prototype outside the brain, mixed with the brain's per-byte code.
 
 **How it uses them:**
 - Before each byte it predicts from its belief over tokens and the background.
-- After it, Bayes' rule updates the belief, and all counts take the posterior as soft counts (online EM).
+- After it, Bayes' rule updates the belief. The start and emission counts take the posterior as soft counts, weighted by the description's share in explaining the byte (online EM; emission updates under 0.001 are skipped). The jump counts are hard: one count for the jump between the likeliest positions, when the description explains the byte more than the background does.
 - With no description it says nothing (uniform).
 
 **The mixture:** a switching mixture (fixed share 1/1000) over the brain's code, the expert and a uniform guess, one per context: file offset (0–7, 8+) by the expert's confidence (quarters).
@@ -90,7 +90,7 @@ It is a prototype outside the brain, mixed with the brain's per-byte code.
 | version | 7.06 / 4.79 / 6.42 | 6.89 / 4.59 / 6.26 | 7.08 / 8.00 / 7.34 |
 | constant byte | 8.46 / 6.86 / 7.72 | 8.11 / 7.75 / 7.67 | 8.11 / 8.00 / 8.07 |
 
-- **Magic, by byte** (expert, R / W): byte 0 3.31 / 8.91; byte 1 5.42 / 8.94; byte 2 5.98 / 9.08; byte 3 6.79 / 9.48. The alignment finds the start but loses its place after it.
+- **Magic, by byte** (expert, R / W; 168 files for bytes 0–1 under R, 67 for byte 3): byte 0 3.31 / 8.91; byte 1 5.42 / 8.94; byte 2 5.98 / 9.08; byte 3 6.79 / 9.48. The alignment finds the start but loses its place after it.
 - **Its moves are poor:** it learns "stay" (jump 0) half the time. Bytes the background explains still move the belief, and the jump counts take the likeliest positions, not the full posterior.
 - **The version digit is not read:** R and W are alike (4.79 / 4.59). The expert learns that version bytes are small, not which one the description states.
 
@@ -101,7 +101,10 @@ It is a prototype outside the brain, mixed with the brain's per-byte code.
 | All files | 3.438 / 3.300 | 3.531 / 3.426 | 3.623 / 3.608 |
 | First file of a format | 3.815 / 3.574 | 3.753 / 3.591 | 3.730 / 3.711 |
 
-Without the background distribution (a first version), the tokens soaked up the bytes they don't explain. "00" came to stand for "e", "10" for "i", and R and W gained alike.
+- **Without the background distribution** (a first version, on the first stream), the tokens soaked up the bytes they don't explain ("00" came to stand for "e", "10" for "i"; printed by that version, which was then changed).
+- **The background did not change the R / W pattern on that stream:** over all files, R −0.141 and W −0.115 against the brain without it, R −0.141 and W −0.116 with it.
+- **It doesn't stop the soaking either.** On the progressive stream "20" still stands for "r", "10" for "l", "11" for 0x00. The background's share past offset 8 (most of a file's body: names, values) is only 0.05, so the tokens still explain most body bytes.
+- **How the first token is found:** the start distribution puts 0.75 on token 3, the first magic token (a probe of the run, not printed by the script).
 
 ## What this means
 
