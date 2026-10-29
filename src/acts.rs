@@ -10,21 +10,56 @@
 /// how often offers with that score level and kind were right before (counted, prequential).
 pub struct StrideAct {
     pub strides: Vec<usize>,
+    /// --stride-wide: number predictors too, (stride k, width w, little endian?): the w-byte number k back plus
+    /// its change from the number 2k back, as a whole number with carries; the byte offered is the current byte's
+    /// place in that number (the byte's lane modulo w gives the place).
+    nums: Vec<(usize, usize, bool)>,
     score: Vec<[u16; 8]>,
     cal: Vec<(u32, u32)>,
     pub mw: Vec<[f64; 3]>,
     pub stats: [u64; 3],
     last: Option<(usize, u8, usize)>,
+    lane: usize,
 }
 
 pub const STRIDES: [usize; 21] = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 600, 768, 1024];
 
 impl StrideAct {
-    pub fn new(contexts: usize) -> Self {
+    pub fn new(contexts: usize, wide: bool) -> Self {
         let s = STRIDES.to_vec();
-        StrideAct { score: vec![[0; 8]; 2 * s.len()], cal: vec![(0, 0); contexts], mw: vec![[1.0 / 3.0; 3]; contexts], stats: [0; 3], last: None, strides: s }
+        let mut nums = vec![];
+        if wide {
+            for w in [2usize, 4, 8] {
+                for &k in s.iter().filter(|&&k| k >= w && k % w == 0) {
+                    nums.push((k, w, true));
+                    nums.push((k, w, false));
+                }
+            }
+        }
+        StrideAct { score: vec![[0; 8]; 2 * s.len() + nums.len()], cal: vec![(0, 0); contexts], mw: vec![[1.0 / 3.0; 3]; contexts], stats: [0; 3], last: None, strides: s, nums, lane: 0 }
+    }
+    /// Trust contexts per regime: no offer, then 8 score levels for each of repeat, step and number.
+    pub const CTX: usize = 25;
+    fn kind(&self, p: usize) -> usize {
+        if p < 2 * self.strides.len() { p % 2 } else { 2 }
     }
     fn pred(&self, p: usize, data: &[u8], t: usize) -> Option<u8> {
+        if p >= 2 * self.strides.len() {
+            let (k, w, le) = self.nums[p - 2 * self.strides.len()];
+            let j = self.lane % w; // the byte's place in its number (from the start of the file)
+            let s0 = t.checked_sub(j)?;
+            if s0 < 2 * k {
+                return None;
+            }
+            let num = |a: usize| -> u64 {
+                let b = &data[a..a + w];
+                if le { b.iter().rev().fold(0u64, |v, &x| v << 8 | x as u64) } else { b.iter().fold(0u64, |v, &x| v << 8 | x as u64) }
+            };
+            let (v1, v2) = (num(s0 - k), num(s0 - 2 * k));
+            let v = v1.wrapping_add(v1.wrapping_sub(v2));
+            let place = if le { j } else { w - 1 - j };
+            return Some((v >> (8 * place)) as u8);
+        }
         let k = self.strides[p / 2];
         if p % 2 == 0 {
             (t >= k).then(|| data[t - k])
@@ -34,6 +69,7 @@ impl StrideAct {
     }
     /// The act's offer for byte t (from bytes before t) and its trust context (0 = no offer).
     pub fn offer(&mut self, data: &[u8], t: usize, lane: usize) -> (Option<u8>, usize) {
+        self.lane = lane;
         let mut best: Option<(u16, usize)> = None;
         for p in 0..self.score.len() {
             let s = self.score[p][lane];
@@ -44,8 +80,9 @@ impl StrideAct {
         match best {
             Some((s, p)) if s >= 32 => {
                 let o = self.pred(p, data, t).unwrap();
-                self.last = Some((p, o, 1 + (p % 2) * 8 + (s as usize >> 5).min(7)));
-                (Some(o), 1 + (p % 2) * 8 + (s as usize >> 5).min(7))
+                let c = 1 + self.kind(p) * 8 + (s as usize >> 5).min(7);
+                self.last = Some((p, o, c));
+                (Some(o), c)
             }
             _ => {
                 self.last = None;
@@ -60,6 +97,7 @@ impl StrideAct {
     }
     /// After byte t (value y): credit the offer, and score every predictor in this lane.
     pub fn learn(&mut self, data: &[u8], t: usize, lane: usize, y: u8, ctx: usize) {
+        self.lane = lane;
         if let Some((_, o, _)) = self.last {
             self.stats[0] += 1;
             let e = &mut self.cal[ctx];
@@ -84,7 +122,7 @@ impl StrideAct {
 
 /// The regime sense: the byte counts of the last W bytes, matched every 16 bytes to learned centroids (cosine
 /// similarity). A window less than 0.6 similar to every centroid starts a new one (up to K); otherwise the best
-/// centroid moves 1/50 of the way toward it. The regime is the best centroid's index.
+/// centroid moves 1/50 of the way toward it. (The 0.6 is a setting: --regime-thr.) The regime is the best centroid's index.
 pub struct Regime {
     w: usize,
     k: usize,
@@ -92,11 +130,12 @@ pub struct Regime {
     cents: Vec<Vec<f32>>,
     pub id: i32,
     pub sizes: Vec<u64>,
+    thr: f32,
 }
 
 impl Regime {
-    pub fn new(w: usize, k: usize) -> Self {
-        Regime { w, k, counts: vec![0; 256], cents: vec![], id: -1, sizes: vec![] }
+    pub fn new(w: usize, k: usize, thr: f32) -> Self {
+        Regime { w, k, counts: vec![0; 256], cents: vec![], id: -1, sizes: vec![], thr }
     }
     /// Byte t has arrived (data[..=t] known).
     pub fn step(&mut self, data: &[u8], t: usize) {
@@ -116,7 +155,7 @@ impl Regime {
                 best = (s, i);
             }
         }
-        if best.1 == usize::MAX || (best.0 < 0.6 && self.cents.len() < self.k) {
+        if best.1 == usize::MAX || (best.0 < self.thr && self.cents.len() < self.k) {
             self.cents.push(h);
             self.sizes.push(0);
             best.1 = self.cents.len() - 1;

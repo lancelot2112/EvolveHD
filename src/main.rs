@@ -430,6 +430,11 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.gc_old_parts = flag(args, "--gc-old-parts");
     c.copy_act = flag(args, "--copy-act");
     c.stride_act = flag(args, "--stride-act");
+    c.stride_wide = flag(args, "--stride-wide");
+    c.regime_gate = flag(args, "--regime-gate");
+    if let Some(x) = arg(args, "--regime-thr") {
+        c.regime_thr = x.parse().unwrap();
+    }
     if let Some(x) = arg(args, "--regime") {
         let (w, k) = x.split_once(',').unwrap();
         c.regime = Some((w.parse().unwrap(), k.parse().unwrap()));

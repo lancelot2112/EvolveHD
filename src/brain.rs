@@ -77,10 +77,19 @@ pub struct Cfg {
     /// --stride-act: value operators as an act beside the level, after the copy act (see `acts::StrideAct`): the
     /// byte k back, or the byte k back plus its last change, for strides k from 1 to 1024, chosen per lane.
     pub stride_act: bool,
+    /// --stride-wide: the stride act also steps whole 2-, 4- and 8-byte numbers (little and big endian), with
+    /// carries (see `acts::StrideAct`).
+    pub stride_wide: bool,
     /// --regime W,K: the regime sense (see `acts::Regime`): which of up to K learned kinds of material the last W
     /// bytes are. It is offered as a node (a sense, never collected; not with --regime-no-node) and is part of
     /// the context of every output mixture (floor, copy act, stride act).
     pub regime: Option<(usize, usize)>,
+    /// --regime-thr X: the similarity below which a window starts a new regime (default 0.6).
+    pub regime_thr: f32,
+    /// --regime-gate: each kept edge's gain is measured per regime; an edge is left out of the prediction in a
+    /// regime where its recent gain there is below zero (still measured, so it can come back), and is not pruned
+    /// while it pays in some regime.
+    pub regime_gate: bool,
     pub bind_cap: usize,
     pub hebb: f64,
     /// Writer masks drop their lowest-numbered eligible bits, as the Python reference did.
@@ -222,7 +231,10 @@ impl Default for Cfg {
             map_two: 0,
             copy_act: false,
             stride_act: false,
+            stride_wide: false,
             regime: None,
+            regime_thr: 0.6,
+            regime_gate: false,
             bind_cap: 1024,
             hebb: 1.0,
             drop_lowest: true,
@@ -802,6 +814,7 @@ pub struct Brain {
     pub copy_stats: [u64; 3],
     copy_cap: u32,
     stride: Option<crate::acts::StrideAct>,
+    rgain: HashMap<usize, Vec<(f64, u32)>>,
     regime_s: Option<crate::acts::Regime>,
     floor_wr: Vec<Vec<f64>>,
     copy_hist: u32,
@@ -999,7 +1012,8 @@ impl Brain {
             copy_stats: [0; 3],
             copy_cap: std::env::var("COPY_CAP").ok().and_then(|x| x.parse().ok()).unwrap_or(4096),
             stride: None,
-            regime_s: cfg.regime.map(|(w, k)| crate::acts::Regime::new(w, k)),
+            regime_s: cfg.regime.map(|(w, k)| crate::acts::Regime::new(w, k, cfg.regime_thr)),
+            rgain: HashMap::new(),
             floor_wr: cfg.regime.map(|(_, k)| vec![vec![]; k + 1]).unwrap_or_default(),
             copy_hist: 0,
             // the act's rule: read on past a wrong byte, and trust by length and recent record (COPY_PLAIN: neither,
@@ -1605,9 +1619,15 @@ impl Brain {
         let mut logits = vec![0.0; na];
         let kept = self.kept.clone();
         let trials = self.trials.clone();
+        let rg_now = if self.cfg.regime_gate { self.regime_ix() } else { 0 };
+        let mut gated: Vec<usize> = vec![];
         for &e in &kept {
             if self.score_edge(e) {
-                self.slab[e].add_contribution(&mut logits, false);
+                if self.cfg.regime_gate && e != kept[0] && self.gate_off(e, rg_now) {
+                    gated.push(e); // --regime-gate: this edge has not paid in this regime; scored, not used
+                } else {
+                    self.slab[e].add_contribution(&mut logits, false);
+                }
             }
         }
         if let Some(k) = self.copy_ctx_ext {
@@ -1761,10 +1781,20 @@ impl Brain {
                 }
                 lw.clear();
                 lw.extend_from_slice(&logits);
-                self.slab[e].add_contribution(&mut lw, true);
+                let off = gated.contains(&e);
+                // the edge's gain on this byte: without it against with it (a gated edge: what it would have
+                // added)
+                self.slab[e].add_contribution(&mut lw, !off);
                 let lpo = log_softmax_lp(&lw, yi);
                 let qo = (1.0 - eps) * lpo.exp() + eps / self.vocab as f64;
-                let d = -qo.log2() - base_loss;
+                let d = if off { base_loss + qo.log2() } else { -qo.log2() - base_loss };
+                if self.cfg.regime_gate {
+                    let nr = self.cfg.regime.map_or(1, |(_, k)| k + 1);
+                    let v = self.rgain.entry(e).or_insert_with(|| vec![(0.0, 0); nr]);
+                    let x = &mut v[rg_now];
+                    x.0 += (d - x.0) / 256.0;
+                    x.1 += 1;
+                }
                 let ed = &mut self.slab[e];
                 ed.sum += d;
                 ed.sq += d * d;
@@ -2507,6 +2537,13 @@ impl Brain {
                 && self.slab[e].n > 100
             {
                 let (m, z) = self.slab[e].stats();
+                if c.regime_gate && self.pays_somewhere(e) {
+                    // kept for the kind of material it serves: judged again later
+                    self.guarded += 1;
+                    self.slab[e].reset_stats();
+                    self.kept_since.insert(k, t);
+                    continue;
+                }
                 if c.prune_guard && noise_from(self, since) {
                     self.guarded += 1;
                     self.slab[e].reset_stats();
@@ -3311,6 +3348,15 @@ impl Brain {
         }
         -p.log2()
     }
+    /// --regime-gate: is edge e off in regime r? Off once it has been measured 256 times there and its recent
+    /// gain there (an average over about 256 bytes) is below zero.
+    fn gate_off(&self, e: usize, r: usize) -> bool {
+        self.rgain.get(&e).map_or(false, |v| v[r].1 >= 256 && v[r].0 < 0.0)
+    }
+    /// --regime-gate: has edge e paid in some regime (gain at least the prune bar, over 1,000 or more bytes)?
+    fn pays_somewhere(&self, e: usize) -> bool {
+        self.rgain.get(&e).map_or(false, |v| v.iter().any(|x| x.1 >= 1000 && x.0 >= self.cfg.prune_gain))
+    }
     /// The regime for coding the current byte: 0 = none yet, else 1 + the regime sense's id (from earlier bytes).
     fn regime_ix(&self) -> usize {
         self.regime_s.as_ref().map_or(0, |r| (r.id + 1) as usize)
@@ -3326,14 +3372,14 @@ impl Brain {
         const SH: f64 = 1.0 / 1000.0;
         let nr = self.cfg.regime.map_or(1, |(_, k)| k + 1);
         if self.stride.is_none() {
-            self.stride = Some(crate::acts::StrideAct::new(17 * nr));
+            self.stride = Some(crate::acts::StrideAct::new(crate::acts::StrideAct::CTX * nr, self.cfg.stride_wide));
         }
         let lane = self.lane(t);
         let r = self.regime_ix();
         let y = self.data[t];
         let st = self.stride.as_mut().unwrap();
         let (offer, c) = st.offer(&self.data, t, lane);
-        let ctx = c + 17 * r;
+        let ctx = c + crate::acts::StrideAct::CTX * r;
         let u = 1.0 / 256.0;
         let ps = match offer {
             Some(o) => {
