@@ -80,6 +80,9 @@ pub struct Cfg {
     /// --stride-wide: the stride act also steps whole 2-, 4- and 8-byte numbers (little and big endian), with
     /// carries (see `acts::StrideAct`).
     pub stride_wide: bool,
+    /// --desc-expert: the description expert (see `acts::DescExpert`) as a last mixture stage, after the copy and
+    /// stride acts (needs --copy-act and --file-starts).
+    pub desc_expert: bool,
     /// --regime W,K: the regime sense (see `acts::Regime`): which of up to K learned kinds of material the last W
     /// bytes are. It is offered as a node (a sense, never collected; not with --regime-no-node) and is part of
     /// the context of every output mixture (floor, copy act, stride act).
@@ -232,6 +235,7 @@ impl Default for Cfg {
             copy_act: false,
             stride_act: false,
             stride_wide: false,
+            desc_expert: false,
             regime: None,
             regime_thr: 0.6,
             regime_gate: false,
@@ -815,6 +819,9 @@ pub struct Brain {
     copy_cap: u32,
     stride: Option<crate::acts::StrideAct>,
     rgain: HashMap<usize, Vec<(f64, u32)>>,
+    desc: Option<crate::acts::DescExpert>,
+    /// --desc-expert: the expert's own cost per byte (for scoring), from the first file start on.
+    pub desc_bits: Option<Vec<f32>>,
     regime_s: Option<crate::acts::Regime>,
     floor_wr: Vec<Vec<f64>>,
     copy_hist: u32,
@@ -1014,6 +1021,8 @@ impl Brain {
             stride: None,
             regime_s: cfg.regime.map(|(w, k)| crate::acts::Regime::new(w, k, cfg.regime_thr)),
             rgain: HashMap::new(),
+            desc: None,
+            desc_bits: if cfg.desc_expert { Some(vec![]) } else { None },
             floor_wr: cfg.regime.map(|(_, k)| vec![vec![]; k + 1]).unwrap_or_default(),
             copy_hist: 0,
             // the act's rule: read on past a wrong byte, and trust by length and recent record (COPY_PLAIN: neither,
@@ -1745,6 +1754,9 @@ impl Brain {
             self.coded[t] = self.copy_code(t, fl);
             if self.cfg.stride_act {
                 self.coded[t] = self.stride_code(t, self.coded[t]);
+            }
+            if self.cfg.desc_expert {
+                self.coded[t] = self.desc_code(t, self.coded[t]);
             }
         } else if self.cfg.floor {
             self.coded[t] = self.floor_code(self.bits[t]);
@@ -3400,6 +3412,40 @@ impl Brain {
         }
         st.mw[ctx] = nw;
         st.learn(&self.data, t, lane, y, ctx);
+        -p.log2()
+    }
+    /// --desc-expert: code byte t (its cost so far `prev` bits) through a mixture of that code, the description
+    /// expert and a uniform guess, per context (offset in the file 0..7, 8+, by the expert's confidence in
+    /// quarters). Needs the file starts.
+    fn desc_code(&mut self, t: usize, prev: f64) -> f64 {
+        const SH: f64 = 1.0 / 1000.0;
+        let k = self.file_starts.partition_point(|&x| x <= t);
+        if k == 0 {
+            return prev;
+        }
+        let seg = self.file_starts[k - 1];
+        let pv = if k >= 2 { Some(self.file_starts[k - 2]) } else { None };
+        if self.desc.is_none() {
+            self.desc = Some(crate::acts::DescExpert::new());
+        }
+        let de = self.desc.as_mut().unwrap();
+        // the context uses the confidence before this byte, from the bytes before it
+        let pdx = de.code(&self.data, t, seg, pv);
+        let ctx = de.off.min(8) * 4 + ((de.conf * 4.0) as usize).min(3);
+        let pk = [(-prev).exp2(), pdx, 1.0 / 256.0];
+        let w = de.mw[ctx];
+        let p: f64 = w.iter().zip(&pk).map(|(a, b)| a * b).sum();
+        let mut nw = [0.0; 3];
+        for i in 0..3 {
+            nw[i] = w[i] * pk[i] / p;
+        }
+        for i in 0..3 {
+            nw[i] = (1.0 - SH) * nw[i] + SH * (1.0 - nw[i]) / 2.0;
+        }
+        de.mw[ctx] = nw;
+        if let Some(e) = self.desc_bits.as_mut() {
+            e.push(-pdx.log2() as f32);
+        }
         -p.log2()
     }
     /// --floor: code a tick whose raw cost is `raw` bits through the switching mixture over uniform weights,

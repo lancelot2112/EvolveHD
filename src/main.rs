@@ -431,6 +431,7 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.copy_act = flag(args, "--copy-act");
     c.stride_act = flag(args, "--stride-act");
     c.stride_wide = flag(args, "--stride-wide");
+    c.desc_expert = flag(args, "--desc-expert");
     c.regime_gate = flag(args, "--regime-gate");
     if let Some(x) = arg(args, "--regime-thr") {
         c.regime_thr = x.parse().unwrap();
@@ -754,6 +755,11 @@ fn main() {
                 std::fs::write(format!("{dir}/level{l}.syms"), raw).unwrap();
                 // the level's prequential bits per tick (f32), for per-file scoring and mixing with other coders
                 let bits: Vec<u8> = b.code_bits()[..b.t].iter().flat_map(|&x| (x as f32).to_le_bytes()).collect();
+                if let Some(d) = b.desc_bits.as_ref() {
+                    // the description expert's own cost, for the bytes from the first file start on
+                    let raw: Vec<u8> = d.iter().flat_map(|x| x.to_le_bytes()).collect();
+                    std::fs::write(format!("{dir}/level{l}.desc_bits"), raw).unwrap();
+                }
                 std::fs::write(format!("{dir}/level{l}.bits"), bits).unwrap();
                 if l + 1 < st.levels.len() {
                     // the vocabulary this level hands up

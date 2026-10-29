@@ -171,3 +171,144 @@ impl Regime {
         self.id = best.1 as i32;
     }
 }
+
+/// The description expert (experiment 60's prototype, moved into the stack). The segment before each file (from
+/// the previous file start to this one) is read as that file's description: its tokens are runs of non-space bytes
+/// with a trailing "." "," or ":" dropped (at most 64). While the file is read, a belief over which token the
+/// current byte comes from is kept (an alignment, HMM style):
+///   start  a learned distribution over token positions for the file's first byte;
+///   move   jumps of -16..+8 tokens from one byte to the next, learned;
+///   emit   each token's learned byte distribution;
+///   background  a learned byte distribution for bytes the description doesn't explain, with a learned share per
+///          file offset (0..7, 8+).
+/// Before each byte it predicts from the belief and the background; after it, Bayes updates the belief and the
+/// counts take the posterior as soft counts weighted by the description's share in explaining the byte (the jump
+/// counts are hard: one count for the jump between the likeliest positions, when the description explains the byte
+/// more than the background does).
+pub struct DescExpert {
+    vocab: std::collections::HashMap<Vec<u8>, usize>,
+    emit: Vec<[f64; 256]>,
+    jumps: [f64; 25],
+    start: [f64; 64],
+    bg: [f64; 256],
+    lam: [(f64, f64); 9],
+    toks: Vec<usize>,
+    belief: Vec<f64>,
+    prev_arg: usize,
+    seg: usize,
+    pub off: usize,
+    pub conf: f64,
+    pub mw: Vec<[f64; 3]>,
+}
+
+impl DescExpert {
+    pub fn new() -> Self {
+        let mut jumps = [1.0; 25];
+        jumps[17] += 4.0; // a mild prior for reading on by one token (index 16 is a jump of 0)
+        DescExpert { vocab: Default::default(), emit: vec![], jumps, start: [1.0; 64], bg: [1.0; 256], lam: [(1.0, 1.0); 9], toks: vec![], belief: vec![], prev_arg: 0, seg: usize::MAX, off: 0, conf: 0.0, mw: vec![[1.0 / 3.0; 3]; 9 * 4] }
+    }
+    /// A new file starts at byte a; the bytes from p (the previous file's start) to a are its description.
+    fn begin(&mut self, data: &[u8], p: usize, a: usize) {
+        self.toks.clear();
+        for w in data[p..a].split(|&b| b == b' ' || b == b'\n' || b == b'\t' || b == b'\r') {
+            let mut w = w;
+            while let Some((&l, rest)) = w.split_last() {
+                if l == b'.' || l == b',' || l == b':' { w = rest } else { break }
+            }
+            if w.is_empty() || w.len() > 32 {
+                continue;
+            }
+            let n = self.vocab.len();
+            let id = *self.vocab.entry(w.to_vec()).or_insert(n);
+            if id == self.emit.len() {
+                self.emit.push([0.05; 256]);
+            }
+            self.toks.push(id);
+            if self.toks.len() == 64 {
+                break;
+            }
+        }
+        let m = self.toks.len();
+        let s: f64 = self.start[..m].iter().sum();
+        self.belief = self.start[..m].iter().map(|x| x / s.max(1e-12)).collect();
+        self.off = 0;
+    }
+    /// The probability of byte y at t (and learn from it). seg: the start of t's file; prev: the start of the file
+    /// before it (None: no description).
+    pub fn code(&mut self, data: &[u8], t: usize, seg: usize, prev: Option<usize>) -> f64 {
+        let u = 1.0 / 256.0;
+        if seg != self.seg {
+            self.seg = seg;
+            match prev {
+                Some(p) => self.begin(data, p, seg),
+                None => self.toks.clear(),
+            }
+        } else {
+            self.off += 1;
+        }
+        let m = self.toks.len();
+        if m == 0 {
+            self.conf = 0.0;
+            return u;
+        }
+        let k = self.off;
+        if k > 0 {
+            let jt: f64 = self.jumps.iter().sum();
+            let mut nb = vec![0.0; m];
+            for (di, &pj) in self.jumps.iter().enumerate() {
+                let d = di as isize - 16;
+                for i in 0..m {
+                    let j = i as isize + d;
+                    if j >= 0 && (j as usize) < m {
+                        nb[j as usize] += pj / jt * self.belief[i];
+                    }
+                }
+            }
+            let s: f64 = nb.iter().sum();
+            self.belief = if s > 0.0 { nb.iter().map(|x| x / s).collect() } else { vec![1.0 / m as f64; m] };
+        }
+        let y = data[t] as usize;
+        let rows: Vec<f64> = self.toks.iter().map(|&w| self.emit[w].iter().sum()).collect();
+        let mut pd = [0.0f64; 256];
+        for (i, &w) in self.toks.iter().enumerate() {
+            let b = self.belief[i] / rows[i];
+            if b > 1e-9 {
+                for (x, e) in pd.iter_mut().zip(self.emit[w].iter()) {
+                    *x += b * e;
+                }
+            }
+        }
+        let lb = k.min(8);
+        let (ld, lg) = self.lam[lb];
+        let lam = lg / (ld + lg);
+        let bgs: f64 = self.bg.iter().sum();
+        let pb = (1.0 - lam) * pd[y] + lam * self.bg[y] / bgs;
+        self.conf = pd.iter().cloned().fold(0.0, f64::max) * (1.0 - lam);
+        let r = (1.0 - lam) * pd[y] / pb;
+        self.lam[lb].0 += r;
+        self.lam[lb].1 += 1.0 - r;
+        self.bg[y] += 1.0 - r;
+        let mut post: Vec<f64> = self.toks.iter().enumerate().map(|(i, &w)| self.belief[i] * self.emit[w][y] / rows[i]).collect();
+        let ps: f64 = post.iter().sum();
+        post.iter_mut().for_each(|x| *x /= ps.max(1e-300));
+        for (i, &w) in self.toks.iter().enumerate() {
+            if post[i] * r > 1e-3 {
+                self.emit[w][y] += post[i] * r;
+            }
+        }
+        let am = (0..m).max_by(|&a, &b| post[a].partial_cmp(&post[b]).unwrap()).unwrap();
+        if k == 0 {
+            for i in 0..m {
+                self.start[i] += post[i] * r;
+            }
+        } else if r > 0.5 {
+            let d = am as isize - self.prev_arg as isize;
+            if (-16..=8).contains(&d) {
+                self.jumps[(d + 16) as usize] += r;
+            }
+        }
+        self.prev_arg = am;
+        self.belief = post.iter().zip(&self.belief).map(|(p, b)| r * p + (1.0 - r) * b).collect();
+        pb
+    }
+}
