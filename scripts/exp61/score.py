@@ -8,7 +8,7 @@ pd, cd, zd = sys.argv[1:4]
 tm = json.load(open('runs/exp57/bytes.files.json'))['files']
 P = np.fromfile(pd + '/level0.bits', dtype='<f4').astype(float); C = np.fromfile(cd + '/level0.bits', dtype='<f4').astype(float)
 Z = np.fromfile(zd + '/level0.bits', dtype='<f4').astype(float)
-po = json.load(open('runs/exp61/P.files.json'))['test_from']; co = json.load(open('runs/exp61/C.files.json'))['test_from']
+po = json.load(open('runs/exp61/P.files.json'))['test_from']; co = json.load(open(sys.argv[4] if len(sys.argv) > 4 else 'runs/exp61/C.files.json'))['test_from']
 print(f"{'':<3}{'type':<6}{'none':>8}{'text':>8}{'prims':>8}   prims - text")
 t = {'0': [], 'C': [], 'P': []}
 for m in tm:
