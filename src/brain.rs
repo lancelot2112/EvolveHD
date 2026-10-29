@@ -56,6 +56,9 @@ pub struct Cfg {
     /// clearly: z below -1), not merely when it does too little. In mixed material an edge may only help in some
     /// kinds of bytes; it then does little on average without doing harm.
     pub prune_harmful: bool,
+    /// --gc-old-parts: the old collection rule, under which a young node's old parts could be collected while it
+    /// survived (it then read their frozen states). Off by default from sit-61c.
+    pub gc_old_parts: bool,
     /// --map-cap N: a cell's byte counts (the map from the cell that matched to the byte it stood for) are halved
     /// together once they pass N, so a stretch of other material can't fix the map for good (0: never).
     pub map_cap: u32,
@@ -207,6 +210,7 @@ impl Default for Cfg {
             floor: false,
             prune_guard: false,
             prune_harmful: false,
+            gc_old_parts: false,
             map_cap: 0,
             map_two: 0,
             copy_act: false,
@@ -3013,6 +3017,16 @@ impl Brain {
             .chain(self.trials.iter())
             .map(|&e| self.slab[e].src)
             .collect();
+        if !self.cfg.gc_old_parts {
+            // nodes this pass will not collect (untried, young, or senses) keep their parts too: a young bind
+            // must not lose a part and go on reading its frozen state
+            for &n in &self.derived {
+                let nd = &self.nodes[n];
+                if !self.tried.contains(&nd.name) || t - nd.born <= 15000 || matches!(nd.kind, Kind::Pos(..)) {
+                    used.insert(n);
+                }
+            }
+        }
         let mut changed = true;
         while changed {
             changed = false;
