@@ -51,7 +51,7 @@ Kept at the end with it: (byte × pos), (pos × (byte@3 × byte)), and (byte@6 �
 
 ## The primitives (`scripts/exp61/primitives.py`)
 
-128 files of 8,000 bytes (1,024,000 bytes), 16 of each kind, shuffled:
+128 files of up to 8,000 bytes (1,021,800 bytes in all; some image files are shorter), 16 of each kind, shuffled:
 
 | Kind | What a file holds |
 |---|---|
@@ -64,7 +64,7 @@ Kept at the end with it: (byte × pos), (pos × (byte@3 × byte)), and (byte@6 �
 | image | raw RGB or grey pixel rows (widths 16–256) from ImageMagick's built-in images and gradients |
 | rosetta | numbers side by side: "0x04d2 " then the same number as 2- and 4-byte little endian, then a newline |
 
-- **The English control:** 1,021,800 bytes of 8,000-byte Gutenberg slices (the first 1,024,000 cut to the primitives' length).
+- **The English control:** 8,000-byte Gutenberg slices, cut to the primitives' length (1,021,800 bytes).
 - **The test:** experiment 57's 384,000 bytes.
 - **Settings:** floor, guard, two maps, copy act, position sense. Scripts `runs/exp61/run.sh`, `runs/exp61/all.sh`; scorer `scripts/exp61/score.py`.
 
