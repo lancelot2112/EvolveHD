@@ -74,6 +74,13 @@ pub struct Cfg {
     /// record; implies the floor). Env COPY_PLAIN: the first version (no reading on, trust by length only);
     /// COPY_CAP: halve the trust counts past this many offers (default 4096).
     pub copy_act: bool,
+    /// --stride-act: value operators as an act beside the level, after the copy act (see `acts::StrideAct`): the
+    /// byte k back, or the byte k back plus its last change, for strides k from 1 to 1024, chosen per lane.
+    pub stride_act: bool,
+    /// --regime W,K: the regime sense (see `acts::Regime`): which of up to K learned kinds of material the last W
+    /// bytes are. It is offered as a node (a sense, never collected) and is part of the context of every output
+    /// mixture (floor, copy act, stride act).
+    pub regime: Option<(usize, usize)>,
     pub bind_cap: usize,
     pub hebb: f64,
     /// Writer masks drop their lowest-numbered eligible bits, as the Python reference did.
@@ -214,6 +221,8 @@ impl Default for Cfg {
             map_cap: 0,
             map_two: 0,
             copy_act: false,
+            stride_act: false,
+            regime: None,
             bind_cap: 1024,
             hebb: 1.0,
             drop_lowest: true,
@@ -792,6 +801,9 @@ pub struct Brain {
     copy_mw: Vec<[f64; 3]>,
     pub copy_stats: [u64; 3],
     copy_cap: u32,
+    stride: Option<crate::acts::StrideAct>,
+    regime_s: Option<crate::acts::Regime>,
+    floor_wr: Vec<Vec<f64>>,
     copy_hist: u32,
     copy_ctx: bool,
     copy_keep: bool,
@@ -986,6 +998,9 @@ impl Brain {
             copy_mw: vec![],
             copy_stats: [0; 3],
             copy_cap: std::env::var("COPY_CAP").ok().and_then(|x| x.parse().ok()).unwrap_or(4096),
+            stride: None,
+            regime_s: cfg.regime.map(|(w, k)| crate::acts::Regime::new(w, k)),
+            floor_wr: cfg.regime.map(|(_, k)| vec![vec![]; k + 1]).unwrap_or_default(),
             copy_hist: 0,
             // the act's rule: read on past a wrong byte, and trust by length and recent record (COPY_PLAIN: neither,
             // the first version)
@@ -1708,8 +1723,16 @@ impl Brain {
             // the level's code after its floor is the first expert beside the act
             let fl = self.floor_code(self.bits[t]);
             self.coded[t] = self.copy_code(t, fl);
+            if self.cfg.stride_act {
+                self.coded[t] = self.stride_code(t, self.coded[t]);
+            }
         } else if self.cfg.floor {
             self.coded[t] = self.floor_code(self.bits[t]);
+        }
+        if self.bytes {
+            if let Some(rg) = self.regime_s.as_mut() {
+                rg.step(&self.data, t);
+            }
         }
         self.novel[t] = novel;
         if yi >= 0 && na > 0 && !self.frozen {
@@ -2096,6 +2119,9 @@ impl Brain {
             Kind::Pos(_, m) => *m,
             _ => unreachable!(),
         };
+        if m == usize::MAX {
+            return self.regime_s.as_ref().map_or(-1, |r| r.id);
+        }
         let next = t + 1;
         let k = self.file_starts.partition_point(|&x| x <= next);
         if k == 0 {
@@ -2109,6 +2135,21 @@ impl Brain {
         } else {
             (32 + (usize::BITS - off.leading_zeros()) as usize - 6) as i32
         }
+    }
+
+    /// The regime sense as a node (a sense like the position nodes: never collected).
+    pub fn add_regime_node(&mut self) {
+        let seed = self.rng.next_u64();
+        let nd = self.new_node("regime".into(), Kind::Pos(Box::new(UpperNode { codes: vec![], rng: Rng::new(seed) }), usize::MAX), vec![], String::new());
+        self.add(nd, "the regime sense".into());
+    }
+    /// The regime sense's report: (regimes, windows assigned to each).
+    pub fn regime_report(&self) -> Option<Vec<u64>> {
+        self.regime_s.as_ref().map(|r| r.sizes.clone())
+    }
+    /// The stride act's counts: (offers, right).
+    pub fn stride_report(&self) -> Option<[u64; 3]> {
+        self.stride.as_ref().map(|s| s.stats)
     }
 
     /// Add the top-down node: the level above's predicted next symbol.
@@ -3177,15 +3218,16 @@ impl Brain {
         const SH: f64 = 1.0 / 1000.0;
         if self.copy_tab.is_empty() {
             self.copy_tab = vec![u32::MAX; 1 << TB];
-            self.copy_cal = vec![(0, 0); NB];
-            self.copy_mw = vec![[1.0 / 3.0; 3]; NB];
+            let nr = self.cfg.regime.map_or(1, |(_, k)| k + 1);
+            self.copy_cal = vec![(0, 0); NB * nr];
+            self.copy_mw = vec![[1.0 / 3.0; 3]; NB * nr];
         }
         let y = self.data[t];
         let offer = self.copy_ptr.filter(|&p| p < t).map(|p| self.data[p]);
         let bk = if offer.is_some() { 1 + self.copy_len.min(32) / 2 } else { 0 };
         // the act's recent record: how many of its last 8 offers were right (0-1, 2-4, 5-6, 7-8)
         let rc = match self.copy_hist.count_ones() { 0..=1 => 0, 2..=4 => 1, 5..=6 => 2, _ => 3 };
-        let bk = bk.min(17) * 4 + if self.copy_ctx { rc } else { 0 };
+        let bk = bk.min(17) * 4 + if self.copy_ctx { rc } else { 0 } + NB * self.regime_ix();
         let u = 1.0 / 256.0;
         let pl = (-raw).exp2();
         let pc = match offer {
@@ -3269,6 +3311,51 @@ impl Brain {
         }
         -p.log2()
     }
+    /// The regime for coding the current byte: 0 = none yet, else 1 + the regime sense's id (from earlier bytes).
+    fn regime_ix(&self) -> usize {
+        self.regime_s.as_ref().map_or(0, |r| (r.id + 1) as usize)
+    }
+    /// The lane of byte t: its offset modulo 8 from its file's start when file starts are known, else t mod 8.
+    fn lane(&self, t: usize) -> usize {
+        let k = self.file_starts.partition_point(|&x| x <= t);
+        if k == 0 { t % 8 } else { (t - self.file_starts[k - 1]) % 8 }
+    }
+    /// --stride-act: code byte t (its cost so far `prev` bits, after the floor and the copy act) through a mixture
+    /// of that code, the stride act's offer and a uniform guess, per context (the act's offer context by regime).
+    fn stride_code(&mut self, t: usize, prev: f64) -> f64 {
+        const SH: f64 = 1.0 / 1000.0;
+        let nr = self.cfg.regime.map_or(1, |(_, k)| k + 1);
+        if self.stride.is_none() {
+            self.stride = Some(crate::acts::StrideAct::new(17 * nr));
+        }
+        let lane = self.lane(t);
+        let r = self.regime_ix();
+        let y = self.data[t];
+        let st = self.stride.as_mut().unwrap();
+        let (offer, c) = st.offer(&self.data, t, lane);
+        let ctx = c + 17 * r;
+        let u = 1.0 / 256.0;
+        let ps = match offer {
+            Some(o) => {
+                let tr = st.trust(ctx);
+                if o == y { tr } else { (1.0 - tr) / 255.0 }
+            }
+            None => u,
+        };
+        let pk = [(-prev).exp2(), ps, u];
+        let w = st.mw[ctx];
+        let p: f64 = w.iter().zip(&pk).map(|(a, b)| a * b).sum();
+        let mut nw = [0.0; 3];
+        for i in 0..3 {
+            nw[i] = w[i] * pk[i] / p;
+        }
+        for i in 0..3 {
+            nw[i] = (1.0 - SH) * nw[i] + SH * (1.0 - nw[i]) / 2.0;
+        }
+        st.mw[ctx] = nw;
+        st.learn(&self.data, t, lane, y, ctx);
+        -p.log2()
+    }
     /// --floor: code a tick whose raw cost is `raw` bits through the switching mixture over uniform weights,
     /// then update the mixture (prequential: the weights used come from the ticks before).
     fn floor_code(&mut self, raw: f64) -> f64 {
@@ -3276,6 +3363,13 @@ impl Brain {
         const SHARE: f64 = 1.0 / 1000.0;
         if self.floor_w.is_empty() {
             self.floor_w = vec![1.0 / L.len() as f64; L.len()];
+        }
+        if self.cfg.regime.is_some() {
+            let r = self.regime_ix();
+            std::mem::swap(&mut self.floor_w, &mut self.floor_wr[r]);
+            if self.floor_w.is_empty() {
+                self.floor_w = vec![1.0 / L.len() as f64; L.len()];
+            }
         }
         let pm = (-raw).exp2();
         let u = 1.0 / self.vocab as f64;
@@ -3289,6 +3383,10 @@ impl Brain {
         for w in self.floor_w.iter_mut() {
             let x = *w / tot;
             *w = (1.0 - SHARE) * x + SHARE * (1.0 - x) / (k - 1.0);
+        }
+        if self.cfg.regime.is_some() {
+            let r = self.regime_ix();
+            std::mem::swap(&mut self.floor_w, &mut self.floor_wr[r]);
         }
         -p.log2()
     }

@@ -10,7 +10,9 @@
 //! - [`brain`]: nodes, the tick loop and the growth controller for a byte stream.
 //! - [`baseline`]: online Witten-Bell n-gram model, the yardstick for text runs.
 //! - [`stack`]: levels of brains, each over the chunks of the level below.
+//! - [`acts`]: the stride act and the regime sense beside the byte brain.
 //! - [`meaning`]: meaning codes learned from co-occurrence, story state, fast mapping and working memory.
+pub mod acts;
 pub mod area;
 pub mod assoc;
 pub mod baseline;

@@ -429,6 +429,11 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.prune_harmful = flag(args, "--prune-harmful");
     c.gc_old_parts = flag(args, "--gc-old-parts");
     c.copy_act = flag(args, "--copy-act");
+    c.stride_act = flag(args, "--stride-act");
+    if let Some(x) = arg(args, "--regime") {
+        let (w, k) = x.split_once(',').unwrap();
+        c.regime = Some((w.parse().unwrap(), k.parse().unwrap()));
+    }
     if let Some(x) = arg(args, "--map-cap") {
         c.map_cap = x.parse().unwrap();
     }
@@ -721,6 +726,9 @@ fn main() {
                 v.dedup();
                 st.levels[0].set_file_starts(v);
             }
+            if st.levels[0].cfg.regime.is_some() {
+                st.levels[0].add_regime_node();
+            }
             if let Some(u) = arg(&args, "--upper") {
                 // the upper flags come first, so they win over the shared ones (the first occurrence counts)
                 let mut ua: Vec<String> = args[..2].to_vec();
@@ -774,6 +782,12 @@ fn main() {
                     .map(|&e| b.nodes[b.slab_src(e)].name.clone())
                     .collect();
                 rep += &format!("  kept: {}\n", kept.join(" "));
+                if let Some(c) = b.stride_report() {
+                    rep += &format!("  stride act: {} offers, {} right ({:.1}%)\n", c[0], c[1], 100.0 * c[1] as f64 / c[0].max(1) as f64);
+                }
+                if let Some(r) = b.regime_report() {
+                    rep += &format!("  regimes: {} ({:?} windows)\n", r.len(), r);
+                }
                 if b.cfg.copy_act {
                     let c = b.copy_stats;
                     rep += &format!("  copy act: {} offers, {} right ({:.1}%), {} seeks that found a match\n", c[0], c[1], 100.0 * c[1] as f64 / c[0].max(1) as f64, c[2]);
