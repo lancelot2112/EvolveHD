@@ -1,6 +1,6 @@
 # 61 · A position sense, and pretraining on primitive encodings (2026-10-28)
 
-*[All experiments](README.md)* · [← 60](60-descriptions-before-files.md)
+*[All experiments](README.md)* · [← 60](60-descriptions-before-files.md) · [62 →](62-stride-act-and-regime.md)
 
 **The owner's plan:**
 1. Give the byte brain a position sense.
