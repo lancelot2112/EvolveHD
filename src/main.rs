@@ -426,6 +426,7 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.screen_mix = flag(args, "--screen-mix");
     c.floor = flag(args, "--floor");
     c.prune_guard = flag(args, "--prune-guard");
+    c.prune_harmful = flag(args, "--prune-harmful");
     c.copy_act = flag(args, "--copy-act");
     if let Some(x) = arg(args, "--map-cap") {
         c.map_cap = x.parse().unwrap();

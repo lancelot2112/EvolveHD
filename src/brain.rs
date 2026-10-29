@@ -52,6 +52,10 @@ pub struct Cfg {
     /// (raw bits per tick above log2(vocab)): nothing predicts there, so the window says nothing about the edge.
     /// Its window starts again instead.
     pub prune_guard: bool,
+    /// --prune-harmful: a kept edge is pruned only when it does harm over its window (mean gain below zero, and
+    /// clearly: z below -1), not merely when it does too little. In mixed material an edge may only help in some
+    /// kinds of bytes; it then does little on average without doing harm.
+    pub prune_harmful: bool,
     /// --map-cap N: a cell's byte counts (the map from the cell that matched to the byte it stood for) are halved
     /// together once they pass N, so a stretch of other material can't fix the map for good (0: never).
     pub map_cap: u32,
@@ -202,6 +206,7 @@ impl Default for Cfg {
             eps: 0.002,
             floor: false,
             prune_guard: false,
+            prune_harmful: false,
             map_cap: 0,
             map_two: 0,
             copy_act: false,
@@ -2476,7 +2481,7 @@ impl Brain {
                         b: None,
                         v: Some(m),
                     });
-                } else if m < c.prune_gain || z < 1.0 {
+                } else if if c.prune_harmful { m < 0.0 && z < -1.0 } else { m < c.prune_gain || z < 1.0 } {
                     self.kept.retain(|&x| x != e);
                     self.backoff.insert(k.clone(), (t + 10000, 10000));
                     self.events.push(Event {
@@ -3023,7 +3028,8 @@ impl Brain {
         }
         for n in self.derived.clone() {
             let nd = &self.nodes[n];
-            if !used.contains(&n) && self.tried.contains(&nd.name) && t - nd.born > 15000 {
+            // the position nodes are senses, not learned structure: never collected
+            if !used.contains(&n) && self.tried.contains(&nd.name) && t - nd.born > 15000 && !matches!(nd.kind, Kind::Pos(..)) {
                 let (name, kind) = (nd.name.clone(), nd.kind.label().to_string());
                 self.derived.retain(|&x| x != n);
                 self.by_name.remove(&name);
