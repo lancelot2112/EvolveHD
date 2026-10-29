@@ -1,6 +1,6 @@
 # 62 · Value operators (a stride act) and recall by kind of material (a regime sense) (2026-10-29)
 
-*[All experiments](README.md)* · [← 61](61-position-sense-and-primitives.md)
+*[All experiments](README.md)* · [← 61](61-position-sense-and-primitives.md) · [63 →](63-regime-forms-wide-steps-desc-in-stack.md)
 
 **The question:** experiment 61 left two untested explanations for why pretraining on primitive encodings didn't transfer:
 1. the byte brain can't represent values (differences, repeats at a stride);
