@@ -1,6 +1,6 @@
 # 60 · Descriptions before files: can a reader use a format's description to decode it? (2026-10-28)
 
-*[All experiments](README.md)* · [← 59](59-copy-act.md)
+*[All experiments](README.md)* · [← 59](59-copy-act.md) · [61 →](61-position-sense-and-primitives.md)
 
 **The owner's question:** what would let a reader connect a manual to its files and use what the manual says when decoding? Experiment 59 found that a real manual (ELF) read before an ELF file is worth nothing to the byte brain.
 
