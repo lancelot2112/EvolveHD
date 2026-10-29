@@ -17,7 +17,11 @@ Here we build a piece for each and test them.
 - **The regime sense helps the brain hold many kinds of material, and costs on some files.** It works only as a node the brain builds on: as context for the output mixtures alone it changes nothing (3.033 against 3.034).
   - **After primitives:** on this build the brain alone collapses while reading them (kept edges 9 → 2, a single learned edge left), and reads the test files at 3.31 bits per byte (with the stride act). With the regime node it keeps 5–9 edges throughout, and reads them at 3.05.
   - **With nothing before:** the brain builds 5 of its 7 learned edges on the regime. The second book (+0.15) and the second JSON file (+0.10) get worse. Whole stream 3.045 against 3.034 without it.
-  - **A confound, found by the check:** adding the regime node draws a seed from the brain's shared random generator, so every later bind and chunk node gets different random codes. The regime runs are therefore different brains for a second reason, and primitive runs swing a lot by themselves (3.09–3.37 between builds). At the end of the primitive runs with the regime node, no kept edge involves the regime. A seed study (below) is being run to separate the two.
+  - **A confound, found by the check:** adding the regime node draws a seed from the brain's shared random generator, so every later bind and chunk node gets different random codes. The regime runs are therefore different brains for a second reason, and primitive runs swing a lot by themselves (3.09–3.37 between builds). At the end of the primitive runs with the regime node, no kept edge involves the regime.
+- **The seed study settles part of it** (three seeds each, stride act on, with and without the regime node):
+  - **After primitives the regime node makes the brain robust:** 3.047 / 3.019 / 3.034 bits per byte (mean 3.033), against 3.314 / 3.223 / 3.058 without (mean 3.198). Without it, one seed collapses (2 kept edges at the end), one partly (4) and one doesn't (5). With it, all three end with 6.
+  - **With nothing before it makes no difference overall:** mean 3.043 against 3.041. It costs the second book in two of three seeds (+0.13 to +0.15) and not in the third.
+  - **Primitives against nothing,** with the regime node: 3.033 against 3.043. They are about equal; the seeds overlap.
 - **Primitive pretraining still doesn't transfer:** the best run after primitives (3.047) equals the test stream alone (3.034–3.045). The stride act needs no pretraining: its predictors score themselves in a few bytes, so primitives have nothing to teach it.
 - **The best so far, with English that excludes the test books, is English first with both pieces:** 2.919 bits per byte on the test stream (xz in the stream 2.894; order-4 counts 3.658). Experiment 61's first English control, which held test-book passages, reached 2.893 with harm-only pruning.
 - **On the made-up formats both pieces do little.** Files without a description: 3.658 → 3.651; with the right one 3.494 → 3.458, with a wrong one 3.586 → 3.547. Magic bytes gain (0.26 with the right description, 0.48 with a wrong one); count and version without a description get worse (0.17 and 0.16). Values are random numbers under 1,000 and counts random 3–12, so there is little for strides to predict.
@@ -93,6 +97,21 @@ The base and stride runs end with a single learned edge (byte@2).
 - **The primitive runs vary a lot between builds,** with the same streams and flags but small code changes: 3.336 (`sit-61a`), 3.088 (`sit-61b`), 3.368 (`sit-61c`). Two of the three collapsed. Single runs of this test should be read with that in mind.
 - **After English, the regime sense helps the second book** (3.52 → 3.36) and the second JSON file (1.58 → 1.48), and costs the first book a little (2.11 → 2.14). It was the other way round with nothing before.
 
+## The seed study (stride act on; `--seed 1`, `--seed 2` and the default)
+
+`runs/exp61/seeds62.sh`, binary `sit-62b`.
+
+| | Seeds (default / 1 / 2) | Mean |
+|---|---|---|
+| Nothing before, no regime | 3.034 / 3.051 / 3.038 | 3.041 |
+| Nothing before, regime node | 3.045 / 3.040 / 3.045 | 3.043 |
+| Primitives before, no regime | 3.314 / 3.223 / 3.058 | 3.198 |
+| Primitives before, regime node | 3.047 / 3.019 / 3.034 | 3.033 |
+
+- **Kept edges at the end:** primitives without the regime 2 / 4 / 5; with it 6 / 6 / 6. Nothing before: 6 / 8 / 5 without, 6 / 5 / 5 with.
+- **Second book, nothing before:** 3.414 / 3.350 / 3.430 without the regime, 3.564 / 3.437 / 3.562 with it.
+- **Second JSON file:** 1.497 / 1.515 / 1.524 without the regime, 1.595 / 1.504 / 1.543 with it.
+
 ## The made-up formats (experiment 60's `fmt2`, brain alone, position sense)
 
 | File bytes | Base (`sit-62a`) | + both |
@@ -115,7 +134,7 @@ The stride act made 574,857 offers, 13.2% right.
 ## What this means
 
 - **Value operators belong in the reader as acts.** "The byte k back" and "the byte k back plus its last change" close the first ELF file's gap to xz and about half of the second's. Their scores reach the offer threshold after one right guess, so they need little pretraining. Their trust counts and mixture weights do carry over, and the act gained slightly more after primitives (0.054) than with nothing before (0.045), but on a collapsed brain. What primitives could still teach is what the act can't do: carries across bytes, a value seen in two forms, numbers that are not near the last one.
-- **Recall by kind is not settled yet.** With the regime node the brain didn't collapse on primitives in this build, but the node also changes the brain's random codes, and one build without it (`sit-61b`) didn't collapse either. The seed study below decides it. If the regime holds up, two refinements to try:
+- **Recall by kind helps the brain survive mixed material.** Over three seeds, the regime node takes the run after primitives from a lottery (3.06–3.31) to a steady 3.02–3.05. How is not clear: the kept edges at the end of those runs mostly don't involve the regime, so it may protect structure while the material changes rather than carry it. It does not make primitives teach anything. Two refinements to try:
   - fewer, steadier regimes (a slower or merged clustering);
   - the regime as a gate on edges (an edge used only in the regimes where it has paid) instead of a source edges bind with.
 - **The default byte stack is now** floor, guard, two maps, copy act, stride act, position sense. Add the regime sense for mixed material.
