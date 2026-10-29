@@ -711,6 +711,14 @@ fn main() {
                     vocab,
                 )
             };
+            if let Some(fs) = arg(&args, "--file-starts") {
+                // the position sense: a text file of file start offsets (one per line, or JSON numbers anywhere)
+                let txt = std::fs::read_to_string(fs).unwrap();
+                let mut v: Vec<usize> = txt.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).map(|x| x.parse().unwrap()).collect();
+                v.sort_unstable();
+                v.dedup();
+                st.levels[0].set_file_starts(v);
+            }
             if let Some(u) = arg(&args, "--upper") {
                 // the upper flags come first, so they win over the shared ones (the first occurrence counts)
                 let mut ua: Vec<String> = args[..2].to_vec();

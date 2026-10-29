@@ -605,6 +605,10 @@ pub enum Kind {
     BindReal(Box<BindReal>),
     BindSym(Box<BindSym>),
     Distill(Box<Distill>),
+    /// The position sense: where the current byte sits in its file (the reader is told where files start, as a
+    /// reader of files knows when one is opened). m = 0: the offset from the file's start (0..31 exactly, then
+    /// one state per power of two); m > 0: the offset modulo m (alignment). Codes are drawn per state on first use.
+    Pos(Box<UpperNode>, usize),
     Taken,
 }
 
@@ -620,6 +624,7 @@ impl Kind {
             Kind::PrevWord(_) => "hold",
             Kind::PrevClass(..) => "distill",
             Kind::Upper(_) => "upper",
+            Kind::Pos(..) => "pos",
             Kind::Const(_) => "const",
             Kind::Taken => "?",
         }
@@ -709,6 +714,8 @@ pub struct Brain {
     pub bytes: bool,
     /// Top-down input: the level above's predicted next symbol, as its input cell (-1 if none).
     pub upper_state: i32,
+    /// The position sense: start offsets of the files in the stream (empty: no position nodes).
+    pub file_starts: Vec<usize>,
     pub upper: Option<usize>,
     /// After cleanup removes the upper node, it is offered again only from this tick on.
     upper_retry: usize,
@@ -918,6 +925,7 @@ impl Brain {
             vocab,
             bytes,
             upper_state: -1,
+            file_starts: vec![],
             upper: None,
             upper_retry: 0,
             recency: cfg.recency.iter().map(|&w| (w, None, 0)).collect(),
@@ -1110,6 +1118,7 @@ impl Brain {
             Kind::PrevWord(_) => self.code_of(self.nodes[n].parts[0], c as i32),
             Kind::PrevClass(k, _) => k.codes[c],
             Kind::Upper(u) => u.codes[c],
+            Kind::Pos(u, _) => u.codes[c],
             Kind::Const(code) => *code,
             Kind::Taken => unreachable!(),
         }
@@ -1129,6 +1138,7 @@ impl Brain {
             | Kind::ChunkSym(..)
             | Kind::PrevClass(..)
             | Kind::Upper(_)
+            | Kind::Pos(..)
             | Kind::Const(_) => 1,
             Kind::ChunkReal(k, _) => k.pool.gen[c],
             Kind::PrevWord(_) => self.gen_of(self.nodes[n].parts[0], c as i32),
@@ -2059,6 +2069,39 @@ impl Brain {
         None
     }
 
+    /// The position sense: the files' start offsets (sorted). Adds the position nodes (offset from the start, and
+    /// offset modulo 2, 4, 8 and 16) as candidates like any other derived node.
+    pub fn set_file_starts(&mut self, starts: Vec<usize>) {
+        self.file_starts = starts;
+        for m in [0usize, 2, 4, 8, 16] {
+            let seed = self.rng.next_u64();
+            let name = if m == 0 { "pos".to_string() } else { format!("pos%{m}") };
+            let nd = self.new_node(name, Kind::Pos(Box::new(UpperNode { codes: vec![], rng: Rng::new(seed) }), m), vec![], String::new());
+            self.add(nd, "the position sense".into());
+        }
+    }
+    /// The state of position node i for the byte that will arrive after tick t (the prediction for t + 1), or -1
+    /// before the first file starts.
+    fn pos_state(&self, i: usize, t: usize) -> i32 {
+        let m = match &self.nodes[i].kind {
+            Kind::Pos(_, m) => *m,
+            _ => unreachable!(),
+        };
+        let next = t + 1;
+        let k = self.file_starts.partition_point(|&x| x <= next);
+        if k == 0 {
+            return -1;
+        }
+        let off = next - self.file_starts[k - 1];
+        if m > 0 {
+            (off % m) as i32
+        } else if off < 32 {
+            off as i32
+        } else {
+            (32 + (usize::BITS - off.leading_zeros()) as usize - 6) as i32
+        }
+    }
+
     /// Add the top-down node: the level above's predicted next symbol.
     pub fn add_upper(&mut self) {
         if self.upper.is_some() || self.t < self.upper_retry {
@@ -2191,6 +2234,16 @@ impl Brain {
             Kind::Upper(_) => {
                 let s = self.upper_state;
                 if let Kind::Upper(u) = &mut self.nodes[i].kind {
+                    while s >= 0 && u.codes.len() <= s as usize {
+                        let c = bits::rand_code(&mut u.rng);
+                        u.codes.push(c);
+                    }
+                }
+                s
+            }
+            Kind::Pos(..) => {
+                let s = self.pos_state(i, t);
+                if let Kind::Pos(u, _) = &mut self.nodes[i].kind {
                     while s >= 0 && u.codes.len() <= s as usize {
                         let c = bits::rand_code(&mut u.rng);
                         u.codes.push(c);
