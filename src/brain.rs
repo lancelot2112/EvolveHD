@@ -78,8 +78,8 @@ pub struct Cfg {
     /// byte k back, or the byte k back plus its last change, for strides k from 1 to 1024, chosen per lane.
     pub stride_act: bool,
     /// --regime W,K: the regime sense (see `acts::Regime`): which of up to K learned kinds of material the last W
-    /// bytes are. It is offered as a node (a sense, never collected) and is part of the context of every output
-    /// mixture (floor, copy act, stride act).
+    /// bytes are. It is offered as a node (a sense, never collected; not with --regime-no-node) and is part of
+    /// the context of every output mixture (floor, copy act, stride act).
     pub regime: Option<(usize, usize)>,
     pub bind_cap: usize,
     pub hebb: f64,

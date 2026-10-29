@@ -726,7 +726,7 @@ fn main() {
                 v.dedup();
                 st.levels[0].set_file_starts(v);
             }
-            if st.levels[0].cfg.regime.is_some() {
+            if st.levels[0].cfg.regime.is_some() && !flag(&args, "--regime-no-node") {
                 st.levels[0].add_regime_node();
             }
             if let Some(u) = arg(&args, "--upper") {
