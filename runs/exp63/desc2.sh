@@ -12,3 +12,4 @@ printf '%s\n' "oracle|--desc-expert --desc-oracle runs/exp60/fmt2.descs" "regbas
 # Exp 65, the role gate (binary sit-65a):
 #   B=runs/exp36/sit-65a fm role --desc-expert --desc-role
 #   B=runs/exp36/sit-65b fm rolec --desc-expert --desc-role --desc-role-contrast   (ROLE_DUMP=1 for decisions)
+#   B=runs/exp36/sit-65c fm rolec2 --desc-expert --desc-role --desc-role-contrast   (a decoy with no known tokens costed by the background alone)

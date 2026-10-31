@@ -256,8 +256,11 @@ impl DescExpert {
         let toks = self.known_tokens(d);
         let m = toks.len();
         let u = 1.0 / 256.0;
+        let bgs0: f64 = self.bg.iter().sum();
         if m == 0 {
-            return bytes.len() as f64 * 8.0;
+            // no known tokens: the background alone (so a decoy with nothing to say is not charged more than the
+            // background would cost)
+            return bytes.iter().map(|&y| -(self.bg[y as usize] / bgs0).log2()).sum();
         }
         let s0: f64 = self.start[..m].iter().sum();
         let mut belief: Vec<f64> = self.start[..m].iter().map(|x| x / s0).collect();
