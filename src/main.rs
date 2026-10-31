@@ -436,6 +436,9 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.desc_learn_trust = flag(args, "--desc-learn-trust");
     c.desc_role = flag(args, "--desc-role");
     c.desc_role_contrast = flag(args, "--desc-role-contrast");
+    if let Some(v) = arg(args, "--desc-role-null") {
+        c.desc_role_null = v.parse().expect("--desc-role-null 1|2");
+    }
     c.regime_gate = flag(args, "--regime-gate");
     if let Some(x) = arg(args, "--regime-thr") {
         c.regime_thr = x.parse().unwrap();

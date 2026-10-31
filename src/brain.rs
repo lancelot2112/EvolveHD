@@ -95,6 +95,9 @@ pub struct Cfg {
     /// --desc-role-contrast: the role gate's teacher is contrastive: the previous segment must explain the next
     /// segment's first 16 bytes at least 2 bits better than a decoy segment (three segments back) does.
     pub desc_role_contrast: bool,
+    /// --desc-role-null N: the contrast is against no description (the background alone): 1 = instead of the decoy,
+    /// 2 = the previous segment must beat both the decoy and the background.
+    pub desc_role_null: u8,
     /// --regime W,K: the regime sense (see `acts::Regime`): which of up to K learned kinds of material the last W
     /// bytes are. It is offered as a node (a sense, never collected; not with --regime-no-node) and is part of
     /// the context of every output mixture (floor, copy act, stride act).
@@ -252,6 +255,7 @@ impl Default for Cfg {
             desc_learn_trust: false,
             desc_role: false,
             desc_role_contrast: false,
+            desc_role_null: 0,
             regime: None,
             regime_thr: 0.6,
             regime_gate: false,
@@ -3537,7 +3541,15 @@ impl Brain {
                     let bytes = &self.data[seg..=t];
                     let c_prev = de.shadow_cost(&self.data[p1..seg], bytes);
                     let c_dec = dec.map_or(16.0 * 8.0, |(a, b)| de.shadow_cost(&self.data[a..b], bytes));
-                    self.role.as_mut().unwrap().teach(c_dec - c_prev > 2.0);
+                    // --desc-role-null: a wrong description predicts wrong bytes, so beating a decoy can mean only
+                    // "less wrong"; against the background alone the segment must actually say something right
+                    let c_null = de.shadow_cost(&[], bytes);
+                    let c_ref = match self.cfg.desc_role_null {
+                        1 => c_null,
+                        2 => c_dec.min(c_null),
+                        _ => c_dec,
+                    };
+                    self.role.as_mut().unwrap().teach(c_ref - c_prev > 2.0);
                 }
             } else {
                 self.role.as_mut().unwrap().observe(prev + p.log2());
