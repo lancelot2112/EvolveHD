@@ -9,3 +9,5 @@ printf '%s\n' "oracle|--desc-expert --desc-oracle runs/exp60/fmt2.descs" "regbas
 # The two learning-by-trust runs (binary sit-64b):
 #   B=runs/exp36/sit-64b fm lt --regime 128,16 --regime-no-node --desc-expert --desc-ctx-regime --desc-learn-trust
 #   B=runs/exp36/sit-64b fm lt0 --desc-expert --desc-learn-trust
+# Exp 65, the role gate (binary sit-65a):
+#   B=runs/exp36/sit-65a fm role --desc-expert --desc-role

@@ -89,6 +89,9 @@ pub struct Cfg {
     /// --desc-learn-trust: the description expert learns from a byte in proportion to the mixture's weight on it
     /// (three times the weight, at most 1; the weights start at a third, so it starts at the full rate).
     pub desc_learn_trust: bool,
+    /// --desc-role: a role gate (see `acts::RoleGate`) decides from the previous segment's words whether it is a
+    /// description, taught by the expert's shadow gain on the next segment.
+    pub desc_role: bool,
     /// --regime W,K: the regime sense (see `acts::Regime`): which of up to K learned kinds of material the last W
     /// bytes are. It is offered as a node (a sense, never collected; not with --regime-no-node) and is part of
     /// the context of every output mixture (floor, copy act, stride act).
@@ -244,6 +247,7 @@ impl Default for Cfg {
             desc_expert: false,
             desc_ctx_regime: false,
             desc_learn_trust: false,
+            desc_role: false,
             regime: None,
             regime_thr: 0.6,
             regime_gate: false,
@@ -833,6 +837,8 @@ pub struct Brain {
     desc_seg_at: usize,
     desc_seg_r: usize,
     desc_prev_ctx: usize,
+    role: Option<crate::acts::RoleGate>,
+    desc_role_at: usize,
     /// --desc-expert: the expert's own cost per byte (for scoring), from the first file start on.
     pub desc_bits: Option<Vec<f32>>,
     regime_s: Option<crate::acts::Regime>,
@@ -1039,6 +1045,8 @@ impl Brain {
             desc_seg_at: usize::MAX,
             desc_seg_r: 0,
             desc_prev_ctx: usize::MAX,
+            role: None,
+            desc_role_at: usize::MAX,
             desc_bits: if cfg.desc_expert { Some(vec![]) } else { None },
             floor_wr: cfg.regime.map(|(_, k)| vec![vec![]; k + 1]).unwrap_or_default(),
             copy_hist: 0,
@@ -2205,6 +2213,10 @@ impl Brain {
     /// The regime sense's report: (regimes, windows assigned to each).
     pub fn regime_report(&self) -> Option<Vec<u64>> {
         self.regime_s.as_ref().map(|r| r.sizes.clone())
+    }
+    /// --desc-role: the role gate's counts (Go, NoGo, segments taught as descriptions, mistakes).
+    pub fn role_report(&self) -> Option<[u64; 4]> {
+        self.role.as_ref().map(|r| r.stats)
     }
     /// The stride act's counts: (offers, right).
     pub fn stride_report(&self) -> Option<[u64; 3]> {
@@ -3464,6 +3476,21 @@ impl Brain {
             self.desc = Some(crate::acts::DescExpert::new());
         }
         let rr = if self.cfg.desc_ctx_regime { self.desc_seg_r } else { 0 };
+        // --desc-role: at each new segment the role gate decides from the previous segment's words whether it is
+        // this segment's description; NoGo: the expert neither learns from nor is used on this segment, but its
+        // shadow gain still teaches the gate
+        let mut role_go = true;
+        if self.cfg.desc_role {
+            if self.role.is_none() {
+                self.role = Some(crate::acts::RoleGate::new());
+            }
+            if self.desc_role_at != seg {
+                self.desc_role_at = seg;
+                let d = pv.map(|p| &self.data[p..seg]);
+                self.role.as_mut().unwrap().begin(d);
+            }
+            role_go = self.role.as_ref().unwrap().go();
+        }
         let de = self.desc.as_mut().unwrap();
         // --desc-learn-trust: the expert learns from this byte in proportion to the mixture's weight on it in the
         // context of the byte before (credit from the level above: where the mixture has learned to ignore the
@@ -3474,6 +3501,7 @@ impl Brain {
             1.0
         };
         // the context uses the confidence before this byte, from the bytes before it
+        let lr = if role_go { lr } else { 0.0 };
         let pdx = de.code_w(&self.data, t, seg, pv, lr);
         let ctx = de.off.min(8) * 4 + ((de.conf * 4.0) as usize).min(3) + 36 * rr;
         self.desc_prev_ctx = ctx;
@@ -3490,10 +3518,17 @@ impl Brain {
         for i in 0..3 {
             nw[i] = (1.0 - SH) * nw[i] + SH * (1.0 - nw[i]) / 2.0;
         }
-        de.mw[ctx] = nw;
         if let Some(e) = self.desc_bits.as_mut() {
             e.push(-pdx.log2() as f32);
         }
+        if self.cfg.desc_role {
+            // the shadow gain teaches the gate; with NoGo the mixture neither learns nor is used
+            self.role.as_mut().unwrap().observe(prev + p.log2());
+            if !role_go {
+                return prev;
+            }
+        }
+        self.desc.as_mut().unwrap().mw[ctx] = nw;
         -p.log2()
     }
     /// --floor: code a tick whose raw cost is `raw` bits through the switching mixture over uniform weights,

@@ -316,3 +316,83 @@ impl DescExpert {
         pb
     }
 }
+
+/// The role gate for the description expert (--desc-role): a Go/NoGo learner, like the word reader's act gate,
+/// that decides from a segment's words whether the segment describes the one after it. Its features are the
+/// segment's tokens (hashed, present or not), a bias and the segment's length (in powers of two); its weights are
+/// small integers, changed by one on a mistake (perceptron). Its teacher is the level above: over the first 16
+/// bytes of the next segment, the expert's shadow gain (the cost of the code before the expert stage minus the cost
+/// with it, whether or not it was used). A segment whose next 16 bytes gained more than 1 bit in all is a
+/// description. Ties go to Go, so at first everything is read as a description (as before) and the gate learns to
+/// say NoGo where that doesn't pay.
+pub struct RoleGate {
+    w: Vec<i32>,
+    feats: Vec<usize>,
+    go: bool,
+    acc: f64,
+    n: usize,
+    pub stats: [u64; 4],
+}
+
+impl RoleGate {
+    const NF: usize = 4096;
+    pub fn new() -> Self {
+        RoleGate { w: vec![0; Self::NF], feats: vec![], go: true, acc: 0.0, n: 0, stats: [0; 4] }
+    }
+    fn h(x: &[u8], salt: u64) -> usize {
+        let mut v: u64 = 0xcbf29ce484222325 ^ salt;
+        for &b in x {
+            v = (v ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+        (v % Self::NF as u64) as usize
+    }
+    /// A new segment starts; `desc` is the segment before it (None: none). Returns Go (read it as a description).
+    pub fn begin(&mut self, desc: Option<&[u8]>) -> bool {
+        self.feats.clear();
+        self.acc = 0.0;
+        self.n = 0;
+        let Some(d) = desc else {
+            self.go = false;
+            return false;
+        };
+        self.feats.push(Self::h(b"bias", 1));
+        self.feats.push(Self::h(&[(usize::BITS - d.len().leading_zeros()) as u8], 2));
+        for w in d.split(|&b| b == b' ' || b == b'\n' || b == b'\t' || b == b'\r') {
+            if !w.is_empty() && w.len() <= 32 {
+                let f = Self::h(w, 3);
+                if !self.feats.contains(&f) {
+                    self.feats.push(f);
+                }
+            }
+            if self.feats.len() >= 66 {
+                break;
+            }
+        }
+        self.go = self.feats.iter().map(|&f| self.w[f]).sum::<i32>() >= 0;
+        self.stats[if self.go { 0 } else { 1 }] += 1;
+        self.go
+    }
+    pub fn go(&self) -> bool {
+        self.go
+    }
+    /// The expert's shadow gain on one byte of the segment (bits); after 16 bytes, the gate is taught.
+    pub fn observe(&mut self, gain: f64) {
+        if self.feats.is_empty() || self.n >= 16 {
+            return;
+        }
+        self.acc += gain;
+        self.n += 1;
+        if self.n == 16 {
+            let label = self.acc > 1.0;
+            if label {
+                self.stats[2] += 1;
+            }
+            if label != self.go {
+                self.stats[3] += 1;
+                for &f in &self.feats {
+                    self.w[f] += if label { 1 } else { -1 };
+                }
+            }
+        }
+    }
+}

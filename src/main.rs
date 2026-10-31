@@ -434,6 +434,7 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.desc_expert = flag(args, "--desc-expert");
     c.desc_ctx_regime = flag(args, "--desc-ctx-regime");
     c.desc_learn_trust = flag(args, "--desc-learn-trust");
+    c.desc_role = flag(args, "--desc-role");
     c.regime_gate = flag(args, "--regime-gate");
     if let Some(x) = arg(args, "--regime-thr") {
         c.regime_thr = x.parse().unwrap();
@@ -802,6 +803,9 @@ fn main() {
                     .map(|&e| b.nodes[b.slab_src(e)].name.clone())
                     .collect();
                 rep += &format!("  kept: {}\n", kept.join(" "));
+                if let Some(c) = b.role_report() {
+                    rep += &format!("  role gate: {} Go, {} NoGo, {} taught as descriptions, {} mistakes\n", c[0], c[1], c[2], c[3]);
+                }
                 if let Some(c) = b.stride_report() {
                     rep += &format!("  stride act: {} offers, {} right ({:.1}%)\n", c[0], c[1], 100.0 * c[1] as f64 / c[0].max(1) as f64);
                 }
