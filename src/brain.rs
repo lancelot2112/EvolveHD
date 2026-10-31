@@ -92,6 +92,9 @@ pub struct Cfg {
     /// --desc-role: a role gate (see `acts::RoleGate`) decides from the previous segment's words whether it is a
     /// description, taught by the expert's shadow gain on the next segment.
     pub desc_role: bool,
+    /// --desc-role-contrast: the role gate's teacher is contrastive: the previous segment must explain the next
+    /// segment's first 16 bytes at least 2 bits better than a decoy segment (three segments back) does.
+    pub desc_role_contrast: bool,
     /// --regime W,K: the regime sense (see `acts::Regime`): which of up to K learned kinds of material the last W
     /// bytes are. It is offered as a node (a sense, never collected; not with --regime-no-node) and is part of
     /// the context of every output mixture (floor, copy act, stride act).
@@ -248,6 +251,7 @@ impl Default for Cfg {
             desc_ctx_regime: false,
             desc_learn_trust: false,
             desc_role: false,
+            desc_role_contrast: false,
             regime: None,
             regime_thr: 0.6,
             regime_gate: false,
@@ -3523,7 +3527,21 @@ impl Brain {
         }
         if self.cfg.desc_role {
             // the shadow gain teaches the gate; with NoGo the mixture neither learns nor is used
-            self.role.as_mut().unwrap().observe(prev + p.log2());
+            if self.cfg.desc_role_contrast {
+                // contrastive teacher: once 16 bytes of the segment are known, compare how well the previous segment
+                // explains them against a decoy (the segment three before), with the expert's tables read-only
+                if t == seg + 15 && k >= 2 {
+                    let p1 = self.file_starts[k - 2];
+                    let dec = if k >= 4 { Some((self.file_starts[k - 4], self.file_starts[k - 3])) } else { None };
+                    let de = self.desc.as_ref().unwrap();
+                    let bytes = &self.data[seg..=t];
+                    let c_prev = de.shadow_cost(&self.data[p1..seg], bytes);
+                    let c_dec = dec.map_or(16.0 * 8.0, |(a, b)| de.shadow_cost(&self.data[a..b], bytes));
+                    self.role.as_mut().unwrap().teach(c_dec - c_prev > 2.0);
+                }
+            } else {
+                self.role.as_mut().unwrap().observe(prev + p.log2());
+            }
             if !role_go {
                 return prev;
             }

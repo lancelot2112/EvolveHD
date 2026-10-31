@@ -233,6 +233,67 @@ impl DescExpert {
         self.belief = self.start[..m].iter().map(|x| x / s.max(1e-12)).collect();
         self.off = 0;
     }
+    /// Tokens of a segment, without adding new ones to the vocabulary (unknown tokens are skipped).
+    fn known_tokens(&self, d: &[u8]) -> Vec<usize> {
+        let mut v = vec![];
+        for w in d.split(|&b| b == b' ' || b == b'\n' || b == b'\t' || b == b'\r') {
+            let mut w = w;
+            while let Some((&l, rest)) = w.split_last() {
+                if l == b'.' || l == b',' || l == b':' { w = rest } else { break }
+            }
+            if let Some(&id) = self.vocab.get(w) {
+                v.push(id);
+            }
+            if v.len() == 64 {
+                break;
+            }
+        }
+        v
+    }
+    /// --desc-role-contrast: the cost (bits) of `bytes` read with segment `d` as their description, using the
+    /// learned tables read-only (start, jumps, emissions, background, shares; no learning).
+    pub fn shadow_cost(&self, d: &[u8], bytes: &[u8]) -> f64 {
+        let toks = self.known_tokens(d);
+        let m = toks.len();
+        let u = 1.0 / 256.0;
+        if m == 0 {
+            return bytes.len() as f64 * 8.0;
+        }
+        let s0: f64 = self.start[..m].iter().sum();
+        let mut belief: Vec<f64> = self.start[..m].iter().map(|x| x / s0).collect();
+        let jt: f64 = self.jumps.iter().sum();
+        let bgs: f64 = self.bg.iter().sum();
+        let rows: Vec<f64> = toks.iter().map(|&w| self.emit[w].iter().sum()).collect();
+        let mut cost = 0.0;
+        for (k, &y) in bytes.iter().enumerate() {
+            if k > 0 {
+                let mut nb = vec![0.0; m];
+                for (di, &pj) in self.jumps.iter().enumerate() {
+                    let dd = di as isize - 16;
+                    for i in 0..m {
+                        let j = i as isize + dd;
+                        if j >= 0 && (j as usize) < m {
+                            nb[j as usize] += pj / jt * belief[i];
+                        }
+                    }
+                }
+                let s: f64 = nb.iter().sum();
+                belief = if s > 0.0 { nb.iter().map(|x| x / s).collect() } else { vec![1.0 / m as f64; m] };
+            }
+            let y = y as usize;
+            let pd: f64 = toks.iter().enumerate().map(|(i, &w)| belief[i] * self.emit[w][y] / rows[i]).sum();
+            let (ld, lg) = self.lam[k.min(8)];
+            let lam = lg / (ld + lg);
+            let pb = (1.0 - lam) * pd + lam * self.bg[y] / bgs;
+            cost -= pb.max(u * 1e-6).log2();
+            let r = (1.0 - lam) * pd / pb;
+            let mut post: Vec<f64> = toks.iter().enumerate().map(|(i, &w)| belief[i] * self.emit[w][y] / rows[i]).collect();
+            let ps: f64 = post.iter().sum();
+            post.iter_mut().for_each(|x| *x /= ps.max(1e-300));
+            belief = post.iter().zip(&belief).map(|(p, b)| r * p + (1.0 - r) * b).collect();
+        }
+        cost
+    }
     /// The probability of byte y at t (and learn from it). seg: the start of t's file; prev: the start of the file
     /// before it (None: no description).
     pub fn code(&mut self, data: &[u8], t: usize, seg: usize, prev: Option<usize>) -> f64 {
@@ -374,6 +435,25 @@ impl RoleGate {
     }
     pub fn go(&self) -> bool {
         self.go
+    }
+    /// --desc-role-contrast: teach the gate directly with a label (once per segment).
+    pub fn teach(&mut self, label: bool) {
+        if self.feats.is_empty() || self.n >= 16 {
+            return;
+        }
+        self.n = 16;
+        if label {
+            self.stats[2] += 1;
+        }
+        if std::env::var("ROLE_DUMP").is_ok() {
+            eprintln!("ROLE go={} gain={:.2} label={}", self.go as u8, 0.0, label as u8);
+        }
+        if label != self.go {
+            self.stats[3] += 1;
+            for &f in &self.feats {
+                self.w[f] += if label { 1 } else { -1 };
+            }
+        }
     }
     /// The expert's shadow gain on one byte of the segment (bits); after 16 bytes, the gate is taught.
     pub fn observe(&mut self, gain: f64) {
