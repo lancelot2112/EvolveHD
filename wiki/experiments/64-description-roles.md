@@ -4,19 +4,21 @@
 
 **The question:** in experiment 63 the description expert, moved into the stack, kept only about half of the prototype's gain. Is that because it can't tell a description from the segment before any other segment, or because of the port's other differences?
 
-**Results** (experiment 60's progressive formats stream; second half, first files of never-seen formats; one run each, same brain in every run):
+**Results** (experiment 60's progressive formats stream; magic and constant bytes: second half, first files of never-seen formats; all-file-bytes figures: the whole stream. One run each. The brain chooses the same symbols in every run, but the regime flags change its per-byte code through the floor and copy mixtures):
 - **Told which segments are descriptions, the stack's expert matches the prototype.**
   - Magic bytes, expert alone: 4.94 bits per byte with the right description, 9.04 with a wrong one, 8.00 with none. The prototype gave 5.04 / 9.02 / 8.00.
   - Mixed: 6.49 / 9.22 / 9.31 (the prototype's mixture 6.30 / 9.11 / 8.43).
   - All file bytes with the right description: 3.324 (prototype 3.300; without the oracle 3.431).
-  - **So the gap was the role:** the port's small rule differences and the base brain account for little.
+  - **So most of the gap was the role.** One run each, though the effect is large (mixed 8.83 → 6.49). The oracle changes two things at once: the expert skips descriptions, and files without one get no description.
+  - **The port's other differences matter for the expert alone very little** (4.94 against 5.04). Mixed, with no description, the oracle gives 9.31 against the prototype's 8.43, though both experts are silent there (8.00). That gap is in the mixing or the base: the prototype's base brain codes file bytes 0.056 better (3.438 against 3.494), more than the whole 3.324 against 3.300 gap.
 - **Learning its trust per regime recovers a little.**
-  - The expert's mixture context also holds the regime the bytes before the segment were in (`--desc-ctx-regime`). Magic bytes, mixed: 8.39 with the right description against 8.83 without.
-  - The expert alone is unchanged (6.78): only its trust is learned per regime, not what it learns.
-- **Learning in proportion to its trust (credit from the mixture above) trades the notation for the rest.** `--desc-learn-trust`: the expert learns from each byte in proportion to the mixture's weight on it.
-  - **Whole files improve:** all file bytes with the right description 3.431 → 3.387; first files 3.766 → 3.701; constants 8.50 → 8.09.
-  - **Magic bytes get worse:** mixed 8.39 → 9.43; expert alone 6.78 → 8.24.
-  - The mixture trusts the expert only moderately on average, so it slows all the expert's learning, including the hex notation that only pays on a few bytes.
+  - The expert's mixture context also holds the regime the bytes before the segment were in (`--desc-ctx-regime`). Magic bytes, mixed, with the right description: 8.39, against 8.69 with the regime on but not in the expert's context (and 8.83 with no regime anywhere).
+  - With no description the context costs (9.15 → 9.52). On all file bytes the gain is nil (3.433 → 3.431).
+  - The expert alone is unchanged (6.78, byte for byte): only its trust is learned per regime, not what it learns.
+- **Learning in proportion to its trust (credit from the mixture above) trades the description's specific gain for a general one.** `--desc-learn-trust`: the expert learns from each byte in proportion to the mixture's weight on it.
+  - **Whole files improve** (whole stream): all file bytes with the right description 3.431 → 3.387; first files 3.766 → 3.701. Constants of new formats (second half) 8.50 → 8.09.
+  - **The right description no longer helps the magic bytes.** Mixed with the right description 8.39 → 9.43, now no better than with a wrong one (9.38; that and no description both improve, 9.54 → 9.38 and 9.52 → 9.31). Expert alone with the right description 6.78 → 8.24. Constants with a wrong description get worse (8.10 → 8.27).
+  - **Why is a guess,** not measured: the mixture's weights weren't logged. Learning slows only where the weight falls below a third. If the mixture trusts the expert little on most bytes, it would slow the hex notation too, which pays on few bytes.
 
 ## The magic bytes of never-seen formats
 
@@ -51,7 +53,7 @@ Bits per byte, second half, first file of each new format.
 | Learning by trust, no regime | 3.413 | 3.492 | 3.635 | 3.738 |
 
 - **Description bytes:** 0.578 (no expert, and the oracle, which leaves them alone) against 0.590–0.603 for the guessing runs.
-- **With no description, the oracle is slightly worse** (3.671 against 3.624): with no description it says nothing, while the guessing expert reads something from the previous file.
+- **With no description, the oracle is slightly worse than guessing and than no expert at all** (3.671 against 3.624 and 3.658; later files 3.610 against 3.596 with no expert). It says nothing there, yet the extra mixture stage still costs; the guessing expert also reads something from the previous file.
 
 ## The rules (binaries `sit-64a`, `sit-64b`)
 
@@ -61,15 +63,15 @@ Bits per byte, second half, first file of each new format.
   - This is the prototype's setting.
 - **`--desc-ctx-regime`:** the expert's mixture context (offset × confidence) also holds the regime at the segment's start, i.e. the regime of the bytes just before it (needs `--regime`; here `--regime 128,16 --regime-no-node`).
 - **`--desc-learn-trust`:** every learning step of the expert (emissions, start, jumps, background, shares) is scaled by the mixture's weight on the expert in the previous byte's context: three times the weight, at most 1. Weights start at a third, so learning starts at the full rate.
-- **Runs:** `runs/exp63/desc2.sh` and the two learning-by-trust runs. Position sense on, stride act off. The brain is the same in every run (identical symbols).
+- **Runs:** `runs/exp63/desc2.sh` (the learning-by-trust runs are recorded at its end). Position sense on, stride act off. The brain chooses the same symbols in every run; with the regime flags its per-byte code differs through the mixtures (no-expert magic 10.73 / 10.77 / 9.90 with the regime, against 11.09 / 11.08 / 9.67).
 - **Reproduction:** `sit-64a` reproduces `sit-63c`'s expert run exactly.
 
 ## What this means
 
-- **Knowing what a description is was worth most of the gain.** With the role given, the stack reads the magic of a new format from its description as well as the prototype did.
+- **Knowing what a description is was worth most of the gain** (one run). With the role given, the stack's expert reads the magic of a new format from its description as well as the prototype's did.
 - **Neither learned substitute finds the role.**
-  - Trust per regime tunes how much to listen, not what to learn.
-  - Learning by trust slows the learning that matters most and pays least often (the notation).
+  - Trust per regime changes how much the mixture listens (by design it can't change what the expert learns), and gains 0.3 bits on the magic.
+  - Learning by trust helps whole files but loses the description-specific gain on the magic.
   - A role has to be read off the segment itself: "this is text that talks about the next thing". That is what the word reader does with questions and reports, so the role should come from it: the word reader marks a segment as a description of the next one, and the expert reads only what it marks.
 
 ## Next
