@@ -12,6 +12,8 @@ printf '%s\n' "oracle|--desc-expert --desc-oracle runs/exp60/fmt2.descs" "regbas
 # Exp 65, the role gate (binary sit-65a):
 #   B=runs/exp36/sit-65a fm role --desc-expert --desc-role
 #   B=runs/exp36/sit-65b fm rolec --desc-expert --desc-role --desc-role-contrast   (ROLE_DUMP=1 for decisions)
-#   B=runs/exp36/sit-65c fm rolec2 --desc-expert --desc-role --desc-role-contrast   (a decoy with no known tokens costed by the background alone)
+#   B=runs/exp36/sit-65c fm rolec2 --desc-expert --desc-role --desc-role-contrast   (any segment with no known tokens costed by the background)
 #   B=runs/exp36/sit-65d fm rolen --desc-expert --desc-role --desc-role-contrast --desc-role-null 1   (against the background alone)
 #   B=runs/exp36/sit-65d fm rolenb --desc-expert --desc-role --desc-role-contrast --desc-role-null 2  (must beat decoy and background)
+# fm sends stderr to .out; the ROLE dumps (runs/exp63/*_dump.txt) are the ROLE lines of runs made with ROLE_DUMP=1 and stderr kept
+# separately (fmt_*.err). role_dump.txt is from a rerun of role with the dump (counts identical to fmt_role).
