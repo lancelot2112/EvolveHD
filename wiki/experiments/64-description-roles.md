@@ -1,6 +1,6 @@
 # 64 · What a description is: an oracle, and two learned substitutes (2026-10-31)
 
-*[All experiments](README.md)* · [← 63](63-regime-forms-wide-steps-desc-in-stack.md)
+*[All experiments](README.md)* · [← 63](63-regime-forms-wide-steps-desc-in-stack.md) · [65 →](65-role-gate.md)
 
 **The question:** in experiment 63 the description expert, moved into the stack, kept only about half of the prototype's gain. Is that because it can't tell a description from the segment before any other segment, or because of the port's other differences?
 
