@@ -384,6 +384,9 @@ impl RoleGate {
         self.n += 1;
         if self.n == 16 {
             let label = self.acc > 1.0;
+            if std::env::var("ROLE_DUMP").is_ok() {
+                eprintln!("ROLE go={} gain={:.2} label={}", self.go as u8, self.acc, label as u8);
+            }
             if label {
                 self.stats[2] += 1;
             }
