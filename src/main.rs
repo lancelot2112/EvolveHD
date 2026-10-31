@@ -432,6 +432,7 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.stride_act = flag(args, "--stride-act");
     c.stride_wide = flag(args, "--stride-wide");
     c.desc_expert = flag(args, "--desc-expert");
+    c.desc_ctx_regime = flag(args, "--desc-ctx-regime");
     c.regime_gate = flag(args, "--regime-gate");
     if let Some(x) = arg(args, "--regime-thr") {
         c.regime_thr = x.parse().unwrap();
@@ -731,6 +732,13 @@ fn main() {
                 v.sort_unstable();
                 v.dedup();
                 st.levels[0].set_file_starts(v);
+            }
+            if let Some(fs) = arg(&args, "--desc-oracle") {
+                // the description expert is told which segments are descriptions (their start offsets)
+                let txt = std::fs::read_to_string(fs).unwrap();
+                let mut v: Vec<usize> = txt.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).map(|x| x.parse().unwrap()).collect();
+                v.sort_unstable();
+                st.levels[0].desc_segs = v;
             }
             if st.levels[0].cfg.regime.is_some() && !flag(&args, "--regime-no-node") {
                 st.levels[0].add_regime_node();

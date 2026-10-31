@@ -83,6 +83,9 @@ pub struct Cfg {
     /// --desc-expert: the description expert (see `acts::DescExpert`) as a last mixture stage, after the copy and
     /// stride acts (needs --copy-act and --file-starts).
     pub desc_expert: bool,
+    /// --desc-ctx-regime: the description expert's mixture context also holds the regime the bytes just before the
+    /// segment were in, so its trust is learned separately after text-like and other segments (needs --regime).
+    pub desc_ctx_regime: bool,
     /// --regime W,K: the regime sense (see `acts::Regime`): which of up to K learned kinds of material the last W
     /// bytes are. It is offered as a node (a sense, never collected; not with --regime-no-node) and is part of
     /// the context of every output mixture (floor, copy act, stride act).
@@ -236,6 +239,7 @@ impl Default for Cfg {
             stride_act: false,
             stride_wide: false,
             desc_expert: false,
+            desc_ctx_regime: false,
             regime: None,
             regime_thr: 0.6,
             regime_gate: false,
@@ -820,6 +824,10 @@ pub struct Brain {
     stride: Option<crate::acts::StrideAct>,
     rgain: HashMap<usize, Vec<(f64, u32)>>,
     desc: Option<crate::acts::DescExpert>,
+    /// --desc-oracle: the start offsets of the description segments (sorted).
+    pub desc_segs: Vec<usize>,
+    desc_seg_at: usize,
+    desc_seg_r: usize,
     /// --desc-expert: the expert's own cost per byte (for scoring), from the first file start on.
     pub desc_bits: Option<Vec<f32>>,
     regime_s: Option<crate::acts::Regime>,
@@ -1022,6 +1030,9 @@ impl Brain {
             regime_s: cfg.regime.map(|(w, k)| crate::acts::Regime::new(w, k, cfg.regime_thr)),
             rgain: HashMap::new(),
             desc: None,
+            desc_segs: vec![],
+            desc_seg_at: usize::MAX,
+            desc_seg_r: 0,
             desc_bits: if cfg.desc_expert { Some(vec![]) } else { None },
             floor_wr: cfg.regime.map(|(_, k)| vec![vec![]; k + 1]).unwrap_or_default(),
             copy_hist: 0,
@@ -3424,14 +3435,36 @@ impl Brain {
             return prev;
         }
         let seg = self.file_starts[k - 1];
-        let pv = if k >= 2 { Some(self.file_starts[k - 2]) } else { None };
+        let mut pv = if k >= 2 { Some(self.file_starts[k - 2]) } else { None };
+        if !self.desc_segs.is_empty() {
+            // --desc-oracle: told which segments are descriptions. A description is not coded by the expert, and a
+            // file reads the segment before it only if that segment is a description.
+            if self.desc_segs.binary_search(&seg).is_ok() {
+                if let Some(e) = self.desc_bits.as_mut() {
+                    e.push(8.0);
+                }
+                return prev;
+            }
+            if pv.map_or(false, |p| self.desc_segs.binary_search(&p).is_err()) {
+                pv = None;
+            }
+        }
+        if self.cfg.desc_ctx_regime && self.desc_seg_at != seg {
+            // --desc-ctx-regime: the regime of the bytes just before this segment (the end of its description)
+            self.desc_seg_at = seg;
+            self.desc_seg_r = self.regime_ix();
+        }
         if self.desc.is_none() {
             self.desc = Some(crate::acts::DescExpert::new());
         }
+        let rr = if self.cfg.desc_ctx_regime { self.desc_seg_r } else { 0 };
         let de = self.desc.as_mut().unwrap();
         // the context uses the confidence before this byte, from the bytes before it
         let pdx = de.code(&self.data, t, seg, pv);
-        let ctx = de.off.min(8) * 4 + ((de.conf * 4.0) as usize).min(3);
+        let ctx = de.off.min(8) * 4 + ((de.conf * 4.0) as usize).min(3) + 36 * rr;
+        if de.mw.len() <= ctx {
+            de.mw.resize(ctx + 1, [1.0 / 3.0; 3]);
+        }
         let pk = [(-prev).exp2(), pdx, 1.0 / 256.0];
         let w = de.mw[ctx];
         let p: f64 = w.iter().zip(&pk).map(|(a, b)| a * b).sum();
