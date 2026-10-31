@@ -433,6 +433,7 @@ fn cfg_from(args: &[String]) -> Cfg {
     c.stride_wide = flag(args, "--stride-wide");
     c.desc_expert = flag(args, "--desc-expert");
     c.desc_ctx_regime = flag(args, "--desc-ctx-regime");
+    c.desc_learn_trust = flag(args, "--desc-learn-trust");
     c.regime_gate = flag(args, "--regime-gate");
     if let Some(x) = arg(args, "--regime-thr") {
         c.regime_thr = x.parse().unwrap();

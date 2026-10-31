@@ -236,6 +236,10 @@ impl DescExpert {
     /// The probability of byte y at t (and learn from it). seg: the start of t's file; prev: the start of the file
     /// before it (None: no description).
     pub fn code(&mut self, data: &[u8], t: usize, seg: usize, prev: Option<usize>) -> f64 {
+        self.code_w(data, t, seg, prev, 1.0)
+    }
+    /// As `code`, with every learning step (emissions, start, jumps, background, shares) scaled by `lr` in [0, 1].
+    pub fn code_w(&mut self, data: &[u8], t: usize, seg: usize, prev: Option<usize>, lr: f64) -> f64 {
         let u = 1.0 / 256.0;
         if seg != self.seg {
             self.seg = seg;
@@ -285,26 +289,26 @@ impl DescExpert {
         let pb = (1.0 - lam) * pd[y] + lam * self.bg[y] / bgs;
         self.conf = pd.iter().cloned().fold(0.0, f64::max) * (1.0 - lam);
         let r = (1.0 - lam) * pd[y] / pb;
-        self.lam[lb].0 += r;
-        self.lam[lb].1 += 1.0 - r;
-        self.bg[y] += 1.0 - r;
+        self.lam[lb].0 += lr * r;
+        self.lam[lb].1 += lr * (1.0 - r);
+        self.bg[y] += lr * (1.0 - r);
         let mut post: Vec<f64> = self.toks.iter().enumerate().map(|(i, &w)| self.belief[i] * self.emit[w][y] / rows[i]).collect();
         let ps: f64 = post.iter().sum();
         post.iter_mut().for_each(|x| *x /= ps.max(1e-300));
         for (i, &w) in self.toks.iter().enumerate() {
-            if post[i] * r > 1e-3 {
-                self.emit[w][y] += post[i] * r;
+            if post[i] * r * lr > 1e-3 {
+                self.emit[w][y] += post[i] * r * lr;
             }
         }
         let am = (0..m).max_by(|&a, &b| post[a].partial_cmp(&post[b]).unwrap()).unwrap();
         if k == 0 {
             for i in 0..m {
-                self.start[i] += post[i] * r;
+                self.start[i] += post[i] * r * lr;
             }
         } else if r > 0.5 {
             let d = am as isize - self.prev_arg as isize;
             if (-16..=8).contains(&d) {
-                self.jumps[(d + 16) as usize] += r;
+                self.jumps[(d + 16) as usize] += r * lr;
             }
         }
         self.prev_arg = am;

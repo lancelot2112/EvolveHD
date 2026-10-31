@@ -86,6 +86,9 @@ pub struct Cfg {
     /// --desc-ctx-regime: the description expert's mixture context also holds the regime the bytes just before the
     /// segment were in, so its trust is learned separately after text-like and other segments (needs --regime).
     pub desc_ctx_regime: bool,
+    /// --desc-learn-trust: the description expert learns from a byte in proportion to the mixture's weight on it
+    /// (three times the weight, at most 1; the weights start at a third, so it starts at the full rate).
+    pub desc_learn_trust: bool,
     /// --regime W,K: the regime sense (see `acts::Regime`): which of up to K learned kinds of material the last W
     /// bytes are. It is offered as a node (a sense, never collected; not with --regime-no-node) and is part of
     /// the context of every output mixture (floor, copy act, stride act).
@@ -240,6 +243,7 @@ impl Default for Cfg {
             stride_wide: false,
             desc_expert: false,
             desc_ctx_regime: false,
+            desc_learn_trust: false,
             regime: None,
             regime_thr: 0.6,
             regime_gate: false,
@@ -828,6 +832,7 @@ pub struct Brain {
     pub desc_segs: Vec<usize>,
     desc_seg_at: usize,
     desc_seg_r: usize,
+    desc_prev_ctx: usize,
     /// --desc-expert: the expert's own cost per byte (for scoring), from the first file start on.
     pub desc_bits: Option<Vec<f32>>,
     regime_s: Option<crate::acts::Regime>,
@@ -1033,6 +1038,7 @@ impl Brain {
             desc_segs: vec![],
             desc_seg_at: usize::MAX,
             desc_seg_r: 0,
+            desc_prev_ctx: usize::MAX,
             desc_bits: if cfg.desc_expert { Some(vec![]) } else { None },
             floor_wr: cfg.regime.map(|(_, k)| vec![vec![]; k + 1]).unwrap_or_default(),
             copy_hist: 0,
@@ -3459,9 +3465,18 @@ impl Brain {
         }
         let rr = if self.cfg.desc_ctx_regime { self.desc_seg_r } else { 0 };
         let de = self.desc.as_mut().unwrap();
+        // --desc-learn-trust: the expert learns from this byte in proportion to the mixture's weight on it in the
+        // context of the byte before (credit from the level above: where the mixture has learned to ignore the
+        // expert, the expert stops learning)
+        let lr = if self.cfg.desc_learn_trust {
+            de.mw.get(self.desc_prev_ctx).map_or(1.0, |w| (w[1] * 3.0).min(1.0))
+        } else {
+            1.0
+        };
         // the context uses the confidence before this byte, from the bytes before it
-        let pdx = de.code(&self.data, t, seg, pv);
+        let pdx = de.code_w(&self.data, t, seg, pv, lr);
         let ctx = de.off.min(8) * 4 + ((de.conf * 4.0) as usize).min(3) + 36 * rr;
+        self.desc_prev_ctx = ctx;
         if de.mw.len() <= ctx {
             de.mw.resize(ctx + 1, [1.0 / 3.0; 3]);
         }
