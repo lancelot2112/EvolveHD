@@ -1,6 +1,6 @@
 # 63 · Steadier regimes, whole-number steps, and the description expert inside the stack (2026-10-29)
 
-*[All experiments](README.md)* · [← 62](62-stride-act-and-regime.md)
+*[All experiments](README.md)* · [← 62](62-stride-act-and-regime.md) · [64 →](64-description-roles.md)
 
 Experiment 62's three next steps, in order.
 
