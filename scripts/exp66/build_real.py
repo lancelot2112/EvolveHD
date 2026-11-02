@@ -1,5 +1,5 @@
 """Experiment 66: real files after real manuals. A stream of real files from this machine (the first L bytes of each),
-of ~28 formats, each file preceded by one of: its format's entry in file(1)'s magic database, verbatim ("Rm"); a note
+of 28 formats, each file preceded by one of: its format's entry in file(1)'s magic database, verbatim ("Rm"); a note
 that translates that entry's test into the hex notation of experiment 60's stream ("Rn"); another format's magic entry
 ("W"); or nothing ("N"). Formats appear progressively. Four rotations of the same files and order: rotation s gives the
 k-th file of format f condition (f + k + s) mod 4, so across the four every file has every condition.
@@ -16,7 +16,7 @@ os.makedirs(outdir, exist_ok=True)
 FORMATS = [
     ("png", r"PNG image data", "images", 522),
     ("tzif", r"timezone data", "timezone", 31),
-    ("tfm", r"TeX font metric data", "tex", 39),
+    ("tfm", r"TeX font metric data", "tex", 42),
     ("vf", r"TeX virtual font data", "tex", 21),
     ("mo", r"GNU message catalog \(little", "gnu", 15),
     ("lz4", r"LZ4 compressed data \(v1\.4", "compress", 298),
@@ -29,7 +29,6 @@ FORMATS = [
     ("woff2", r"Web Open Font Format \(Version 2", "fonts", 446),
     ("otf", r"OpenType font data", "fonts", 410),
     ("ttf", r"TrueType Font data", "fonts", 269),
-    ("ispell", r"little endian ispell", "ispell", 12),
     ("pyc", r"Byte-compiled Python module for CPython 3\.12", "python", 205),
     ("elf", r"ELF 64-bit LSB (shared object|pie executable|relocatable)", "elf", 352),
     ("jpeg", r"JPEG image data", "jpeg", 17),
