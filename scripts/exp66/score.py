@@ -11,7 +11,11 @@ C = ["Rm", "Rn", "W", "N"]
 acc = {}
 pair = {}
 desc = {nm: [] for nm, _ in runs}
-for s in range(4):
+import os
+rots = [s for s in range(4) if all(os.path.exists(pp.format(s=s)) for _, pp in runs)]
+if len(rots) < 4:
+    print(f"only rotations {rots} have every run; conditions are not balanced, and the paired views need all four")
+for s in rots:
     meta = json.load(open(items_pat.format(s=s)))["items"]
     bits = {nm: np.fromfile(p.format(s=s), dtype="<f4").astype(float) for nm, p in runs}
     for it in meta:
