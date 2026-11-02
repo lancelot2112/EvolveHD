@@ -1,9 +1,10 @@
 """How the role gate's decisions and its teacher's labels agree with the truth (is the previous segment a
 description?). The dump (ROLE_DUMP=1) has one line per taught segment: segments after the first that are 16 bytes or
-longer, in order. usage: role_agree.py STREAM DUMP"""
+longer, in order. usage: role_agree.py STREAM DUMP [OFFSET]  (OFFSET: count only segments from that byte on)"""
 import sys, re
 import numpy as np
 s, dump = sys.argv[1], sys.argv[2]
+off = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 starts = [int(x) for x in open(s + ".starts")]
 descs = set(int(x) for x in open(s + ".descs"))
 n = len(open(s + ".bin", "rb").read())
@@ -13,6 +14,9 @@ rows = [tuple(int(v) for v in re.findall(r"go=(\d) gain=[-\d.]+ label=(\d)", l)[
 assert len(rows) == len(segs), (len(rows), len(segs))
 go = np.array([r[0] for r in rows]); lab = np.array([r[1] for r in rows])
 tru = np.array([starts[i - 1] in descs for i in segs]); isd = np.array([starts[i] in descs for i in segs])
+keep = np.array([starts[i] >= off for i in segs])
+go, lab, tru, isd = go[keep], lab[keep], tru[keep], isd[keep]
+rows = [r for r, k in zip(rows, keep) if k]
 half = len(rows) // 2
 for name, sl in (("all", slice(None)), ("2nd half", slice(half, None))):
     g, l, t, d = go[sl], lab[sl], tru[sl], isd[sl]

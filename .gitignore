@@ -33,3 +33,4 @@ runs/
 /target-fast
 /target-dev
 __pycache__/
+reference/ext/
