@@ -1,6 +1,6 @@
 # 66 · Real files after real manuals (2026-11-02)
 
-*[All experiments](README.md)* · [← 65](65-role-gate.md)
+*[All experiments](README.md)* · [← 65](65-role-gate.md) · [67 →](67-reader-of-spellings.md)
 
 **The question:** experiments 60 to 65 used made-up formats with descriptions in one controlled wording. Can the description expert, with experiment 65's role gate, use a real format's manual to read real files of that format the first time it meets them? And does it matter whether it learned the notation first on the made-up formats?
 
