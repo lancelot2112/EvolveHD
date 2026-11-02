@@ -535,15 +535,16 @@ impl DescExpert {
             let lam = lg / (ld + lg);
             let pb = (1.0 - lam) * pd + lam * self.bg[y] / bgs;
             cost -= pb.max(u * 1e-6).log2();
+            let bgy = lam * self.bg[y] / bgs;
             if m > 0 {
-                let r = (1.0 - lam) * sh * pt / pb;
+                let r = (1.0 - lam) * pt / ((1.0 - lam) * pt + bgy);
                 let mut post: Vec<f64> = toks.iter().enumerate().map(|(i, &w)| belief[i] * self.emit[w][y] / rows[i]).collect();
                 let ps: f64 = post.iter().sum();
                 post.iter_mut().for_each(|x| *x /= ps.max(1e-300));
                 belief = post.iter().zip(&belief).map(|(p, b)| r * p + (1.0 - r) * b).collect();
             }
             if mc > 0 {
-                let rc = (1.0 - lam) * (1.0 - sh) * pc / pb;
+                let rc = (1.0 - lam) * pc / ((1.0 - lam) * pc + bgy);
                 let (sp, (pos, _)) = sv.as_ref().unwrap();
                 let post = sp.post(pos, &cbel, y);
                 cbel = post.iter().zip(&cbel).map(|(p, b)| rc * p + (1.0 - rc) * b).collect();
@@ -626,14 +627,20 @@ impl DescExpert {
         let pb = (1.0 - lam) * pall[y] + lam * self.bg[y] / bgs;
         self.conf = pall.iter().cloned().fold(0.0, f64::max) * (1.0 - lam);
         let r = (1.0 - lam) * pall[y] / pb;
-        let rt = (1.0 - lam) * sh * pd[y] / pb;
-        let rc = (1.0 - lam) * (1.0 - sh) * pdc[y] / pb;
+        let bgy = lam * self.bg[y] / bgs;
         self.lam[lb].0 += lr * r;
         self.lam[lb].1 += lr * (1.0 - r);
         self.bg[y] += lr * (1.0 - r);
+        // each view learns as if it were alone (its own share against the background); the share between them is
+        // learned from their posterior responsibilities
+        let rt = if m > 0 { (1.0 - lam) * pd[y] / ((1.0 - lam) * pd[y] + bgy) } else { 0.0 };
+        let rc = if mc > 0 { (1.0 - lam) * pdc[y] / ((1.0 - lam) * pdc[y] + bgy) } else { 0.0 };
         if m > 0 && mc > 0 {
-            self.smix[lb].0 += lr * rt;
-            self.smix[lb].1 += lr * rc;
+            let q = sh * pd[y] + (1.0 - sh) * pdc[y];
+            if q > 0.0 {
+                self.smix[lb].0 += lr * r * sh * pd[y] / q;
+                self.smix[lb].1 += lr * r * (1.0 - sh) * pdc[y] / q;
+            }
         }
         if m > 0 {
             let mut post: Vec<f64> = self.toks.iter().enumerate().map(|(i, &w)| self.belief[i] * self.emit[w][y] / rows[i]).collect();
