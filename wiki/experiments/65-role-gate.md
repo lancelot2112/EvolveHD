@@ -1,6 +1,6 @@
 # 65 · A learned role gate for descriptions: what teaches it (2026-10-31)
 
-*[All experiments](README.md)* · [← 64](64-description-roles.md)
+*[All experiments](README.md)* · [← 64](64-description-roles.md) · [66 →](66-real-files-real-manuals.md)
 
 **The question:** experiment 64 showed that most of the description expert's gap in the stack was the role. Told which segments are descriptions (the oracle), it reads the magic of a new format nearly as well as the prototype. Can a small learner find that role itself, from the segment's words, taught only by what happens next?
 
