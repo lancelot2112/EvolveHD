@@ -98,6 +98,8 @@ pub struct Cfg {
     /// --desc-role-null N: the contrast is against no description (the background alone): 1 = instead of the decoy,
     /// 2 = the previous segment must beat both the decoy and the background.
     pub desc_role_null: u8,
+    /// --desc-spell: the description expert also reads its description by spelling (see `acts::Spell`).
+    pub desc_spell: bool,
     /// --regime W,K: the regime sense (see `acts::Regime`): which of up to K learned kinds of material the last W
     /// bytes are. It is offered as a node (a sense, never collected; not with --regime-no-node) and is part of
     /// the context of every output mixture (floor, copy act, stride act).
@@ -256,6 +258,7 @@ impl Default for Cfg {
             desc_role: false,
             desc_role_contrast: false,
             desc_role_null: 0,
+            desc_spell: false,
             regime: None,
             regime_thr: 0.6,
             regime_gate: false,
@@ -3481,7 +3484,11 @@ impl Brain {
             self.desc_seg_r = self.regime_ix();
         }
         if self.desc.is_none() {
-            self.desc = Some(crate::acts::DescExpert::new());
+            let mut de = crate::acts::DescExpert::new();
+            if self.cfg.desc_spell {
+                de.spell = Some(crate::acts::Spell::new());
+            }
+            self.desc = Some(de);
         }
         let rr = if self.cfg.desc_ctx_regime { self.desc_seg_r } else { 0 };
         // --desc-role: at each new segment the role gate decides from the previous segment's words whether it is

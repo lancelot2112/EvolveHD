@@ -199,13 +199,240 @@ pub struct DescExpert {
     pub off: usize,
     pub conf: f64,
     pub mw: Vec<[f64; 3]>,
+    /// --desc-spell: the spelling view (see `Spell`), mixed with the token view by a learned share per offset
+    pub spell: Option<Spell>,
+    smix: [(f64, f64); 9],
+}
+
+/// --desc-spell: a second view of the description, by spelling. Its positions are the characters of the tokens (at
+/// most 512); at each position the pieces ending there, of 1, 2 and 3 characters within the token (a token's start
+/// marked by byte 1), each have a learned byte distribution, mixed by a learned share per piece length (apart for
+/// pieces that have little credit yet). So the "89" in "\x89PNG" is the same piece as the token "89", and a letter can
+/// learn that it stands for itself. Its own jumps (-16..+8 characters) and a start prior keyed by the token before
+/// and the character's place in its token (0..15). Unknown pieces predict uniformly and are made when credited.
+pub struct Spell {
+    vocab: std::collections::HashMap<[u8; 4], u32>,
+    emit: Vec<[f32; 256]>,
+    rows: Vec<f32>,
+    cred: Vec<f32>,
+    share: [[f64; 2]; 3],
+    jumps: [f64; 25],
+    sctx: std::collections::HashMap<(u64, u8), f64>,
+    pos: Vec<([[u8; 4]; 3], [u32; 3], (u64, u8))>,
+    belief: Vec<f64>,
+    prev_arg: usize,
+}
+
+const SPELL_MAX: usize = 512;
+const SPELL_PIECES: usize = 400_000;
+
+impl Spell {
+    pub fn new() -> Self {
+        let mut jumps = [1.0; 25];
+        jumps[17] += 4.0;
+        Spell { vocab: Default::default(), emit: vec![], rows: vec![], cred: vec![], share: [[1.0; 2]; 3], jumps, sctx: Default::default(), pos: vec![], belief: vec![], prev_arg: 0 }
+    }
+    fn hash(x: &[u8]) -> u64 {
+        let mut v: u64 = 0xcbf29ce484222325;
+        for &b in x {
+            v = (v ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+        v
+    }
+    /// The positions of a description, and the start prior over them.
+    fn positions(&self, d: &[u8]) -> (Vec<([[u8; 4]; 3], [u32; 3], (u64, u8))>, Vec<f64>) {
+        let mut pos = vec![];
+        let mut prev = Self::hash(&[1]);
+        'outer: for w in d.split(|&b| b == b' ' || b == b'\n' || b == b'\t' || b == b'\r') {
+            let mut w = w;
+            while let Some((&l, rest)) = w.split_last() {
+                if l == b'.' || l == b',' || l == b':' { w = rest } else { break }
+            }
+            if w.is_empty() || w.len() > 64 {
+                continue;
+            }
+            for j in 0..w.len() {
+                let mut keys = [[0u8; 4]; 3];
+                let mut ids = [u32::MAX; 3];
+                for n in 1..=3usize {
+                    // key: length, then the n bytes (byte 1 before the token's start)
+                    let mut k = [0u8; 4];
+                    k[0] = n as u8;
+                    for q in 0..n {
+                        let ix = j as isize - (n - 1 - q) as isize;
+                        k[1 + q] = if ix < 0 { 1 } else { w[ix as usize] };
+                    }
+                    keys[n - 1] = k;
+                    if let Some(&id) = self.vocab.get(&k) {
+                        ids[n - 1] = id;
+                    }
+                }
+                pos.push((keys, ids, (prev, j.min(15) as u8)));
+                if pos.len() == SPELL_MAX {
+                    break 'outer;
+                }
+            }
+            prev = Self::hash(w);
+        }
+        let st: Vec<f64> = pos.iter().map(|p| *self.sctx.get(&p.2).unwrap_or(&1.0)).collect();
+        let s: f64 = st.iter().sum();
+        let st = st.iter().map(|x| x / s.max(1e-300)).collect();
+        (pos, st)
+    }
+    fn begin(&mut self, d: &[u8]) {
+        let (pos, st) = self.positions(d);
+        self.pos = pos;
+        self.belief = st;
+    }
+    fn clear(&mut self) {
+        self.pos.clear();
+        self.belief.clear();
+    }
+    fn advance(jumps: &[f64; 25], belief: &[f64]) -> Vec<f64> {
+        let m = belief.len();
+        let jt: f64 = jumps.iter().sum();
+        let mut nb = vec![0.0; m];
+        for i in 0..m {
+            let b = belief[i];
+            if b < 1e-12 {
+                continue;
+            }
+            let lo = (i as isize - 16).max(0) as usize;
+            let hi = (i + 8).min(m - 1);
+            for j in lo..=hi {
+                nb[j] += jumps[j + 16 - i] / jt * b;
+            }
+        }
+        let s: f64 = nb.iter().sum();
+        if s > 0.0 { nb.iter().map(|x| x / s).collect() } else { vec![1.0 / m as f64; m] }
+    }
+    /// Shares of the three pieces at a position (normalised).
+    fn shares(&self, ids: &[u32; 3]) -> [f64; 3] {
+        let mut a = [0.0; 3];
+        for n in 0..3 {
+            let nov = if ids[n] == u32::MAX || self.cred[ids[n] as usize] < 1.0 { 1 } else { 0 };
+            a[n] = self.share[n][nov];
+        }
+        let s: f64 = a.iter().sum();
+        [a[0] / s, a[1] / s, a[2] / s]
+    }
+    fn pe(&self, ids: &[u32; 3], a: &[f64; 3], y: usize) -> [f64; 3] {
+        let mut v = [0.0; 3];
+        for n in 0..3 {
+            v[n] = a[n] * if ids[n] == u32::MAX { 1.0 / 256.0 } else { (self.emit[ids[n] as usize][y] / self.rows[ids[n] as usize]) as f64 };
+        }
+        v
+    }
+    /// Probability of y from the description (spelling view), given a belief over positions.
+    fn prob(&self, pos: &[([[u8; 4]; 3], [u32; 3], (u64, u8))], belief: &[f64], y: usize) -> f64 {
+        let mut p = 0.0;
+        for (i, ps) in pos.iter().enumerate() {
+            if belief[i] < 1e-9 {
+                continue;
+            }
+            let a = self.shares(&ps.1);
+            p += belief[i] * self.pe(&ps.1, &a, y).iter().sum::<f64>();
+        }
+        p
+    }
+    fn dist(&self, out: &mut [f64; 256]) {
+        for (i, ps) in self.pos.iter().enumerate() {
+            let b = self.belief[i];
+            if b < 1e-5 {
+                continue;
+            }
+            let a = self.shares(&ps.1);
+            for n in 0..3 {
+                let w = b * a[n];
+                if ps.1[n] == u32::MAX {
+                    out.iter_mut().for_each(|x| *x += w / 256.0);
+                } else {
+                    let id = ps.1[n] as usize;
+                    let r = w / self.rows[id] as f64;
+                    for (x, e) in out.iter_mut().zip(self.emit[id].iter()) {
+                        *x += r * *e as f64;
+                    }
+                }
+            }
+        }
+    }
+    /// Posterior over positions after y.
+    fn post(&self, pos: &[([[u8; 4]; 3], [u32; 3], (u64, u8))], belief: &[f64], y: usize) -> Vec<f64> {
+        let mut post: Vec<f64> = pos.iter().enumerate().map(|(i, ps)| {
+            if belief[i] < 1e-12 { 0.0 } else { belief[i] * self.pe(&ps.1, &self.shares(&ps.1), y).iter().sum::<f64>() }
+        }).collect();
+        let s: f64 = post.iter().sum();
+        post.iter_mut().for_each(|x| *x /= s.max(1e-300));
+        post
+    }
+    /// Learn from byte y (k: offset in the file; rc: the spelling view's share in explaining y; r: the
+    /// description's), then move the belief.
+    fn learn(&mut self, y: usize, k: usize, rc: f64, r: f64, lr: f64) {
+        let post = self.post(&self.pos, &self.belief, y);
+        for i in 0..self.pos.len() {
+            let c = post[i] * rc * lr;
+            if c < 1e-4 {
+                continue;
+            }
+            let ids = self.pos[i].1;
+            let a = self.shares(&ids);
+            let v = self.pe(&ids, &a, y);
+            let vs: f64 = v.iter().sum();
+            for n in 0..3 {
+                let resp = v[n] / vs.max(1e-300);
+                let nov = if ids[n] == u32::MAX || self.cred[ids[n] as usize] < 1.0 { 1 } else { 0 };
+                self.share[n][nov] += c * resp;
+                let cc = c * resp;
+                if cc > 1e-3 {
+                    let mut id = ids[n];
+                    if id == u32::MAX {
+                        if self.emit.len() >= SPELL_PIECES {
+                            continue;
+                        }
+                        id = self.emit.len() as u32;
+                        self.vocab.insert(self.pos[i].0[n], id);
+                        self.emit.push([0.05; 256]);
+                        self.rows.push(0.05 * 256.0);
+                        self.cred.push(0.0);
+                        // every position with this key now has it
+                        let key = self.pos[i].0[n];
+                        for q in 0..self.pos.len() {
+                            if self.pos[q].0[n] == key {
+                                self.pos[q].1[n] = id;
+                            }
+                        }
+                    }
+                    let id = id as usize;
+                    self.emit[id][y] += cc as f32;
+                    self.rows[id] += cc as f32;
+                    self.cred[id] += cc as f32;
+                }
+            }
+        }
+        let am = (0..post.len()).max_by(|&a, &b| post[a].partial_cmp(&post[b]).unwrap()).unwrap_or(0);
+        if k == 0 {
+            for i in 0..self.pos.len() {
+                let c = post[i] * rc * lr;
+                if c > 1e-4 {
+                    *self.sctx.entry(self.pos[i].2).or_insert(1.0) += c;
+                }
+            }
+        } else if r > 0.5 {
+            let d = am as isize - self.prev_arg as isize;
+            if (-16..=8).contains(&d) {
+                self.jumps[(d + 16) as usize] += r * lr;
+            }
+        }
+        self.prev_arg = am;
+        self.belief = post.iter().zip(&self.belief).map(|(p, b)| rc * p + (1.0 - rc) * b).collect();
+    }
 }
 
 impl DescExpert {
     pub fn new() -> Self {
         let mut jumps = [1.0; 25];
         jumps[17] += 4.0; // a mild prior for reading on by one token (index 16 is a jump of 0)
-        DescExpert { vocab: Default::default(), emit: vec![], jumps, start: [1.0; 64], bg: [1.0; 256], lam: [(1.0, 1.0); 9], toks: vec![], belief: vec![], prev_arg: 0, seg: usize::MAX, off: 0, conf: 0.0, mw: vec![[1.0 / 3.0; 3]; 9 * 4] }
+        DescExpert { vocab: Default::default(), emit: vec![], jumps, start: [1.0; 64], bg: [1.0; 256], lam: [(1.0, 1.0); 9], toks: vec![], belief: vec![], prev_arg: 0, seg: usize::MAX, off: 0, conf: 0.0, mw: vec![[1.0 / 3.0; 3]; 9 * 4], spell: None, smix: [(1.0, 1.0); 9] }
     }
     /// A new file starts at byte a; the bytes from p (the previous file's start) to a are its description.
     fn begin(&mut self, data: &[u8], p: usize, a: usize) {
@@ -232,6 +459,9 @@ impl DescExpert {
         let s: f64 = self.start[..m].iter().sum();
         self.belief = self.start[..m].iter().map(|x| x / s.max(1e-12)).collect();
         self.off = 0;
+        if let Some(sp) = self.spell.as_mut() {
+            sp.begin(&data[p..a]);
+        }
     }
     /// Tokens of a segment, without adding new ones to the vocabulary (unknown tokens are skipped).
     fn known_tokens(&self, d: &[u8]) -> Vec<usize> {
@@ -257,43 +487,67 @@ impl DescExpert {
         let m = toks.len();
         let u = 1.0 / 256.0;
         let bgs0: f64 = self.bg.iter().sum();
-        if m == 0 {
+        // --desc-spell: the spelling view's positions and start belief, read-only
+        let sv = self.spell.as_ref().map(|sp| (sp, sp.positions(d)));
+        let mc = sv.as_ref().map_or(0, |x| x.1 .0.len());
+        if m == 0 && mc == 0 {
             // no known tokens: the background alone (so a decoy with nothing to say is not charged more than the
             // background would cost)
             return bytes.iter().map(|&y| -(self.bg[y as usize] / bgs0).log2()).sum();
         }
-        let s0: f64 = self.start[..m].iter().sum();
-        let mut belief: Vec<f64> = self.start[..m].iter().map(|x| x / s0).collect();
+        let mut belief: Vec<f64> = if m > 0 {
+            let s0: f64 = self.start[..m].iter().sum();
+            self.start[..m].iter().map(|x| x / s0).collect()
+        } else {
+            vec![]
+        };
+        let mut cbel: Vec<f64> = sv.as_ref().map_or(vec![], |x| x.1 .1.clone());
         let jt: f64 = self.jumps.iter().sum();
         let bgs: f64 = self.bg.iter().sum();
         let rows: Vec<f64> = toks.iter().map(|&w| self.emit[w].iter().sum()).collect();
         let mut cost = 0.0;
         for (k, &y) in bytes.iter().enumerate() {
             if k > 0 {
-                let mut nb = vec![0.0; m];
-                for (di, &pj) in self.jumps.iter().enumerate() {
-                    let dd = di as isize - 16;
-                    for i in 0..m {
-                        let j = i as isize + dd;
-                        if j >= 0 && (j as usize) < m {
-                            nb[j as usize] += pj / jt * belief[i];
+                if m > 0 {
+                    let mut nb = vec![0.0; m];
+                    for (di, &pj) in self.jumps.iter().enumerate() {
+                        let dd = di as isize - 16;
+                        for i in 0..m {
+                            let j = i as isize + dd;
+                            if j >= 0 && (j as usize) < m {
+                                nb[j as usize] += pj / jt * belief[i];
+                            }
                         }
                     }
+                    let s: f64 = nb.iter().sum();
+                    belief = if s > 0.0 { nb.iter().map(|x| x / s).collect() } else { vec![1.0 / m as f64; m] };
                 }
-                let s: f64 = nb.iter().sum();
-                belief = if s > 0.0 { nb.iter().map(|x| x / s).collect() } else { vec![1.0 / m as f64; m] };
+                if mc > 0 {
+                    cbel = Spell::advance(&sv.as_ref().unwrap().0.jumps, &cbel);
+                }
             }
             let y = y as usize;
-            let pd: f64 = toks.iter().enumerate().map(|(i, &w)| belief[i] * self.emit[w][y] / rows[i]).sum();
+            let pt: f64 = if m > 0 { toks.iter().enumerate().map(|(i, &w)| belief[i] * self.emit[w][y] / rows[i]).sum() } else { 0.0 };
+            let pc: f64 = if mc > 0 { let (sp, (pos, _)) = sv.as_ref().unwrap(); sp.prob(pos, &cbel, y) } else { 0.0 };
+            let sh = if mc == 0 { 1.0 } else if m == 0 { 0.0 } else { let (a, b) = self.smix[k.min(8)]; a / (a + b) };
+            let pd = sh * pt + (1.0 - sh) * pc;
             let (ld, lg) = self.lam[k.min(8)];
             let lam = lg / (ld + lg);
             let pb = (1.0 - lam) * pd + lam * self.bg[y] / bgs;
             cost -= pb.max(u * 1e-6).log2();
-            let r = (1.0 - lam) * pd / pb;
-            let mut post: Vec<f64> = toks.iter().enumerate().map(|(i, &w)| belief[i] * self.emit[w][y] / rows[i]).collect();
-            let ps: f64 = post.iter().sum();
-            post.iter_mut().for_each(|x| *x /= ps.max(1e-300));
-            belief = post.iter().zip(&belief).map(|(p, b)| r * p + (1.0 - r) * b).collect();
+            if m > 0 {
+                let r = (1.0 - lam) * sh * pt / pb;
+                let mut post: Vec<f64> = toks.iter().enumerate().map(|(i, &w)| belief[i] * self.emit[w][y] / rows[i]).collect();
+                let ps: f64 = post.iter().sum();
+                post.iter_mut().for_each(|x| *x /= ps.max(1e-300));
+                belief = post.iter().zip(&belief).map(|(p, b)| r * p + (1.0 - r) * b).collect();
+            }
+            if mc > 0 {
+                let rc = (1.0 - lam) * (1.0 - sh) * pc / pb;
+                let (sp, (pos, _)) = sv.as_ref().unwrap();
+                let post = sp.post(pos, &cbel, y);
+                cbel = post.iter().zip(&cbel).map(|(p, b)| rc * p + (1.0 - rc) * b).collect();
+            }
         }
         cost
     }
@@ -309,18 +563,24 @@ impl DescExpert {
             self.seg = seg;
             match prev {
                 Some(p) => self.begin(data, p, seg),
-                None => self.toks.clear(),
+                None => {
+                    self.toks.clear();
+                    if let Some(sp) = self.spell.as_mut() {
+                        sp.clear();
+                    }
+                }
             }
         } else {
             self.off += 1;
         }
         let m = self.toks.len();
-        if m == 0 {
+        let mc = self.spell.as_ref().map_or(0, |sp| sp.pos.len());
+        if m == 0 && mc == 0 {
             self.conf = 0.0;
             return u;
         }
         let k = self.off;
-        if k > 0 {
+        if k > 0 && m > 0 {
             let jt: f64 = self.jumps.iter().sum();
             let mut nb = vec![0.0; m];
             for (di, &pj) in self.jumps.iter().enumerate() {
@@ -335,6 +595,10 @@ impl DescExpert {
             let s: f64 = nb.iter().sum();
             self.belief = if s > 0.0 { nb.iter().map(|x| x / s).collect() } else { vec![1.0 / m as f64; m] };
         }
+        if k > 0 && mc > 0 {
+            let sp = self.spell.as_mut().unwrap();
+            sp.belief = Spell::advance(&sp.jumps, &sp.belief);
+        }
         let y = data[t] as usize;
         let rows: Vec<f64> = self.toks.iter().map(|&w| self.emit[w].iter().sum()).collect();
         let mut pd = [0.0f64; 256];
@@ -347,36 +611,56 @@ impl DescExpert {
             }
         }
         let lb = k.min(8);
+        let mut pdc = [0.0f64; 256];
+        if mc > 0 {
+            self.spell.as_ref().unwrap().dist(&mut pdc);
+        }
+        let sh = if mc == 0 { 1.0 } else if m == 0 { 0.0 } else { let (a, b) = self.smix[lb]; a / (a + b) };
+        let mut pall = [0.0f64; 256];
+        for x in 0..256 {
+            pall[x] = sh * pd[x] + (1.0 - sh) * pdc[x];
+        }
         let (ld, lg) = self.lam[lb];
         let lam = lg / (ld + lg);
         let bgs: f64 = self.bg.iter().sum();
-        let pb = (1.0 - lam) * pd[y] + lam * self.bg[y] / bgs;
-        self.conf = pd.iter().cloned().fold(0.0, f64::max) * (1.0 - lam);
-        let r = (1.0 - lam) * pd[y] / pb;
+        let pb = (1.0 - lam) * pall[y] + lam * self.bg[y] / bgs;
+        self.conf = pall.iter().cloned().fold(0.0, f64::max) * (1.0 - lam);
+        let r = (1.0 - lam) * pall[y] / pb;
+        let rt = (1.0 - lam) * sh * pd[y] / pb;
+        let rc = (1.0 - lam) * (1.0 - sh) * pdc[y] / pb;
         self.lam[lb].0 += lr * r;
         self.lam[lb].1 += lr * (1.0 - r);
         self.bg[y] += lr * (1.0 - r);
-        let mut post: Vec<f64> = self.toks.iter().enumerate().map(|(i, &w)| self.belief[i] * self.emit[w][y] / rows[i]).collect();
-        let ps: f64 = post.iter().sum();
-        post.iter_mut().for_each(|x| *x /= ps.max(1e-300));
-        for (i, &w) in self.toks.iter().enumerate() {
-            if post[i] * r * lr > 1e-3 {
-                self.emit[w][y] += post[i] * r * lr;
-            }
+        if m > 0 && mc > 0 {
+            self.smix[lb].0 += lr * rt;
+            self.smix[lb].1 += lr * rc;
         }
-        let am = (0..m).max_by(|&a, &b| post[a].partial_cmp(&post[b]).unwrap()).unwrap();
-        if k == 0 {
-            for i in 0..m {
-                self.start[i] += post[i] * r * lr;
+        if m > 0 {
+            let mut post: Vec<f64> = self.toks.iter().enumerate().map(|(i, &w)| self.belief[i] * self.emit[w][y] / rows[i]).collect();
+            let ps: f64 = post.iter().sum();
+            post.iter_mut().for_each(|x| *x /= ps.max(1e-300));
+            for (i, &w) in self.toks.iter().enumerate() {
+                if post[i] * rt * lr > 1e-3 {
+                    self.emit[w][y] += post[i] * rt * lr;
+                }
             }
-        } else if r > 0.5 {
-            let d = am as isize - self.prev_arg as isize;
-            if (-16..=8).contains(&d) {
-                self.jumps[(d + 16) as usize] += r * lr;
+            let am = (0..m).max_by(|&a, &b| post[a].partial_cmp(&post[b]).unwrap()).unwrap();
+            if k == 0 {
+                for i in 0..m {
+                    self.start[i] += post[i] * rt * lr;
+                }
+            } else if r > 0.5 {
+                let d = am as isize - self.prev_arg as isize;
+                if (-16..=8).contains(&d) {
+                    self.jumps[(d + 16) as usize] += r * lr;
+                }
             }
+            self.prev_arg = am;
+            self.belief = post.iter().zip(&self.belief).map(|(p, b)| rt * p + (1.0 - rt) * b).collect();
         }
-        self.prev_arg = am;
-        self.belief = post.iter().zip(&self.belief).map(|(p, b)| r * p + (1.0 - r) * b).collect();
+        if mc > 0 {
+            self.spell.as_mut().unwrap().learn(y, k, rc, r, lr);
+        }
         pb
     }
 }
