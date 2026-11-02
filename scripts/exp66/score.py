@@ -43,4 +43,16 @@ for part in ("magic", "head32", "all"):
             x = np.array([v[c] - v["N"] for v in d])
             row += f" | {c}-N {x.mean():+6.2f} (better in {np.sum(x < 0):>2})"
         print(row)
+ref = runs[0][0]
+print(f"first files, per format, gain over {ref} (bits per byte; positive: better than {ref}) by condition, and Rm, Rn minus W:")
+for part in ("magic", "head32", "all"):
+    for nm, _ in runs[1:]:
+        fs = [f for (p, n, f), v in pair.items() if p == part and n == nm and len(v) == 4 and len(pair.get((part, ref, f), {})) == 4]
+        g = {c: np.array([pair[(part, ref, f)][c] - pair[(part, nm, f)][c] for f in fs]) for c in C}
+        row = f"  {part:<7}{nm:<10} formats {len(fs):>3}" + "".join(f" | {c} {g[c].mean():+5.2f}" for c in C)
+        for c in ("Rm", "Rn"):
+            x = g[c] - g["W"]
+            se = x.std(ddof=1) / np.sqrt(len(x))
+            row += f" | {c}-W {x.mean():+5.2f} se {se:4.2f} ({np.sum(x > 0):>2} of {len(x)})"
+        print(row)
 print("description bytes:" + "".join(f"  {nm} {np.mean(v):6.3f}" for nm, v in desc.items()))
