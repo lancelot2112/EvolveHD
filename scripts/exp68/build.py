@@ -1,10 +1,11 @@
 """Experiment 68: experiment 60's made-up practice stream (fmt2) with the magic spelled three other ways, then
 experiment 66's real files and manual entries, to separate two reasons experiment 67's spelling view didn't read the
 real entries: where in the word a byte is spelled, and which word comes before the magic.
-  A: "magic \\xf1\\302\\x6b."   escapes inside one token, after "magic"   (place in the word changes)
+  A: "magic \\xf1\\xc2\\x6b."   escapes inside one token, after "magic"   (place in the word changes)
   B: "0 string f1 c2 6b."       spaced hex after "0 string"             (word before changes)
-  C: "0 string \\xf1\\302\\x6b."  escapes inside one token, after "string" (both, as libmagic writes it)
-Escapes are hex (\\xNN) for even-numbered formats and octal (\\NNN) for odd ones, as libmagic uses both.
+  C: "0 string \\xf1\\xc2\\x6b."  escapes inside one token, after "string" (both, as libmagic writes it)
+Escapes are hex (\\xNN) for even-numbered formats and octal (\\NNN) for odd ones (one notation per format), as
+libmagic uses both.
 Only the descriptions change: every file byte is the same, and the real part is experiment 66's prereal stream after
 the practice. Writes runs/exp68/{A,B,C}prereal{0-3}.{bin,starts,descs,items.json}.
 usage: build.py"""
