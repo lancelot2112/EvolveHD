@@ -202,6 +202,8 @@ pub struct DescExpert {
     /// --desc-spell: the spelling view (see `Spell`), mixed with the token view by a learned share per offset
     pub spell: Option<Spell>,
     smix: [(f64, f64); 9],
+    /// diagnostic (env SPELL_ONLY): predict from the spelling view alone (the token view still learns)
+    spell_only: bool,
 }
 
 /// --desc-spell: a second view of the description, by spelling. Its positions are the characters of the tokens (at
@@ -432,7 +434,7 @@ impl DescExpert {
     pub fn new() -> Self {
         let mut jumps = [1.0; 25];
         jumps[17] += 4.0; // a mild prior for reading on by one token (index 16 is a jump of 0)
-        DescExpert { vocab: Default::default(), emit: vec![], jumps, start: [1.0; 64], bg: [1.0; 256], lam: [(1.0, 1.0); 9], toks: vec![], belief: vec![], prev_arg: 0, seg: usize::MAX, off: 0, conf: 0.0, mw: vec![[1.0 / 3.0; 3]; 9 * 4], spell: None, smix: [(1.0, 1.0); 9] }
+        DescExpert { vocab: Default::default(), emit: vec![], jumps, start: [1.0; 64], bg: [1.0; 256], lam: [(1.0, 1.0); 9], toks: vec![], belief: vec![], prev_arg: 0, seg: usize::MAX, off: 0, conf: 0.0, mw: vec![[1.0 / 3.0; 3]; 9 * 4], spell: None, smix: [(1.0, 1.0); 9], spell_only: std::env::var("SPELL_ONLY").is_ok() }
     }
     /// A new file starts at byte a; the bytes from p (the previous file's start) to a are its description.
     fn begin(&mut self, data: &[u8], p: usize, a: usize) {
@@ -616,7 +618,7 @@ impl DescExpert {
         if mc > 0 {
             self.spell.as_ref().unwrap().dist(&mut pdc);
         }
-        let sh = if mc == 0 { 1.0 } else if m == 0 { 0.0 } else { let (a, b) = self.smix[lb]; a / (a + b) };
+        let sh = if mc == 0 { 1.0 } else if m == 0 || self.spell_only { 0.0 } else { let (a, b) = self.smix[lb]; a / (a + b) };
         let mut pall = [0.0f64; 256];
         for x in 0..256 {
             pall[x] = sh * pd[x] + (1.0 - sh) * pdc[x];
