@@ -1,6 +1,6 @@
 # 67 · A reader of spellings (2026-11-02)
 
-*[All experiments](README.md)* · [← 66](66-real-files-real-manuals.md)
+*[All experiments](README.md)* · [← 66](66-real-files-real-manuals.md) · [68 →](68-practice-like-the-target.md)
 
 **The question:** in experiment 66 the description expert read a note written in hex (`magic 89 50 4e 47`) on real formats, but not the formats' real manual entries. There the magic is spelled inside a token, as in `\x89PNG\x0d\x0a` or `\037\213`. If the expert can also read the characters inside a token, will it read those entries? And how much does practice on experiment 60's made-up formats matter?
 
