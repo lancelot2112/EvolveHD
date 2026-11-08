@@ -223,6 +223,10 @@ pub struct Spell {
     pos: Vec<([[u8; 4]; 3], [u32; 3], (u64, u8))>,
     belief: Vec<f64>,
     prev_arg: usize,
+    /// a new piece's prior count per byte, and the credit below which a piece is a novice (env SPELL_PRIOR,
+    /// SPELL_NOV; defaults 0.05 and 1)
+    prior: f32,
+    nov: f32,
 }
 
 const SPELL_MAX: usize = 512;
@@ -232,7 +236,9 @@ impl Spell {
     pub fn new() -> Self {
         let mut jumps = [1.0; 25];
         jumps[17] += 4.0;
-        Spell { vocab: Default::default(), emit: vec![], rows: vec![], cred: vec![], share: [[1.0; 2]; 3], jumps, sctx: Default::default(), pos: vec![], belief: vec![], prev_arg: 0 }
+        Spell { vocab: Default::default(), emit: vec![], rows: vec![], cred: vec![], share: [[1.0; 2]; 3], jumps, sctx: Default::default(), pos: vec![], belief: vec![], prev_arg: 0,
+            prior: std::env::var("SPELL_PRIOR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.05),
+            nov: std::env::var("SPELL_NOV").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
     }
     fn hash(x: &[u8]) -> u64 {
         let mut v: u64 = 0xcbf29ce484222325;
@@ -312,7 +318,7 @@ impl Spell {
     fn shares(&self, ids: &[u32; 3]) -> [f64; 3] {
         let mut a = [0.0; 3];
         for n in 0..3 {
-            let nov = if ids[n] == u32::MAX || self.cred[ids[n] as usize] < 1.0 { 1 } else { 0 };
+            let nov = if ids[n] == u32::MAX || self.cred[ids[n] as usize] < self.nov { 1 } else { 0 };
             a[n] = self.share[n][nov];
         }
         let s: f64 = a.iter().sum();
@@ -382,7 +388,7 @@ impl Spell {
             let vs: f64 = v.iter().sum();
             for n in 0..3 {
                 let resp = v[n] / vs.max(1e-300);
-                let nov = if ids[n] == u32::MAX || self.cred[ids[n] as usize] < 1.0 { 1 } else { 0 };
+                let nov = if ids[n] == u32::MAX || self.cred[ids[n] as usize] < self.nov { 1 } else { 0 };
                 self.share[n][nov] += c * resp;
                 let cc = c * resp;
                 if cc > 1e-3 {
@@ -393,8 +399,8 @@ impl Spell {
                         }
                         id = self.emit.len() as u32;
                         self.vocab.insert(self.pos[i].0[n], id);
-                        self.emit.push([0.05; 256]);
-                        self.rows.push(0.05 * 256.0);
+                        self.emit.push([self.prior; 256]);
+                        self.rows.push(self.prior * 256.0);
                         self.cred.push(0.0);
                         // every position with this key now has it
                         let key = self.pos[i].0[n];
