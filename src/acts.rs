@@ -227,6 +227,7 @@ pub struct Spell {
     /// SPELL_NOV; defaults 0.05 and 1)
     prior: f32,
     nov: f32,
+    alone: bool,
 }
 
 const SPELL_MAX: usize = 512;
@@ -238,7 +239,7 @@ impl Spell {
         jumps[17] += 4.0;
         Spell { vocab: Default::default(), emit: vec![], rows: vec![], cred: vec![], share: [[1.0; 2]; 3], jumps, sctx: Default::default(), pos: vec![], belief: vec![], prev_arg: 0,
             prior: std::env::var("SPELL_PRIOR").ok().and_then(|v| v.parse().ok()).unwrap_or(0.05),
-            nov: std::env::var("SPELL_NOV").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0) }
+            nov: std::env::var("SPELL_NOV").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0), alone: std::env::var("SPELL_ALONE").is_ok() }
     }
     fn hash(x: &[u8]) -> u64 {
         let mut v: u64 = 0xcbf29ce484222325;
@@ -305,7 +306,8 @@ impl Spell {
             if b < 1e-12 {
                 continue;
             }
-            let lo = (i as isize - 16).max(0) as usize;
+            let lo = if std::env::var("SPELL_FWD").is_ok() { i + 1 } else { (i as isize - 16).max(0) as usize };
+            if lo > i + 8 || lo >= m { continue; }
             let hi = (i + 8).min(m - 1);
             for j in lo..=hi {
                 nb[j] += jumps[j + 16 - i] / jt * b;
@@ -313,6 +315,27 @@ impl Spell {
         }
         let s: f64 = nb.iter().sum();
         if s > 0.0 { nb.iter().map(|x| x / s).collect() } else { vec![1.0 / m as f64; m] }
+    }
+    /// Diagnostic: the learned jumps, the strongest start contexts, the piece-length shares, and for each given key
+    /// its top bytes.
+    pub fn debug_dump(&self, keys: &[[u8; 4]]) {
+        let jt: f64 = self.jumps.iter().sum();
+        println!("jumps (-16..+8): {}", self.jumps.iter().map(|x| format!("{:.2}", x / jt)).collect::<Vec<_>>().join(" "));
+        let mut sc: Vec<_> = self.sctx.iter().collect();
+        sc.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+        println!("start contexts: {} kept; top: {:?}", sc.len(), sc.iter().take(6).map(|(k, v)| (k.1, format!("{:.1}", v))).collect::<Vec<_>>());
+        println!("shares [len][novice]: {:?}; pieces {}", self.share, self.emit.len());
+        for k in keys {
+            match self.vocab.get(k) {
+                Some(&id) => {
+                    let e = &self.emit[id as usize];
+                    let mut ix: Vec<usize> = (0..256).collect();
+                    ix.sort_by(|&a, &b| e[b].partial_cmp(&e[a]).unwrap());
+                    println!("piece {:?}: cred {:.2} row {:.2} top {:?}", k, self.cred[id as usize], self.rows[id as usize], ix.iter().take(4).map(|&i| (format!("{i:02x}"), format!("{:.3}", e[i] / self.rows[id as usize]))).collect::<Vec<_>>());
+                }
+                None => println!("piece {:?}: none", k),
+            }
+        }
     }
     /// Shares of the three pieces at a position (normalised).
     fn shares(&self, ids: &[u32; 3]) -> [f64; 3] {
@@ -390,7 +413,9 @@ impl Spell {
                 let resp = v[n] / vs.max(1e-300);
                 let nov = if ids[n] == u32::MAX || self.cred[ids[n] as usize] < self.nov { 1 } else { 0 };
                 self.share[n][nov] += c * resp;
-                let cc = c * resp;
+                // SPELL_ALONE: each piece learns from the position's whole credit, as if it were alone (the share
+                // between lengths still learns from the responsibilities)
+                let cc = if self.alone { c } else { c * resp };
                 if cc > 1e-3 {
                     let mut id = ids[n];
                     if id == u32::MAX {
@@ -443,13 +468,45 @@ impl DescExpert {
         DescExpert { vocab: Default::default(), emit: vec![], jumps, start: [1.0; 64], bg: [1.0; 256], lam: [(1.0, 1.0); 9], toks: vec![], belief: vec![], prev_arg: 0, seg: usize::MAX, off: 0, conf: 0.0, mw: vec![[1.0 / 3.0; 3]; 9 * 4], spell: None, smix: [(1.0, 1.0); 9], spell_only: std::env::var("SPELL_ONLY").is_ok() }
     }
     /// A new file starts at byte a; the bytes from p (the previous file's start) to a are its description.
+    /// Diagnostic (env TOKSPLIT): an oracle cut of a token into escape units, as libmagic writes them: each
+    /// backslash escape (\xHH, \ooo, \c) its own unit, and the runs of other characters between them.
+    fn units(w: &[u8]) -> Vec<&[u8]> {
+        if std::env::var("TOKSPLIT").is_err() {
+            return vec![w];
+        }
+        let mut v = vec![];
+        let (mut i, mut a) = (0, 0);
+        while i < w.len() {
+            if w[i] == b'\\' && i + 1 < w.len() {
+                if a < i {
+                    v.push(&w[a..i]);
+                }
+                let mut e = i + 2;
+                if w[i + 1] == b'x' {
+                    while e < w.len() && e < i + 4 && w[e].is_ascii_hexdigit() { e += 1; }
+                } else if (b'0'..=b'7').contains(&w[i + 1]) {
+                    while e < w.len() && e < i + 4 && (b'0'..=b'7').contains(&w[e]) { e += 1; }
+                }
+                v.push(&w[i..e]);
+                i = e;
+                a = e;
+            } else {
+                i += 1;
+            }
+        }
+        if a < w.len() {
+            v.push(&w[a..]);
+        }
+        v
+    }
     fn begin(&mut self, data: &[u8], p: usize, a: usize) {
         self.toks.clear();
-        for w in data[p..a].split(|&b| b == b' ' || b == b'\n' || b == b'\t' || b == b'\r') {
-            let mut w = w;
-            while let Some((&l, rest)) = w.split_last() {
-                if l == b'.' || l == b',' || l == b':' { w = rest } else { break }
+        for w0 in data[p..a].split(|&b| b == b' ' || b == b'\n' || b == b'\t' || b == b'\r') {
+            let mut w0 = w0;
+            while let Some((&l, rest)) = w0.split_last() {
+                if l == b'.' || l == b',' || l == b':' { w0 = rest } else { break }
             }
+          for w in Self::units(w0) {
             if w.is_empty() || w.len() > 32 {
                 continue;
             }
@@ -459,6 +516,10 @@ impl DescExpert {
                 self.emit.push([0.05; 256]);
             }
             self.toks.push(id);
+            if self.toks.len() == 64 {
+                break;
+            }
+          }
             if self.toks.len() == 64 {
                 break;
             }
@@ -479,8 +540,13 @@ impl DescExpert {
             while let Some((&l, rest)) = w.split_last() {
                 if l == b'.' || l == b',' || l == b':' { w = rest } else { break }
             }
-            if let Some(&id) = self.vocab.get(w) {
-                v.push(id);
+            for u in Self::units(w) {
+                if let Some(&id) = self.vocab.get(u) {
+                    v.push(id);
+                }
+                if v.len() == 64 {
+                    break;
+                }
             }
             if v.len() == 64 {
                 break;
@@ -674,7 +740,10 @@ impl DescExpert {
             self.belief = post.iter().zip(&self.belief).map(|(p, b)| rt * p + (1.0 - rt) * b).collect();
         }
         if mc > 0 {
-            self.spell.as_mut().unwrap().learn(y, k, rc, r, lr);
+            // SPELL_R (diagnostic): credit the spelling view by the description's responsibility in the mixture
+            // (its excess over the background) rather than its own as-if-alone share
+            let rcl = if std::env::var("SPELL_R").is_ok() { r * (1.0 - sh) * pdc[y] / (sh * pd[y] + (1.0 - sh) * pdc[y]).max(1e-300) } else { rc };
+            self.spell.as_mut().unwrap().learn(y, k, rcl, r, lr);
         }
         pb
     }
