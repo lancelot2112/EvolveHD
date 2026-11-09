@@ -1,6 +1,6 @@
 # 68 · Practice that looks like the target (2026-11-08)
 
-*[All experiments](README.md)* · [← 67](67-reader-of-spellings.md)
+*[All experiments](README.md)* · [← 67](67-reader-of-spellings.md) · [69 →](69-learned-cut.md)
 
 **The question:** in experiment 67 the expert read the practice notes (`magic f1 c2 6b`) but not the real libmagic entries (`0 string \xf1\xc2\x6b`). Two things differ between them: where the bytes sit in the word (each its own word, or packed inside one word), and the word before the magic (`magic` or `string`). Which one stops the reading? And once that is known, can the expert read the real entries?
 
