@@ -18,7 +18,8 @@ fn main() {
         let g = |k: &str| -> String { let i = it.find(&format!("\"{k}\": ")).unwrap() + k.len() + 4; it[i..].split(|c| c == ',' || c == '}').next().unwrap().trim().trim_matches('"').to_string() };
         let st: usize = g("start").parse().unwrap();
         let ml: usize = it[it.find("\"fields\": [[").unwrap() + 12..].split(',').nth(1).unwrap().trim().parse().unwrap();
-        info.insert(st, (g("cond"), ml));
+        let fm: usize = it.trim_start_matches(|c: char| c == ':' || c == ' ').split(|c: char| !c.is_ascii_digit()).next().unwrap().parse().unwrap_or(0);
+        info.insert(st, (g("cond"), ml, fm % 2));
     }
     let mut de = DescExpert::new();
     if spell {
@@ -26,6 +27,7 @@ fn main() {
     }
     let n = starts.len();
     let mut acc = vec![[(0.0f64, 0usize); 2]; 4];
+    let mut par = vec![[(0.0f64, 0usize); 2]; 2]; // last quarter by format parity (even, odd)
     for (i, &s) in starts.iter().enumerate() {
         if descs.binary_search(&s).is_ok() {
             continue;
@@ -35,11 +37,15 @@ fn main() {
         let q = 4 * i / n;
         for t in s..e {
             let pr = de.code(&data, t, s, prev);
-            if let Some((c, ml)) = info.get(&s) {
+            if let Some((c, ml, fp)) = info.get(&s) {
                 if t - s < *ml && prev.is_some() {
                     let ci = if c == "R" { 0 } else { 1 };
                     acc[q][ci].0 += -pr.log2();
                     acc[q][ci].1 += 1;
+                    if q == 3 {
+                        par[*fp][ci].0 += -pr.log2();
+                        par[*fp][ci].1 += 1;
+                    }
                 }
             }
         }
@@ -48,6 +54,9 @@ fn main() {
         let r = acc[q][0].0 / acc[q][0].1 as f64;
         let w = acc[q][1].0 / acc[q][1].1 as f64;
         print!("q{q} R {r:.2} W {w:.2} R-W {:+.2} | ", r - w);
+    }
+    for (k, nm) in ["even", "odd"].iter().enumerate() {
+        print!("q3 {nm} R-W {:+.2} | ", par[k][0].0 / par[k][0].1 as f64 - par[k][1].0 / par[k][1].1 as f64);
     }
     println!();
     if let (Some(sp), Ok(k)) = (de.spell.as_ref(), std::env::var("KEYS")) {

@@ -204,6 +204,84 @@ pub struct DescExpert {
     smix: [(f64, f64); 9],
     /// diagnostic (env SPELL_ONLY): predict from the spelling view alone (the token view still learns)
     spell_only: bool,
+    /// env CUT=threshold: cut words into units where learned branching entropy rises (see `Cutter`)
+    pub cutter: Option<Cutter>,
+}
+
+/// Cuts words into units from the descriptions' own character statistics (branching entropy, after Harris and
+/// Tanaka-Ishii). It counts, for every substring of 1..=K characters inside a word (the word padded with byte 1 at
+/// both ends), the characters that follow it and the characters that precede it. Inside a unit, the next character
+/// gets more predictable as the string grows; where a unit ends, it gets less predictable. So at each gap of a word,
+/// for k = 2..=K, it adds how much the successor entropy of the k characters before the gap exceeds that of the k - 1
+/// characters before them (the same string, one shorter), and likewise how much the predecessor entropy of the k
+/// characters after the gap exceeds that of the k - 1 after them. It cuts where that sum is above `th` bits.
+/// Substrings seen fewer than `minc` times give no evidence. Counts grow from every description the expert reads,
+/// after it is cut (so a description is cut with what was learned before it). Nothing is told about escapes.
+pub struct Cutter {
+    k: usize,
+    minc: u32,
+    th: f64,
+    fwd: std::collections::HashMap<Vec<u8>, std::collections::HashMap<u8, u32>>,
+    bwd: std::collections::HashMap<Vec<u8>, std::collections::HashMap<u8, u32>>,
+}
+
+impl Cutter {
+    pub fn new(th: f64, k: usize, minc: u32) -> Self {
+        Cutter { k, minc, th, fwd: Default::default(), bwd: Default::default() }
+    }
+    fn pad(w: &[u8]) -> Vec<u8> {
+        let mut x = Vec::with_capacity(w.len() + 2);
+        x.push(1);
+        x.extend_from_slice(w);
+        x.push(1);
+        x
+    }
+    pub fn learn(&mut self, w: &[u8]) {
+        let x = Self::pad(w);
+        for i in 0..x.len() {
+            for k in 1..=self.k {
+                if i >= k {
+                    *self.fwd.entry(x[i - k..i].to_vec()).or_default().entry(x[i]).or_insert(0) += 1;
+                }
+                if i + k < x.len() {
+                    *self.bwd.entry(x[i + 1..i + 1 + k].to_vec()).or_default().entry(x[i]).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    fn h(&self, tab: &std::collections::HashMap<Vec<u8>, std::collections::HashMap<u8, u32>>, key: &[u8]) -> Option<f64> {
+        let c = tab.get(key)?;
+        let n: u32 = c.values().sum();
+        if n < self.minc {
+            return None;
+        }
+        let n = n as f64;
+        Some(c.values().map(|&v| { let p = v as f64 / n; -p * p.log2() }).sum())
+    }
+    /// The cut points of a word, as offsets into it (each in 1..len).
+    pub fn cuts(&self, w: &[u8]) -> Vec<usize> {
+        let x = Self::pad(w);
+        let mut out = vec![];
+        for g in 2..x.len().saturating_sub(1) {
+            let mut sc = 0.0;
+            for k in 2..=self.k {
+                if g >= k {
+                    if let (Some(a), Some(c)) = (self.h(&self.fwd, &x[g - k..g]), self.h(&self.fwd, &x[g - k..g - 1])) {
+                        sc += (a - c).max(0.0);
+                    }
+                }
+                if g + k <= x.len() {
+                    if let (Some(a), Some(c)) = (self.h(&self.bwd, &x[g..g + k]), self.h(&self.bwd, &x[g + 1..g + k])) {
+                        sc += (a - c).max(0.0);
+                    }
+                }
+            }
+            if sc > self.th {
+                out.push(g - 1);
+            }
+        }
+        out
+    }
 }
 
 /// --desc-spell: a second view of the description, by spelling. Its positions are the characters of the tokens (at
@@ -465,12 +543,24 @@ impl DescExpert {
     pub fn new() -> Self {
         let mut jumps = [1.0; 25];
         jumps[17] += 4.0; // a mild prior for reading on by one token (index 16 is a jump of 0)
-        DescExpert { vocab: Default::default(), emit: vec![], jumps, start: [1.0; 64], bg: [1.0; 256], lam: [(1.0, 1.0); 9], toks: vec![], belief: vec![], prev_arg: 0, seg: usize::MAX, off: 0, conf: 0.0, mw: vec![[1.0 / 3.0; 3]; 9 * 4], spell: None, smix: [(1.0, 1.0); 9], spell_only: std::env::var("SPELL_ONLY").is_ok() }
+        DescExpert { vocab: Default::default(), emit: vec![], jumps, start: [1.0; 64], bg: [1.0; 256], lam: [(1.0, 1.0); 9], toks: vec![], belief: vec![], prev_arg: 0, seg: usize::MAX, off: 0, conf: 0.0, mw: vec![[1.0 / 3.0; 3]; 9 * 4], spell: None, smix: [(1.0, 1.0); 9], spell_only: std::env::var("SPELL_ONLY").is_ok(),
+            cutter: std::env::var("CUT").ok().map(|v| Cutter::new(v.parse().expect("CUT=threshold in bits"),
+                std::env::var("CUT_K").map_or(3, |k| k.parse().unwrap()), std::env::var("CUT_MINC").map_or(4, |k| k.parse().unwrap()))) }
     }
     /// A new file starts at byte a; the bytes from p (the previous file's start) to a are its description.
     /// Diagnostic (env TOKSPLIT): an oracle cut of a token into escape units, as libmagic writes them: each
     /// backslash escape (\xHH, \ooo, \c) its own unit, and the runs of other characters between them.
-    fn units(w: &[u8]) -> Vec<&[u8]> {
+    fn units<'a>(&self, w: &'a [u8]) -> Vec<&'a [u8]> {
+        if let Some(cu) = self.cutter.as_ref() {
+            let mut v = vec![];
+            let mut a = 0;
+            for c in cu.cuts(w) {
+                v.push(&w[a..c]);
+                a = c;
+            }
+            v.push(&w[a..]);
+            return v;
+        }
         if std::env::var("TOKSPLIT").is_err() {
             return vec![w];
         }
@@ -506,7 +596,11 @@ impl DescExpert {
             while let Some((&l, rest)) = w0.split_last() {
                 if l == b'.' || l == b',' || l == b':' { w0 = rest } else { break }
             }
-          for w in Self::units(w0) {
+          let us: Vec<Vec<u8>> = self.units(w0).into_iter().map(|u| u.to_vec()).collect();
+          if self.cutter.is_some() && w0.contains(&b'\\') && std::env::var("CUT_SHOW").is_ok() {
+              eprintln!("CUT {}", us.iter().map(|u| String::from_utf8_lossy(u).to_string()).collect::<Vec<_>>().join("|"));
+          }
+          for w in us.iter() {
             if w.is_empty() || w.len() > 32 {
                 continue;
             }
@@ -522,6 +616,17 @@ impl DescExpert {
           }
             if self.toks.len() == 64 {
                 break;
+            }
+        }
+        if let Some(cu) = self.cutter.as_mut() {
+            for w in data[p..a].split(|&b| b == b' ' || b == b'\n' || b == b'\t' || b == b'\r') {
+                let mut w = w;
+                while let Some((&l, rest)) = w.split_last() {
+                    if l == b'.' || l == b',' || l == b':' { w = rest } else { break }
+                }
+                if !w.is_empty() {
+                    cu.learn(w);
+                }
             }
         }
         let m = self.toks.len();
@@ -540,7 +645,7 @@ impl DescExpert {
             while let Some((&l, rest)) = w.split_last() {
                 if l == b'.' || l == b',' || l == b':' { w = rest } else { break }
             }
-            for u in Self::units(w) {
+            for u in self.units(w) {
                 if let Some(&id) = self.vocab.get(u) {
                     v.push(id);
                 }
